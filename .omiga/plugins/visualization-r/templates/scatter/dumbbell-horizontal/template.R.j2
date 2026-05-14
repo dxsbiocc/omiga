@@ -1,0 +1,170 @@
+#!/usr/bin/env Rscript
+# Template: scatter/dumbbell-horizontal
+# Purpose: Horizontal dumbbell comparison plot for two groups across ordered categories.
+#
+# Migration note:
+#   This template directly implements the high-quality OmicsAgent
+#   scatter/dumbbell_horizontal visual without carrying forward the
+#   private JSON ggplot2 DSL runtime.
+#
+# Input example:
+#   See example.tsv, converted from OmicsAgent data.json.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/dumbbell-horizontal
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  raw <- arg_or(index, as.character(default))
+  if (tolower(raw) == "auto") return(default)
+  value <- suppressWarnings(as.numeric(raw))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_optional_number_arg <- function(index) {
+  raw <- arg_or(index, "auto")
+  if (!nzchar(raw) || tolower(raw) == "auto") return(NULL)
+  value <- suppressWarnings(as.numeric(raw))
+  if (is.na(value)) NULL else value
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "age_group"),
+    value = arg_or(4, "mean_prev"),
+    group = arg_or(5, "Sex")
+  ),
+  labels = list(
+    title = arg_or(6, "Mean Prevalence of obesity"),
+    x = arg_or(7, ""),
+    y = arg_or(8, "")
+  ),
+  style = list(
+    group1_color = arg_or(9, "#79ceb8"),
+    group2_color = arg_or(10, "#f784b6"),
+    connector_color = arg_or(11, "#cba7a2"),
+    outer_fill = arg_or(12, "#ffffff"),
+    point_size_outer = parse_number_arg(13, 5),
+    point_size_inner = parse_number_arg(14, 3),
+    label_size = parse_number_arg(15, 3.6),
+    legend_label_size = parse_number_arg(16, 5),
+    text_hjust_offset = parse_number_arg(17, 0.2),
+    base_size = parse_number_arg(18, 12)
+  ),
+  axis = list(
+    xmin = parse_optional_number_arg(19),
+    xmax = parse_optional_number_arg(20)
+  )
+)
+delimiter <- arg_or(21, "auto")
+width <- parse_number_arg(22, 8)
+height <- parse_number_arg(23, 6)
+dpi <- parse_integer_arg(24, 300)
+
+format_percent_label <- function(x, accuracy = 0.1) {
+  digits <- max(0, ceiling(-log10(accuracy)))
+  paste0(formatC(round(x * 100 / accuracy) * accuracy, format = "f", digits = digits), "%")
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$category, config$columns$value, config$columns$group), "scatter/dumbbell-horizontal input")
+  df <- ensure_numeric_columns(df, config$columns$value, "scatter/dumbbell-horizontal input")
+  categories <- unique(as.character(df[[config$columns$category]]))
+  groups <- unique(as.character(df[[config$columns$group]]))
+  if (length(groups) != 2) {
+    stop("scatter/dumbbell-horizontal requires exactly two groups in the group column.", call. = FALSE)
+  }
+  counts <- table(df[[config$columns$category]], df[[config$columns$group]])
+  if (any(counts != 1)) {
+    stop("scatter/dumbbell-horizontal expects one value per category/group pair.", call. = FALSE)
+  }
+  df$.category <- factor(as.character(df[[config$columns$category]]), levels = categories)
+  df$.value <- df[[config$columns$value]]
+  df$.group <- factor(as.character(df[[config$columns$group]]), levels = groups)
+  df$.label <- format_percent_label(df$.value, 0.1)
+  df$.hjust <- ifelse(df$.group == groups[[1]], 1 + config$style$text_hjust_offset, -config$style$text_hjust_offset)
+  df
+}
+
+x_limits <- function(df, config) {
+  xmin <- config$axis$xmin
+  xmax <- config$axis$xmax
+  if (is.null(xmin) || is.null(xmax)) {
+    value_range <- range(df$.value, na.rm = TRUE)
+    pad <- diff(value_range) * 0.16
+    if (!is.finite(pad) || pad == 0) pad <- max(abs(value_range), 1, na.rm = TRUE) * 0.08
+    if (is.null(xmin)) xmin <- value_range[[1]] - pad
+    if (is.null(xmax)) xmax <- value_range[[2]] + pad
+  }
+  c(xmin, xmax)
+}
+
+dumbbell_theme <- function(config) {
+  if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+}
+
+make_plot <- function(df, config) {
+  groups <- levels(df$.group)
+  palette <- stats::setNames(c(config$style$group1_color, config$style$group2_color), groups)
+  limits <- x_limits(df, config)
+  annotation_y <- length(levels(df$.category)) + 1
+  annotation_label_y <- length(levels(df$.category)) + 1.55
+
+  ggplot2::ggplot(df, ggplot2::aes(x = .value, y = .category, colour = .group)) +
+    ggplot2::geom_line(ggplot2::aes(group = .category), colour = config$style$connector_color, linewidth = 0.9) +
+    ggplot2::geom_point(shape = 21, size = config$style$point_size_outer, fill = config$style$outer_fill, stroke = 0.9) +
+    ggplot2::geom_point(size = config$style$point_size_inner) +
+    ggplot2::geom_text(ggplot2::aes(label = .label, hjust = .hjust), size = config$style$label_size, show.legend = FALSE) +
+    ggplot2::annotate("segment", x = limits[[1]], xend = limits[[2]], y = annotation_y, yend = annotation_y, linewidth = 1.2) +
+    ggplot2::annotate("text", x = limits[[1]], y = annotation_label_y, label = groups[[1]], colour = palette[[groups[[1]]]], hjust = 0, size = config$style$legend_label_size) +
+    ggplot2::annotate("text", x = limits[[2]], y = annotation_label_y, label = groups[[2]], colour = palette[[groups[[2]]]], hjust = 1, size = config$style$legend_label_size) +
+    ggplot2::scale_colour_manual(values = palette, guide = "none") +
+    ggplot2::scale_x_continuous(limits = limits) +
+    ggplot2::scale_y_discrete(expand = ggplot2::expansion(mult = c(0.10, 0.16))) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    dumbbell_theme(config) +
+    ggplot2::theme(
+      axis.title = ggplot2::element_blank(),
+      axis.line = ggplot2::element_blank(),
+      axis.ticks = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_blank(),
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.grid = ggplot2::element_blank(),
+      legend.position = "none"
+    )
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows", "categories"), value = c("scatter/dumbbell-horizontal", nrow(plot_df), length(levels(plot_df$.category)))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "scatter/dumbbell-horizontal", rows = nrow(plot_df), categories = length(levels(plot_df$.category))))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

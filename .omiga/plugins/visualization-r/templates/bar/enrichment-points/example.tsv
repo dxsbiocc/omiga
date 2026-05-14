@@ -1,0 +1,41 @@
+Description	ONTOLOGY	GeneRatio	qvalue
+RNA splicing	BP	0.059	3.9556e-12
+endosomal transport	BP	0.041	3.9564e-11
+regulation of DNA repair	BP	0.037	1.4965e-12
+RNA localization	BP	0.036	1.0838e-13
+stem cell population maintenance	BP	0.033	1.0203e-12
+maintenance of cell number	BP	0.033	1.4965e-12
+establishment of RNA localization	BP	0.029	1.9031e-11
+nucleic acid transport	BP	0.028	1.1058e-10
+DNA-templated transcription elongation	BP	0.026	6.6326e-12
+transcription elongation by RNA polymerase II	BP	0.024	2.9477e-11
+nuclear speck	CC	0.056	9.6893e-17
+chromosomal region	CC	0.046	2.3136e-10
+ribonucleoprotein granule	CC	0.039	9.4311e-13
+cytoplasmic ribonucleoprotein granule	CC	0.038	3.9642e-13
+protein acetyltransferase complex	CC	0.024	8.0914e-15
+acetyltransferase complex	CC	0.024	8.0914e-15
+histone acetyltransferase complex	CC	0.022	1.8848e-13
+cytoplasmic stress granule	CC	0.02	3.2727e-12
+histone deacetylase complex	CC	0.019	9.246e-12
+SWI/SNF superfamily-type complex	CC	0.019	9.5488e-11
+histone modifying activity	MF	0.064	1.2431e-19
+ubiquitin-like protein transferase activity	MF	0.063	8.787e-16
+aminoacyltransferase activity	MF	0.063	3.0364e-15
+ubiquitin-protein transferase activity	MF	0.058	2.9437e-14
+DNA-binding transcription factor binding	MF	0.055	1.3515e-10
+transcription coactivator activity	MF	0.047	6.9504e-18
+GTPase binding	MF	0.044	2.3139e-12
+histone binding	MF	0.038	5.3768e-13
+small GTPase binding	MF	0.038	6.4455e-10
+helicase activity	MF	0.026	5.7383e-10
+Endocytosis	KEGG	0.072	1.3159e-08
+Ubiquitin mediated proteolysis	KEGG	0.052	5.2508e-09
+ATP-dependent chromatin remodeling	KEGG	0.039	5.8043e-06
+Nucleocytoplasmic transport	KEGG	0.037	4.5692e-06
+Neurotrophin signaling pathway	KEGG	0.037	0
+TGF-beta signaling pathway	KEGG	0.033	0.0001
+Polycomb repressive complex	KEGG	0.029	0
+Adherens junction	KEGG	0.029	0.0001
+ErbB signaling pathway	KEGG	0.028	0.0001
+Inositol phosphate metabolism	KEGG	0.025	0.0001

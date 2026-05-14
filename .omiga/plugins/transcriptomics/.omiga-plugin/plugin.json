@@ -1,0 +1,30 @@
+{
+  "name": "transcriptomics",
+  "version": "0.1.0",
+  "description": "Transcriptomics analysis templates for differential expression, PCA, and functional enrichment.",
+  "templates": "./templates",
+  "environments": "./environments",
+  "changelog": "./CHANGELOG.md",
+  "interface": {
+    "displayName": "Transcriptomics",
+    "shortDescription": "Differential expression, PCA, and enrichment analysis",
+    "longDescription": "Bundles transcriptomics analysis templates as independently searchable and executable atomic units. Includes R/Bioconductor-backed differential expression, PCA, and functional enrichment workflows; future Python scripts can live in the same plugin when they expose separate template manifests.",
+    "developerName": "Omiga",
+    "category": "Analysis",
+    "capabilities": [
+      "Analysis",
+      "Transcriptomics",
+      "Differential Expression",
+      "PCA",
+      "Functional Enrichment",
+      "Rscript",
+      "Bioconductor",
+      "Local Execution",
+      "Template"
+    ],
+    "brandColor": "#0F766E",
+    "defaultPrompt": [
+      "Use Transcriptomics to choose and run a differential expression, PCA, or enrichment template."
+    ]
+  }
+}

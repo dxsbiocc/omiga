@@ -1,0 +1,85 @@
+#!/usr/bin/env Rscript
+# Template: scatter/pca-score
+# Purpose: PCA score scatter plot from sample-by-feature tables.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/pca-score
+#
+# Personalization:
+#   Edit the emitted source when customization is needed.
+#   To save a reusable style, use scripts/promote_visual_template.py.
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+
+config <- list(
+  columns = list(sample = arg_or(3, "sample"), group = arg_or(4, "group"), features = arg_or(5, "auto")),
+  labels = list(title = arg_or(6, "PCA score plot")),
+  style = list(point_size = 3.0, label_size = 3.0, base_size = 12)
+)
+delimiter <- arg_or(7, "auto"); width <- as.numeric(arg_or(8, "7")); height <- as.numeric(arg_or(9, "5")); dpi <- as.integer(arg_or(10, "300"))
+
+select_feature_columns <- function(df, config) {
+  raw <- trimws(config$columns$features)
+  if (!identical(tolower(raw), "auto") && nzchar(raw)) return(trimws(strsplit(raw, ",", fixed = TRUE)[[1]]))
+  excluded <- c(config$columns$sample, config$columns$group)
+  candidates <- setdiff(colnames(df), excluded)
+  numeric <- candidates[vapply(df[candidates], function(x) all(!is.na(suppressWarnings(as.numeric(x)))), logical(1))]
+  numeric
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$sample), "scatter/pca-score input")
+  group_col <- resolve_optional_column(df, config$columns$group)
+  feature_cols <- select_feature_columns(df, config)
+  if (length(feature_cols) < 2) stop("scatter/pca-score input needs at least two numeric feature columns", call. = FALSE)
+  validate_columns(df, feature_cols, "scatter/pca-score input")
+  df <- ensure_numeric_columns(df, feature_cols, "scatter/pca-score input")
+  matrix <- as.matrix(df[feature_cols])
+  rownames(matrix) <- df[[config$columns$sample]]
+  pca <- stats::prcomp(matrix, center = TRUE, scale. = TRUE)
+  scores <- as.data.frame(pca$x[, 1:2, drop = FALSE])
+  scores$.sample <- df[[config$columns$sample]]
+  scores$.group <- if (!is.null(group_col)) df[[group_col]] else "sample"
+  variance <- (pca$sdev ^ 2) / sum(pca$sdev ^ 2)
+  list(scores = scores, variance = variance, features = feature_cols)
+}
+
+make_plot <- function(prepared, config) {
+  ggplot2::ggplot(prepared$scores, ggplot2::aes(x = PC1, y = PC2, color = .group, label = .sample)) +
+    ggplot2::geom_point(size = config$style$point_size, alpha = 0.86) +
+    ggplot2::geom_text(vjust = -0.8, size = config$style$label_size, show.legend = FALSE) +
+    ggplot2::labs(title = config$labels$title, x = sprintf("PC1 (%.1f%%)", prepared$variance[[1]] * 100), y = sprintf("PC2 (%.1f%%)", prepared$variance[[2]] * 100), color = config$columns$group) +
+    theme_visualization(base_size = config$style$base_size)
+}
+
+customize_plot <- function(p, prepared, config) p
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(prepared$scores, file.path(outdir, "scores.tsv"))
+  write_tsv(data.frame(metric = c("template", "samples", "features"), value = c("scatter/pca-score", nrow(prepared$scores), length(prepared$features))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "scatter/pca-score", samples = nrow(prepared$scores), features = length(prepared$features)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+
+main()

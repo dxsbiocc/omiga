@@ -1,0 +1,22 @@
+{
+  "name": "computer-use",
+  "version": "0.2.0",
+  "description": "Local macOS Computer Use automation with explicit user control.",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Computer Use",
+    "shortDescription": "Adds gated local computer observation and input automation tools.",
+    "longDescription": "Provides the optional macOS backend for Omiga's first-class computer_* tools. Omiga core remains responsible for permission, audit, target validation, and stop handling.",
+    "developerName": "Omiga",
+    "category": "Automation",
+    "capabilities": [
+      "computer.observe",
+      "computer.input",
+      "computer.accessibility"
+    ],
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Enable Computer Use for this task, observe the current Omiga window, and report what actions are safe to take."
+    ]
+  }
+}

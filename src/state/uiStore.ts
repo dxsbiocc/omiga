@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import {
   LAYOUT_LEFT_MAX,
   LAYOUT_LEFT_MIN,
@@ -7,13 +7,14 @@ import {
   LAYOUT_RIGHT_MAX,
   LAYOUT_RIGHT_MIN,
 } from "./constants";
+import { safeLocalStorage } from "../utils/browserStorage";
 
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
 export interface UiState {
-  /** Settings sidebar index — see `Settings/index.tsx` SETTINGS_SECTIONS (0–14) */
+  /** Settings sidebar index — see `Settings/index.tsx` SETTINGS_SECTIONS (0–15) */
   settingsTabIndex: number;
   setSettingsTabIndex: (index: number) => void;
   /** When sidebar tab is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
@@ -131,6 +132,7 @@ export const useUiStore = create<UiState>()(
     }),
     {
       name: "omiga-ui",
+      storage: createJSONStorage(() => safeLocalStorage),
       partialize: (s) => ({
         leftPanelWidth: s.leftPanelWidth,
         rightPanelWidth: s.rightPanelWidth,

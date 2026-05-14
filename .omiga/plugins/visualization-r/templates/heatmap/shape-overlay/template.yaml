@@ -1,0 +1,173 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_heatmap_shape_overlay
+  version: 0.1.0
+  name: Shape Heatmap
+  description: Correlation heatmap migrated from OmicsAgent heatmap/shape with star/shape markers overlaid on a lower-triangle correlation matrix.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - heatmap
+  - correlation
+  - shape-overlay
+classification:
+  category: visualization/heatmap
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - heatmap
+  - correlation
+  - shape-overlay
+  stageInput:
+  - numeric_matrix
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Wide numeric CSV/TSV table. See this template's example.tsv converted from OmicsAgent data.json.
+  params:
+    feature_column:
+      kind: string
+      default: ''
+      description: Optional row-label column excluded from correlation. Leave empty if all columns are numeric.
+    method:
+      kind: enum
+      enum:
+      - pearson
+      - spearman
+      - kendall
+      default: pearson
+    triangle:
+      kind: enum
+      enum:
+      - lower
+      - upper
+      - full
+      default: lower
+    alpha:
+      kind: number
+      default: 0.05
+    title:
+      kind: string
+      default: ''
+    marker:
+      kind: enum
+      enum:
+      - star
+      - diamond
+      - circle
+      - square
+      - triangle
+      default: star
+    low_color:
+      kind: string
+      default: '#acd372'
+    mid_color:
+      kind: string
+      default: '#ffffffff'
+    high_color:
+      kind: string
+      default: '#ed6ca4'
+    significant_color:
+      kind: string
+      default: black
+    ns_color:
+      kind: string
+      default: grey80
+    base_size:
+      kind: number
+      default: 11
+    min_marker_size:
+      kind: number
+      default: 1.6
+    max_marker_size:
+      kind: number
+      default: 4.2
+    show_values:
+      kind: boolean
+      default: false
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 6
+    height:
+      kind: number
+      default: 5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- shape_overlay_heatmap
+- heatmap_shape
+- linket_shape_heatmap
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.feature_column}
+  - ${params.method}
+  - ${params.triangle}
+  - ${params.alpha}
+  - ${params.title}
+  - ${params.marker}
+  - ${params.low_color}
+  - ${params.mid_color}
+  - ${params.high_color}
+  - ${params.significant_color}
+  - ${params.ns_color}
+  - ${params.base_size}
+  - ${params.min_marker_size}
+  - ${params.max_marker_size}
+  - ${params.show_values}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

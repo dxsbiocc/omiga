@@ -18,6 +18,8 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   /** Integrations — Plugins / MCP / Skills */
   plugins: 4,
   extensions: 4,
+  "computer-use": 4,
+  computer: 4,
   connectors: 14,
   connector: 14,
   apps: 14,

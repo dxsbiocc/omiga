@@ -8,7 +8,11 @@ import {
   operatorImplementationIconSpec,
   operatorPluginIconSpec,
   operatorDisplayName,
+  operatorEnvironmentRef,
   operatorPrimaryAlias,
+  operatorResourceProfile,
+  operatorResourceProfileLabel,
+  operatorResourceProfileSummary,
   operatorRuntimeSummary,
   operatorRunBelongsToOperator,
   operatorRunDiagnosisSummary,
@@ -25,19 +29,36 @@ import {
   operatorRunStatusColor,
   operatorRunTitle,
   operatorSmokeRunArguments,
+  operatorShouldWarnBeforeLocalRun,
   operatorSupportsSmokeRun,
   operatorRunsForOperator,
   operatorToolName,
+  pluginDetailsDialogSx,
+  pluginDetailsTechnicalSectionSx,
   pluginCardSubtitle,
+  pluginContentOverview,
   pluginCatalogGroupId,
+  pluginEnvironmentDisplayName,
+  pluginEnvironmentRuntimeFileLabel,
+  pluginEnvironmentStatusColor,
+  pluginHasRemoteMarketplaceUpdate,
   pluginRuntimeSummary,
   processPoolStatusDiagnostic,
+  remoteMarketplaceChangedPluginNames,
+  remoteMarketplaceCheckSignature,
   retrievalStatusDiagnostic,
+  shouldShowPluginRuntimeSummaryCard,
   unknownRetrievalRuntimePluginIds,
+  visualizationRExecuteSkeletonSx,
+  visualizationRCompletionOverview,
+  visualizationRTemplatePrompt,
+  visualizationRTemplateToolCall,
 } from "./PluginsPanel";
 import type {
   OperatorRunSummary,
   OperatorSummary,
+  MarketplaceRemoteCheckResult,
+  PluginEnvironmentSummary,
   PluginProcessPoolRouteStatus,
   PluginRetrievalRouteStatus,
   PluginSummary,
@@ -49,7 +70,7 @@ function routeStatus(
   return {
     pluginId: "retrieval-dataset-geo@omiga-curated",
     category: "dataset",
-    sourceId: "geo",
+    resourceId: "geo",
     route: "dataset.geo via retrieval-dataset-geo@omiga-curated",
     state: "healthy",
     quarantined: false,
@@ -116,12 +137,162 @@ function operatorRunSummary(
   };
 }
 
+function remoteMarketplaceCheck(
+  overrides: Partial<MarketplaceRemoteCheckResult> = {},
+): MarketplaceRemoteCheckResult {
+  return {
+    name: "omiga-curated",
+    path: "/project/.omiga/plugins/marketplace.json",
+    remote: {
+      url: "https://raw.githubusercontent.com/dxsbiocc/omiga-plugins/main/marketplace.json",
+    },
+    state: "updateAvailable",
+    label: "Remote update available",
+    message: "Remote marketplace differs.",
+    localDigest: "sha256:local",
+    remoteDigest: "sha256:remote",
+    remotePluginCount: 2,
+    changedPlugins: ["alignment", "transcriptomics"],
+    checkedAt: "2026-05-13T00:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("PluginsPanel diagnostics helpers", () => {
-  it("keeps the operator catalog section mounted for manual smoke runs", () => {
+  it("keeps raw tool registry and run diagnostics behind the development diagnostics gate", () => {
     const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
 
+    expect(source).toContain("SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS = import.meta.env.DEV");
+    expect(source).toContain("SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS && (");
     expect(source).toMatch(/<OperatorCatalogSection[\s\S]*onSmokeRun=/);
     expect(source).not.toContain("{false && (\n      <OperatorCatalogSection");
+  });
+
+  it("keeps advanced tool registration behind product-oriented wording", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("Agent tools");
+    expect(source).toContain("Advanced controls for plugin-defined tools");
+    expect(source).toContain("Register to run smoke test");
+    expect(source).not.toContain(">Operators<");
+    expect(source).not.toContain(" exposed`");
+    expect(source).not.toContain("Operators are plugin-defined tools");
+  });
+
+  it("keeps plugin technical content out of the default capability summary", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("Capabilities");
+    expect(source).toContain("pluginContentOverview(plugin, operators)");
+    expect(source).toContain("Runtime environments");
+    expect(source).toContain("SettingsRounded");
+    expect(source).toContain("aria-label={`${configureEnvLabel}: ${pluginEnvironmentDisplayName(environment)}`}");
+    expect(source).toContain("aria-label={`${testEnvLabel}: ${pluginEnvironmentDisplayName(environment)}`}");
+    expect(source).toContain("onEnvironmentToggle(plugin, environment, event.target.checked)");
+    expect(source).toContain("environment edits are only allowed in the user plugin copy");
+    expect(source).toContain("Developer & troubleshooting");
+    expect(source).not.toContain("Route details");
+    expect(source).not.toContain("Operator details");
+    expect(source).not.toContain("<OperatorBundleContentList operators={operators}");
+    expect(source).not.toContain("Included content");
+  });
+
+  it("summarizes remote marketplace updates as durable UI state", () => {
+    const checks = [
+      remoteMarketplaceCheck({ changedPlugins: ["alignment", "transcriptomics", "alignment"] }),
+      remoteMarketplaceCheck({
+        name: "secondary",
+        path: "/secondary.json",
+        changedPlugins: ["r-visualization"],
+      }),
+      remoteMarketplaceCheck({
+        name: "stable",
+        path: "/stable.json",
+        state: "upToDate",
+        changedPlugins: ["ignored"],
+      }),
+    ];
+
+    const changedPlugins = remoteMarketplaceChangedPluginNames(checks);
+
+    expect([...changedPlugins].sort()).toEqual([
+      "alignment",
+      "r-visualization",
+      "transcriptomics",
+    ]);
+    expect(
+      pluginHasRemoteMarketplaceUpdate(
+        pluginSummary({
+          id: "alignment@omiga-curated",
+          name: "alignment",
+        }),
+        changedPlugins,
+      ),
+    ).toBe(true);
+    expect(
+      pluginHasRemoteMarketplaceUpdate(
+        pluginSummary({
+          id: "unrelated@omiga-curated",
+          name: "unrelated",
+        }),
+        changedPlugins,
+      ),
+    ).toBe(false);
+  });
+
+  it("builds stable remote marketplace check signatures to suppress repeated toasts", () => {
+    const left = [
+      remoteMarketplaceCheck({ name: "b", changedPlugins: ["star", "bwa"] }),
+      remoteMarketplaceCheck({ name: "a", path: "/a.json", changedPlugins: ["transcriptomics"] }),
+    ];
+    const right = [
+      remoteMarketplaceCheck({ name: "a", path: "/a.json", changedPlugins: ["transcriptomics"] }),
+      remoteMarketplaceCheck({ name: "b", changedPlugins: ["bwa", "star"] }),
+    ];
+
+    expect(remoteMarketplaceCheckSignature(left)).toBe(remoteMarketplaceCheckSignature(right));
+    expect(
+      remoteMarketplaceCheckSignature([
+        remoteMarketplaceCheck({ name: "b", changedPlugins: ["bwa", "star", "hisat2"] }),
+      ]),
+    ).not.toBe(remoteMarketplaceCheckSignature([remoteMarketplaceCheck({ name: "b", changedPlugins: ["bwa", "star"] })]));
+  });
+
+  it("anchors the plugin details dialog while troubleshooting accordions expand", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(pluginDetailsDialogSx["& .MuiDialog-container"]).toEqual({
+      alignItems: "flex-start",
+    });
+    expect(pluginDetailsDialogSx["& .MuiDialog-paper"]).toMatchObject({
+      mt: { xs: 2, sm: 6 },
+      mb: { xs: 2, sm: 6 },
+      maxHeight: { xs: "calc(100% - 32px)", sm: "calc(100% - 96px)" },
+    });
+    expect(source).toContain("scroll=\"paper\"");
+    expect(source).toContain("sx={pluginDetailsDialogSx}");
+  });
+
+  it("keeps technical accordions visually separated from capability cards", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(pluginDetailsTechnicalSectionSx).toMatchObject({
+      display: "flex",
+      flexDirection: "column",
+      gap: 1.25,
+      pt: 1.25,
+    });
+    expect(source).toContain("<Box sx={pluginDetailsTechnicalSectionSx}>");
+  });
+
+  it("keeps visualization-r execute skeletons readable in narrow cards", () => {
+    expect(visualizationRExecuteSkeletonSx).toMatchObject({
+      maxHeight: 180,
+      overflow: "auto",
+      overflowWrap: "anywhere",
+      wordBreak: "break-word",
+      whiteSpace: "pre-wrap",
+    });
   });
 
   it("extracts structured output entries from run details", () => {
@@ -159,7 +330,7 @@ describe("PluginsPanel diagnostics helpers", () => {
       enabled: true,
       retrieval: {
         protocolVersion: 1,
-        sources: [
+        resources: [
           {
             id: "geo",
             category: "dataset",
@@ -217,6 +388,26 @@ describe("PluginsPanel diagnostics helpers", () => {
         screenshots: [],
       },
     });
+    const literatureSearchPlugin = pluginSummary({
+      id: "operator-pubmed-search@omiga-curated",
+      name: "operator-pubmed-search",
+      interface: {
+        displayName: "PubMed Search",
+        shortDescription: "PubMed literature search",
+        longDescription: null,
+        developerName: null,
+        category: "Literature",
+        capabilities: ["Retrieval", "Search", "PubMed"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
     const functionPlugin = pluginSummary({
       id: "function-catalog@omiga-curated",
       name: "function-catalog",
@@ -237,19 +428,100 @@ describe("PluginsPanel diagnostics helpers", () => {
         screenshots: [],
       },
     });
-    const plugins = [geo, notebook, operatorPlugin, functionPlugin];
+    const visualizationPlugin = pluginSummary({
+      id: "visualization-r@omiga-curated",
+      name: "visualization-r",
+      interface: {
+        displayName: "R Visualization",
+        shortDescription: "Human-editable R figures",
+        longDescription: null,
+        developerName: null,
+        category: "Visualization",
+        capabilities: ["Rscript"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const analysisPlugin = pluginSummary({
+      id: "statistics-analysis@omiga-curated",
+      name: "statistics-analysis",
+      sourcePath: "/plugins/statistics-analysis",
+      interface: {
+        displayName: "Statistics Analysis",
+        shortDescription: "Statistical workflow analysis",
+        longDescription: null,
+        developerName: null,
+        category: "Analysis",
+        capabilities: ["Analysis", "Statistics"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const bioinformaticsPlugin = pluginSummary({
+      id: "ngs-alignment@omiga-curated",
+      name: "ngs-alignment",
+      sourcePath: "/plugins/ngs-alignment",
+      interface: {
+        displayName: "Alignment",
+        shortDescription: "BWA, Bowtie2, STAR, and HISAT2 alignment",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS", "Alignment", "FASTQ", "SAM/BAM"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const plugins = [
+      geo,
+      notebook,
+      operatorPlugin,
+      literatureSearchPlugin,
+      functionPlugin,
+      visualizationPlugin,
+      analysisPlugin,
+      bioinformaticsPlugin,
+    ];
 
     expect(filterPluginsForCatalog(plugins, "geo expression", "all")).toEqual([
       geo,
     ]);
-    expect(filterPluginsForCatalog(plugins, "", "data-sources")).toEqual([
+    expect(filterPluginsForCatalog(plugins, "", "resources")).toEqual([
       geo,
+      literatureSearchPlugin,
     ]);
     expect(filterPluginsForCatalog(plugins, "", "general")).toEqual([
       notebook,
     ]);
     expect(filterPluginsForCatalog(plugins, "", "operators")).toEqual([
       operatorPlugin,
+    ]);
+    expect(filterPluginsForCatalog(plugins, "", "visualization")).toEqual([
+      visualizationPlugin,
+    ]);
+    expect(filterPluginsForCatalog(plugins, "", "analysis")).toEqual([
+      analysisPlugin,
+    ]);
+    expect(filterPluginsForCatalog(plugins, "", "bioinformatics")).toEqual([
+      bioinformaticsPlugin,
     ]);
     expect(filterPluginsForCatalog(plugins, "", "tools")).toEqual([
       functionPlugin,
@@ -260,11 +532,11 @@ describe("PluginsPanel diagnostics helpers", () => {
     ]);
   });
 
-  it("groups plugin cards by top-level plugin type before source category", () => {
+  it("groups plugin cards by product category before implementation details", () => {
     const geo = pluginSummary({
       retrieval: {
         protocolVersion: 1,
-        sources: [
+        resources: [
           {
             id: "geo",
             category: "dataset",
@@ -300,6 +572,26 @@ describe("PluginsPanel diagnostics helpers", () => {
         screenshots: [],
       },
     });
+    const literatureSearchPlugin = pluginSummary({
+      id: "operator-pubmed-search@omiga-curated",
+      name: "operator-pubmed-search",
+      interface: {
+        displayName: "PubMed Search",
+        shortDescription: null,
+        longDescription: null,
+        developerName: null,
+        category: "Literature",
+        capabilities: ["Retrieval", "Search", "PubMed"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
     const functionPlugin = pluginSummary({
       id: "function-runner@omiga-curated",
       name: "function-runner",
@@ -310,6 +602,26 @@ describe("PluginsPanel diagnostics helpers", () => {
         developerName: null,
         category: "Function",
         capabilities: ["Custom Tool"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const visualizationPlugin = pluginSummary({
+      id: "visualization-r@omiga-curated",
+      name: "visualization-r",
+      interface: {
+        displayName: "R Visualization",
+        shortDescription: null,
+        longDescription: null,
+        developerName: null,
+        category: "Visualization",
+        capabilities: ["Rscript"],
         websiteUrl: null,
         privacyPolicyUrl: null,
         termsOfServiceUrl: null,
@@ -340,18 +652,181 @@ describe("PluginsPanel diagnostics helpers", () => {
         screenshots: [],
       },
     });
+    const analysisWorkflowPlugin = pluginSummary({
+      id: "statistics-analysis@omiga-curated",
+      name: "statistics-analysis",
+      sourcePath: "/plugins/statistics-analysis",
+      interface: {
+        displayName: "Statistics Analysis",
+        shortDescription: null,
+        longDescription: null,
+        developerName: null,
+        category: "Analysis",
+        capabilities: ["Statistics"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const analysisPlugin = pluginSummary({
+      id: "transcriptomics@omiga-curated",
+      name: "transcriptomics",
+      sourcePath: "/plugins/transcriptomics",
+      interface: {
+        displayName: "Transcriptomics",
+        shortDescription: null,
+        longDescription: null,
+        developerName: null,
+        category: "Analysis",
+        capabilities: ["Analysis", "Transcriptomics"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const bioinformaticsPlugin = pluginSummary({
+      id: "ngs-alignment@omiga-curated",
+      name: "ngs-alignment",
+      sourcePath: "/plugins/ngs-alignment",
+      interface: {
+        displayName: "Alignment",
+        shortDescription: "BWA, Bowtie2, STAR, and HISAT2 alignment",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS", "Alignment", "FASTQ", "SAM/BAM"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const computerUsePlugin = pluginSummary({
+      id: "computer-use@omiga-curated",
+      name: "computer-use",
+      interface: {
+        displayName: "Computer Use",
+        shortDescription: "Adds gated local computer observation and input automation tools.",
+        longDescription: null,
+        developerName: null,
+        category: "Automation",
+        capabilities: ["computer.observe", "computer.input"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const providerSourcePlugin = pluginSummary({
+      id: "resource-ncbi@omiga-curated",
+      name: "resource-ncbi",
+      sourcePath: "/plugins/resource-ncbi",
+      retrieval: {
+        protocolVersion: 1,
+        resources: [
+          {
+            id: "pubmed",
+            category: "literature",
+            label: "PubMed",
+            description: "PubMed literature",
+            subcategories: ["biomedical_literature"],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: false,
+            replacesBuiltin: true,
+          },
+          {
+            id: "geo",
+            category: "dataset",
+            label: "NCBI GEO",
+            description: "Gene expression datasets",
+            subcategories: ["expression"],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: false,
+            replacesBuiltin: true,
+          },
+        ],
+      },
+      interface: {
+        displayName: "NCBI",
+        shortDescription: "PubMed and GEO retrieval",
+        longDescription: null,
+        developerName: null,
+        category: "Retrieval",
+        capabilities: ["Provider", "NCBI", "Retrieval"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
 
+    expect(pluginCatalogGroupId(analysisWorkflowPlugin)).toBe("analysis");
+    expect(pluginCatalogGroupId(analysisPlugin)).toBe("bioinformatics");
     expect(pluginCatalogGroupId(operatorPlugin)).toBe("operator");
+    expect(pluginCatalogGroupId(literatureSearchPlugin)).toBe("resource");
+    expect(pluginCatalogGroupId(providerSourcePlugin)).toBe("resource");
+    expect(pluginCatalogGroupId(visualizationPlugin)).toBe("visualization");
+    expect(pluginCatalogGroupId(bioinformaticsPlugin)).toBe("bioinformatics");
     expect(pluginCatalogGroupId(functionPlugin)).toBe("tools");
-    expect(pluginCatalogGroupId(geo)).toBe("source");
+    expect(pluginCatalogGroupId(geo)).toBe("resource");
+    expect(pluginCatalogGroupId(computerUsePlugin)).toBe("operator");
     expect(pluginCatalogGroupId(notebook)).toBe("other");
     expect(
-      groupPluginsByCatalogGroup([notebook, geo, functionPlugin, operatorPlugin])
+      groupPluginsByCatalogGroup([
+        notebook,
+        geo,
+        functionPlugin,
+        operatorPlugin,
+        computerUsePlugin,
+        visualizationPlugin,
+        analysisWorkflowPlugin,
+        analysisPlugin,
+        bioinformaticsPlugin,
+        providerSourcePlugin,
+      ])
         .map((group) => group.id),
-    ).toEqual(["operator", "tools", "source", "other"]);
+    ).toEqual(["analysis", "bioinformatics", "visualization", "resource", "operator", "tools", "other"]);
     expect(
-      groupPluginsByCatalogSection("source", [geo]).map((section) => section.title),
-    ).toEqual(["Dataset sources"]);
+      groupPluginsByCatalogSection("analysis", [analysisWorkflowPlugin]).map((section) => section.title),
+    ).toEqual(["Statistical analysis"]);
+    expect(
+      groupPluginsByCatalogSection("visualization", [visualizationPlugin]).map((section) => section.title),
+    ).toEqual(["R visualization"]);
+    expect(
+      groupPluginsByCatalogSection("bioinformatics", [bioinformaticsPlugin, analysisPlugin]).map((section) => section.title),
+    ).toEqual(["NGS", "Transcriptomics"]);
+    expect(
+      groupPluginsByCatalogSection("resource", [geo, literatureSearchPlugin, providerSourcePlugin]).map((section) => section.title),
+    ).toEqual(["Provider resources", "Dataset resources", "Literature resources"]);
+    expect(
+      groupPluginsByCatalogSection("operator", [computerUsePlugin, operatorPlugin]).map((section) => section.title),
+    ).toEqual(["Automation plugins"]);
     expect(
       groupPluginsByCatalogSection("other", [notebook]).map((section) => section.title),
     ).toEqual(["Notebook"]);
@@ -362,13 +837,13 @@ describe("PluginsPanel diagnostics helpers", () => {
     const staleRoute = routeStatus({
       pluginId: "stale-pubmed@legacy-mcp",
       category: "literature",
-      sourceId: "pubmed",
+      resourceId: "pubmed",
       route: "literature.pubmed via stale-pubmed@legacy-mcp",
     });
     const stalePool: PluginProcessPoolRouteStatus = {
       pluginId: "stale-web-search@legacy",
       category: "web",
-      sourceId: "search",
+      resourceId: "search",
       route: "web.search via stale-web-search@legacy",
       pluginRoot: "/old/plugins/stale-web-search",
       remainingMs: 15_000,
@@ -379,11 +854,11 @@ describe("PluginsPanel diagnostics helpers", () => {
     ).toEqual(["stale-pubmed@legacy-mcp", "stale-web-search@legacy"]);
   });
 
-  it("uses retrieval source labels as card subtitles instead of verbose local-plugin copy", () => {
+  it("uses retrieval resource labels as card subtitles instead of verbose local-plugin copy", () => {
     const subtitle = pluginCardSubtitle(
       pluginSummary({
         interface: {
-          displayName: "GEO Retrieval Source",
+          displayName: "GEO Retrieval Resource",
           shortDescription: "NCBI GEO as a local retrieval plugin",
           longDescription: null,
           developerName: null,
@@ -400,7 +875,7 @@ describe("PluginsPanel diagnostics helpers", () => {
         },
         retrieval: {
           protocolVersion: 1,
-          sources: [
+          resources: [
             {
               id: "geo",
               category: "dataset",
@@ -421,11 +896,79 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(subtitle).toBe("NCBI GEO");
   });
 
+  it("summarizes provider-level source bundles before single-category route wording", () => {
+    expect(
+      pluginCardSubtitle(
+        pluginSummary({
+          id: "resource-ncbi@omiga-curated",
+          name: "resource-ncbi",
+          interface: {
+            displayName: "NCBI",
+            shortDescription: "NCBI retrieval routes",
+            longDescription: null,
+            developerName: null,
+            category: "Retrieval",
+            capabilities: ["Provider", "NCBI", "Retrieval"],
+            websiteUrl: null,
+            privacyPolicyUrl: null,
+            termsOfServiceUrl: null,
+            defaultPrompt: [],
+            brandColor: null,
+            composerIcon: null,
+            logo: null,
+            screenshots: [],
+          },
+          retrieval: {
+            protocolVersion: 1,
+            resources: [
+              {
+                id: "pubmed",
+                category: "literature",
+                label: "PubMed",
+                description: "PubMed literature",
+                subcategories: [],
+                capabilities: ["search", "query", "fetch"],
+                requiredCredentialRefs: [],
+                optionalCredentialRefs: [],
+                defaultEnabled: false,
+                replacesBuiltin: true,
+              },
+              {
+                id: "geo",
+                category: "dataset",
+                label: "NCBI GEO",
+                description: "GEO datasets",
+                subcategories: [],
+                capabilities: ["search", "query", "fetch"],
+                requiredCredentialRefs: [],
+                optionalCredentialRefs: [],
+                defaultEnabled: false,
+                replacesBuiltin: true,
+              },
+              {
+                id: "ncbi_gene",
+                category: "knowledge",
+                label: "NCBI Gene",
+                description: "NCBI Gene knowledge",
+                subcategories: [],
+                capabilities: ["search", "query", "fetch"],
+                requiredCredentialRefs: [],
+                optionalCredentialRefs: [],
+                defaultEnabled: false,
+                replacesBuiltin: true,
+              },
+            ],
+          },
+        }),
+      ),
+    ).toBe("3 routes: PubMed, NCBI GEO, NCBI Gene");
+  });
+
   it("removes redundant plugin role suffixes from display titles", () => {
     expect(
       displayName(pluginSummary({
         interface: {
-          displayName: "GEO Retrieval Source",
+          displayName: "GEO Retrieval Resource",
           shortDescription: null,
           longDescription: null,
           developerName: null,
@@ -462,6 +1005,239 @@ describe("PluginsPanel diagnostics helpers", () => {
         },
       })),
     ).toBe("PCA");
+    expect(
+      displayName(pluginSummary({
+        interface: {
+          displayName: "R Visualization Templates",
+          shortDescription: null,
+          longDescription: null,
+          developerName: null,
+          category: "Visualization",
+          capabilities: [],
+          websiteUrl: null,
+          privacyPolicyUrl: null,
+          termsOfServiceUrl: null,
+          defaultPrompt: [],
+          brandColor: null,
+          composerIcon: null,
+          logo: null,
+          screenshots: [],
+        },
+      })),
+    ).toBe("R Visualization");
+  });
+
+  it("summarizes plugin capabilities without defaulting to file-level content", () => {
+    const plugin = pluginSummary({
+      id: "visualization-r@omiga-curated",
+      name: "visualization-r",
+      interface: {
+        displayName: "R Visualization",
+        shortDescription: "Human-editable R figures",
+        longDescription: null,
+        developerName: null,
+        category: "Visualization",
+        capabilities: ["Rscript"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [
+          "Use visualization-r to create an editable static figure.",
+        ],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+
+    expect(pluginContentOverview(plugin)).toEqual([
+      {
+        id: "visualization",
+        title: "Visualization",
+        detail: "Create editable figures and publication-style plots from human-editable R artifacts.",
+        meta: "Figures",
+      },
+    ]);
+    expect(pluginContentOverview(plugin).map((item) => item.title)).not.toContain(
+      "Files",
+    );
+    expect(pluginContentOverview(plugin).map((item) => item.title)).not.toContain(
+      "Template library",
+    );
+  });
+
+  it("keeps visualization-r fallback generic and suppresses redundant healthy-only status", () => {
+    const plugin = pluginSummary({
+      id: "visualization-r@omiga-curated",
+      name: "visualization-r",
+      installed: true,
+      enabled: true,
+      interface: {
+        displayName: "R Visualization",
+        shortDescription: "Editable R/ggplot2 figure templates",
+        longDescription: null,
+        developerName: null,
+        category: "Visualization",
+        capabilities: ["Rscript", "ggplot2"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const overview = visualizationRCompletionOverview();
+    const runtimeSummary = pluginRuntimeSummary(plugin);
+
+    expect(overview.totalTemplates).toBe(0);
+    expect(overview.supportedGroups).toEqual([]);
+    expect(overview.quickStarts).toEqual([]);
+    expect(overview.outputs).toEqual(["PNG", "PDF", "editable R script"]);
+    expect(overview.workflow.map((step) => step.title)).toEqual([
+      "1. Prepare table",
+      "2. Generate figure",
+      "3. Refine source",
+    ]);
+    expect(overview.pending).toEqual([]);
+    expect(runtimeSummary.label).toBe("Healthy");
+    expect(shouldShowPluginRuntimeSummaryCard(plugin, runtimeSummary)).toBe(false);
+  });
+
+  it("uses plugin template metadata when building visualization-r completion copy", () => {
+    const overview = visualizationRCompletionOverview({
+      count: 2,
+      groups: [
+        {
+          id: "scatter",
+          title: "Scatter",
+          count: 1,
+          templates: [
+            {
+              id: "viz_scatter_basic",
+              name: "Basic Scatter Plot",
+              description: "Scatter plot.",
+              category: "visualization/scatter",
+              tags: ["scatter"],
+              execute: {
+                tool: "template_execute",
+                arguments: {
+                  id: "visualization-r@omiga-curated/template/viz_scatter_basic",
+                  inputs: { table: "/examples/scatter/basic/example.tsv" },
+                  params: { x_column: "x_value" },
+                  resources: {},
+                },
+              },
+            },
+          ],
+        },
+        {
+          id: "heatmap",
+          title: "Heatmap",
+          count: 1,
+          templates: [
+            {
+              id: "viz_heatmap_clustered",
+              name: "Clustered Heatmap",
+              description: "Clustered heatmap.",
+              category: "visualization/heatmap",
+              tags: ["heatmap"],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(overview.totalTemplates).toBe(2);
+    expect(overview.supportedGroups).toEqual([
+      {
+        id: "scatter",
+        title: "Scatter",
+        count: 1,
+        items: ["Basic Scatter Plot"],
+        templates: [
+          {
+            id: "viz_scatter_basic",
+            name: "Basic Scatter Plot",
+            description: "Scatter plot.",
+            execute: {
+              tool: "template_execute",
+              arguments: {
+                id: "visualization-r@omiga-curated/template/viz_scatter_basic",
+                inputs: { table: "/examples/scatter/basic/example.tsv" },
+                params: { x_column: "x_value" },
+                resources: {},
+              },
+            },
+          },
+        ],
+      },
+      {
+        id: "heatmap",
+        title: "Heatmap",
+        count: 1,
+        items: ["Clustered Heatmap"],
+        templates: [
+          {
+            id: "viz_heatmap_clustered",
+            name: "Clustered Heatmap",
+            description: "Clustered heatmap.",
+          },
+        ],
+      },
+    ]);
+    expect(overview.quickStarts.map((template) => template.id)).toEqual([
+      "viz_scatter_basic",
+      "viz_heatmap_clustered",
+    ]);
+  });
+
+  it("builds copyable visualization-r execution shortcuts", () => {
+    const template = {
+      id: "viz_scatter_basic",
+      name: "Basic Scatter Plot",
+      description: "Scatter plot.",
+    };
+
+    expect(visualizationRTemplatePrompt(template)).toContain("`viz_scatter_basic`");
+    expect(visualizationRTemplatePrompt(template)).toContain("template_execute");
+    expect(JSON.parse(visualizationRTemplateToolCall(template))).toEqual({
+      tool: "template_execute",
+      arguments: {
+        id: "viz_scatter_basic",
+        inputs: {
+          table: "path/to/data.tsv",
+        },
+        params: {},
+        resources: {},
+      },
+    });
+  });
+
+  it("prefers backend-provided unit_describe execute skeletons for visualization-r shortcuts", () => {
+    const template = {
+      id: "viz_scatter_basic",
+      name: "Basic Scatter Plot",
+      execute: {
+        tool: "template_execute",
+        arguments: {
+          id: "visualization-r@omiga-curated/template/viz_scatter_basic",
+          inputs: {
+            table: "/plugins/visualization-r/templates/scatter/basic/example.tsv",
+          },
+          params: {
+            x_column: "x_value",
+            y_column: "y_value",
+          },
+          resources: {},
+        },
+      },
+    };
+
+    expect(JSON.parse(visualizationRTemplateToolCall(template))).toEqual(template.execute);
   });
 
   it("uses Iconify-backed implementation icons for operator plugin cards", () => {
@@ -602,6 +1378,64 @@ describe("PluginsPanel diagnostics helpers", () => {
       outputs: 1,
       resources: 2,
     });
+  });
+
+  it("summarizes operator environment references and plugin runtime profiles", () => {
+    const environment: PluginEnvironmentSummary = {
+      id: "ngs-bwa",
+      version: "0.1.0",
+      canonicalId: "ngs-alignment@omiga-curated:ngs-bwa",
+      name: "BWA",
+      description: "Conda environment for BWA indexing and alignment; includes samtools.",
+      manifestPath: "/plugins/ngs-alignment/environments/ngs-bwa/environment.yaml",
+      runtimeType: "conda",
+      runtimeFile: "/plugins/ngs-alignment/environments/ngs-bwa/conda.yaml",
+      runtimeFileKind: "conda.yaml|conda.yml",
+      installHint: "Install micromamba.",
+      checkCommand: ["bwa", "--version"],
+      availabilityStatus: "missing",
+      availabilityManager: null,
+      availabilityMessage: "No micromamba, mamba, or conda executable was found.",
+    };
+    const operator = operatorSummary({
+      id: "bwa_mem_align_reads",
+      runtime: { envRef: "ngs-bwa" },
+    });
+
+    expect(operatorEnvironmentRef(operator)).toBe("ngs-bwa");
+    expect(pluginEnvironmentDisplayName(environment)).toBe("BWA");
+    expect(pluginEnvironmentStatusColor(environment.availabilityStatus)).toBe("warning");
+    expect(pluginEnvironmentRuntimeFileLabel(environment)).toBe("conda.yaml");
+  });
+
+  it("surfaces resource-heavy operator runtime profiles", () => {
+    const operator = operatorSummary({
+      id: "star_align_reads",
+      runtime: {
+        envRef: "ngs-star",
+        resourceProfile: {
+          tier: "hpc-recommended",
+          localPolicy: "warn",
+          recommendedCpu: 32,
+          recommendedMemoryGb: 128,
+          diskGb: 200,
+          notes: ["STAR alignment against whole-genome indices is not recommended on laptops."],
+        },
+      },
+    });
+
+    expect(operatorResourceProfile(operator)).toMatchObject({
+      tier: "hpc-recommended",
+      localPolicy: "warn",
+      recommendedCpu: 32,
+      recommendedMemoryGb: 128,
+      diskGb: 200,
+    });
+    expect(operatorResourceProfileLabel(operator)).toBe("HPC recommended");
+    expect(operatorResourceProfileSummary(operator)).toContain("32 CPU recommended");
+    expect(operatorResourceProfileSummary(operator)).toContain("128 GB RAM recommended");
+    expect(operatorShouldWarnBeforeLocalRun(operator)).toBe(true);
+    expect(operatorShouldWarnBeforeLocalRun(operatorSummary())).toBe(false);
   });
 
   it("recognizes manifest-declared smoke tests and builds deterministic smoke args", () => {
@@ -834,7 +1668,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const pooled: PluginProcessPoolRouteStatus = {
       pluginId: "retrieval-dataset-geo@omiga-curated",
       category: "dataset",
-      sourceId: "geo",
+      resourceId: "geo",
       route: "dataset.geo via retrieval-dataset-geo@omiga-curated",
       pluginRoot: "/plugins/retrieval-dataset-geo",
       remainingMs: 90_000,
@@ -854,7 +1688,7 @@ describe("PluginsPanel diagnostics helpers", () => {
       enabled: true,
       retrieval: {
         protocolVersion: 1,
-        sources: [
+        resources: [
           {
             id: "geo",
             category: "dataset",

@@ -1,0 +1,198 @@
+#!/usr/bin/env Rscript
+# Template: scatter/rect-dumbbell
+# Purpose: Rectangular dumbbell plot for two-group values across categories.
+#
+# Migration note:
+#   This template migrates OmicsAgent scatter/dumbbell_rect from a private JSON
+#   ggplot2 DSL into direct, editable R/ggplot2 code. The original data.json
+#   has been converted to example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/rect-dumbbell
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, if (default) "true" else "false"))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "age_group"),
+    value = arg_or(4, "mean_prev"),
+    group = arg_or(5, "Sex")
+  ),
+  levels = list(
+    categories = parse_csv_arg(6, ""),
+    groups = parse_csv_arg(7, "Male,Female")
+  ),
+  labels = list(
+    title = arg_or(8, "Rect Dumbbell"),
+    x = arg_or(9, ""),
+    y = arg_or(10, "Mean Prevalence of obesity")
+  ),
+  style = list(
+    palette = parse_csv_arg(11, "#f784b6,#79ceb8"),
+    rect_fill = arg_or(12, "#f3ead8"),
+    rect_color = arg_or(13, "grey50"),
+    rect_width = parse_number_arg(14, 0.8),
+    rect_alpha = parse_number_arg(15, 0.85),
+    point_size_outer = parse_number_arg(16, 5),
+    point_size_inner = parse_number_arg(17, 3),
+    stroke = parse_number_arg(18, 1),
+    base_size = parse_number_arg(19, 12),
+    rotate_x_labels = parse_logical_arg(20, TRUE),
+    legend_x = parse_number_arg(21, 0.8),
+    legend_y = parse_number_arg(22, 0.8)
+  )
+)
+delimiter <- arg_or(23, "auto")
+width <- parse_number_arg(24, 8)
+height <- parse_number_arg(25, 6)
+dpi <- parse_integer_arg(26, 300)
+
+first_seen <- function(x) unique(as.character(x))
+
+range_rect_data <- function(df, config) {
+  rows <- list()
+  for (category in levels(df$.category)) {
+    subset <- df[df$.category == category, , drop = FALSE]
+    if (nrow(subset) < 2) next
+    subset <- subset[order(as.numeric(subset$.group)), , drop = FALSE]
+    values <- subset$.value[!is.na(subset$.value)]
+    if (length(values) < 2) next
+    x <- match(category, levels(df$.category))
+    rows[[length(rows) + 1]] <- data.frame(
+      .category = category,
+      .x = x,
+      xmin = x - config$style$rect_width / 2,
+      xmax = x + config$style$rect_width / 2,
+      ymin = min(values),
+      ymax = max(values),
+      stringsAsFactors = FALSE
+    )
+  }
+  if (length(rows) == 0) return(data.frame())
+  do.call(rbind, rows)
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$category, config$columns$value, config$columns$group), "scatter/rect-dumbbell input")
+  df <- ensure_numeric_columns(df, config$columns$value, "scatter/rect-dumbbell input")
+  df$.category_raw <- as.character(df[[config$columns$category]])
+  df$.group_raw <- as.character(df[[config$columns$group]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.category_raw) & nzchar(df$.group_raw), , drop = FALSE]
+  if (nrow(df) == 0) stop("scatter/rect-dumbbell input has no usable rows.", call. = FALSE)
+  category_levels <- config$levels$categories
+  if (length(category_levels) == 0) category_levels <- first_seen(df$.category_raw)
+  group_levels <- config$levels$groups
+  if (length(group_levels) == 0) group_levels <- first_seen(df$.group_raw)
+  group_levels <- c(group_levels[group_levels %in% df$.group_raw], setdiff(first_seen(df$.group_raw), group_levels))
+  if (length(group_levels) < 2) stop("scatter/rect-dumbbell requires at least two groups.", call. = FALSE)
+  df <- df[df$.category_raw %in% category_levels & df$.group_raw %in% group_levels, , drop = FALSE]
+  df$.category <- factor(df$.category_raw, levels = category_levels)
+  df$.group <- factor(df$.group_raw, levels = group_levels)
+  df$.x <- as.numeric(df$.category)
+  df$.group_index <- as.numeric(df$.group)
+  df
+}
+
+make_plot <- function(df, config) {
+  category_levels <- levels(df$.category)
+  group_levels <- levels(df$.group)
+  rect_df <- range_rect_data(df, config)
+  palette <- config$style$palette
+  if (length(palette) < length(group_levels)) palette <- rep(palette, length.out = length(group_levels))
+  palette <- stats::setNames(palette[seq_along(group_levels)], group_levels)
+  x_text <- if (isTRUE(config$style$rotate_x_labels)) {
+    ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1)
+  } else {
+    ggplot2::element_text()
+  }
+
+  ggplot2::ggplot(df, ggplot2::aes(x = .x, y = .value, colour = .group)) +
+    ggplot2::geom_rect(
+      data = rect_df,
+      ggplot2::aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+      inherit.aes = FALSE,
+      fill = config$style$rect_fill,
+      colour = config$style$rect_color,
+      linewidth = 0.4,
+      alpha = config$style$rect_alpha
+    ) +
+    ggplot2::geom_point(
+      shape = 21,
+      size = config$style$point_size_outer,
+      stroke = config$style$stroke,
+      fill = "white",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(size = config$style$point_size_inner) +
+    ggplot2::scale_colour_manual(values = palette, name = config$columns$group) +
+    ggplot2::scale_x_continuous(breaks = seq_along(category_levels), labels = category_levels, expand = ggplot2::expansion(add = 0.5)) +
+    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.06, 0.08))) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      axis.line = ggplot2::element_blank(),
+      axis.text.x = x_text,
+      panel.border = ggplot2::element_rect(fill = NA, colour = "black", linewidth = 1),
+      legend.position = c(config$style$legend_x, config$style$legend_y),
+      legend.background = ggplot2::element_rect(fill = grDevices::adjustcolor("white", alpha.f = 0.72), colour = NA),
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5)
+    )
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "categories", "groups", "value_min", "value_max"),
+      value = c("scatter/rect-dumbbell", nrow(plot_df), length(levels(plot_df$.category)), length(levels(plot_df$.group)), min(plot_df$.value), max(plot_df$.value))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/rect-dumbbell", rows = nrow(plot_df), categories = length(levels(plot_df$.category)), groups = levels(plot_df$.group), value_min = min(plot_df$.value), value_max = max(plot_df$.value)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

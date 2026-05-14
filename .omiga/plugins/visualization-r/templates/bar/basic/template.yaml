@@ -1,0 +1,106 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_bar_basic
+  version: 0.1.0
+  name: Basic Bar Plot
+  description: Bar chart for summarized categorical values.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - bar
+    - table
+    - summary
+classification:
+  category: visualization/bar
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - bar
+    - table
+    - summary
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Input CSV/TSV table. See this template's example.tsv for the expected shape.
+  params:
+    category_column:
+      kind: string
+      default: category
+    value_column:
+      kind: string
+      default: value
+    title:
+      kind: string
+      default: Basic bar plot
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 7
+    height:
+      kind: number
+      default: 5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - bar_basic
+  - basic_bar
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.category_column}
+    - ${params.value_column}
+    - ${params.title}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

@@ -1,0 +1,61 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: functional_enrichment_basic
+  version: 0.3.0
+  name: Functional Enrichment
+  description: Rendered R ORA/GSEA enrichment analysis template for gene lists and ranked gene tables with private validation metadata.
+  tags:
+    - omics
+    - enrichment
+    - gene-sets
+    - ora
+    - gsea
+classification:
+  category: omics/knowledge/functional-enrichment
+  tags:
+    - gene-list
+    - ranked-genes
+    - gene-sets
+    - enrichment
+    - figure
+  stageInput:
+    - gene_list
+    - ranked_gene_table
+    - gene_sets
+  stageOutput:
+    - enrichment_results
+    - enrichment_plots
+exposure:
+  exposeToAgent: true
+interface:
+  inputs: {}
+  params: {}
+  outputs: {}
+runtime:
+  envRef: r-bioc
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - enrichment_basic
+  - ora_gsea
+  - functional_enrichment
+execution:
+  interpreter: Rscript
+  fallbackToMigrationTarget: true
+  argv:
+    - ${inputs.genes}
+    - ${inputs.gene_sets}
+    - ${outdir}
+    - ${params.gene_sets_format}
+    - ${params.min_size}
+    - ${params.max_size}
+    - ${params.pvalue_threshold}
+    - ${params.analysis_mode}
+    - ${params.gene_column}
+    - ${params.score_column}
+    - ${params.display_top_n}
+    - ${params.plot_style}
+    - ${params.gsea_weight}
+migrationTarget: omics_functional_enrichment_basic

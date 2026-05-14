@@ -1293,6 +1293,15 @@ pub async fn send_message(
             return Err(OmigaError::Chat(ChatError::StreamError(msg.to_string())));
         }
     };
+    let computer_use_mode = crate::domain::computer_use::ComputerUseMode::from_request(
+        request.computer_use_mode.as_deref(),
+    );
+    tracing::debug!(
+        target: "omiga::computer_use",
+        mode = computer_use_mode.as_str(),
+        enabled = computer_use_mode.is_enabled(),
+        "computer use request gate resolved"
+    );
 
     if let ChatInputTarget::BackgroundAgentFollowup { task_id } = input_target {
         let session_id = request.session_id.clone().ok_or_else(|| {
@@ -2635,82 +2644,102 @@ pub async fn send_message(
             request.use_tools,
         )
     {
-        let op_id = format!("memory-precompact-{}", uuid::Uuid::new_v4());
-        emit_activity_operation(
-            &app,
-            &session_id,
-            &op_id,
-            "压缩前摘要",
-            "running",
-            Some(format!(
-                "准备提炼 {} 条即将压缩的消息",
-                removed_messages.len()
-            )),
-        );
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            crate::domain::memory::working_memory::prepare_for_auto_compact(
+        let should_prepare =
+            match crate::domain::memory::working_memory::should_prepare_for_auto_compact(
                 repo,
                 &session_id,
-                &removed_messages,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(compact_state)) => {
-                emit_activity_operation(
-                    &app,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "omiga::memory",
+                        session_id = %session_id,
+                        error = %e,
+                        "checking pre-compact preparation throttle failed; preparing memory once defensively"
+                    );
+                    true
+                }
+            };
+        if should_prepare {
+            let op_id = format!("memory-precompact-{}", uuid::Uuid::new_v4());
+            emit_activity_operation(
+                &app,
+                &session_id,
+                &op_id,
+                "压缩前摘要",
+                "running",
+                Some(format!(
+                    "准备提炼 {} 条即将压缩的消息",
+                    removed_messages.len()
+                )),
+            );
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                crate::domain::memory::working_memory::prepare_for_auto_compact(
+                    repo,
                     &session_id,
-                    &op_id,
-                    "压缩前摘要",
-                    "done",
-                    Some("已提炼即将被压缩的上下文".to_string()),
-                );
-                // Context compression is a semantic trigger: archive session summary now.
-                let project_root_for_compact = resolve_session_project_root(&project_path);
-                if let Ok(cfg) =
-                    crate::domain::memory::load_resolved_config(&project_root_for_compact).await
-                {
-                    let lt_path = cfg.long_term_path(&project_root_for_compact);
-                    crate::commands::chat::turn::archive_on_compact(
+                    &removed_messages,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(compact_state)) => {
+                    emit_activity_operation(
                         &app,
                         &session_id,
-                        &lt_path,
-                        &compact_state,
-                    )
-                    .await;
+                        &op_id,
+                        "压缩前摘要",
+                        "done",
+                        Some("已提炼即将被压缩的上下文".to_string()),
+                    );
+                    // Context compression is a semantic trigger: archive session summary now.
+                    let project_root_for_compact = resolve_session_project_root(&project_path);
+                    if let Ok(cfg) =
+                        crate::domain::memory::load_resolved_config(&project_root_for_compact).await
+                    {
+                        let lt_path = cfg.long_term_path(&project_root_for_compact);
+                        crate::commands::chat::turn::archive_on_compact(
+                            &app,
+                            &session_id,
+                            &lt_path,
+                            &compact_state,
+                        )
+                        .await;
+                    }
                 }
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    target: "omiga::memory",
-                    session_id = %session_id,
-                    error = %e,
-                    "Working memory prepare_for_auto_compact failed; continuing without blocking chat"
-                );
-                emit_activity_operation(
-                    &app,
-                    &session_id,
-                    &op_id,
-                    "压缩前摘要",
-                    "error",
-                    Some(e.to_string()),
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    target: "omiga::memory",
-                    session_id = %session_id,
-                    "Working memory prepare_for_auto_compact timed out; continuing without blocking chat"
-                );
-                emit_activity_operation(
-                    &app,
-                    &session_id,
-                    &op_id,
-                    "压缩前摘要",
-                    "error",
-                    Some("prepare_for_auto_compact timed out".to_string()),
-                );
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        target: "omiga::memory",
+                        session_id = %session_id,
+                        error = %e,
+                        "Working memory prepare_for_auto_compact failed; continuing without blocking chat"
+                    );
+                    emit_activity_operation(
+                        &app,
+                        &session_id,
+                        &op_id,
+                        "压缩前摘要",
+                        "error",
+                        Some(e.to_string()),
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        target: "omiga::memory",
+                        session_id = %session_id,
+                        "Working memory prepare_for_auto_compact timed out; continuing without blocking chat"
+                    );
+                    emit_activity_operation(
+                        &app,
+                        &session_id,
+                        &op_id,
+                        "压缩前摘要",
+                        "error",
+                        Some("prepare_for_auto_compact timed out".to_string()),
+                    );
+                }
             }
         }
     }
@@ -2744,7 +2773,7 @@ pub async fn send_message(
         }
         Ok(Err(e)) => {
             return Err(OmigaError::Chat(ChatError::StreamError(format!(
-                "Auto-compact persist failed: {}",
+                "Auto-compact failed: {}",
                 e
             ))));
         }
@@ -2752,7 +2781,7 @@ pub async fn send_message(
             tracing::warn!(
                 target: "omiga::auto_compact",
                 session_id = %session_id,
-                "Auto-compact persist timed out; continuing with current transcript"
+                "Auto-compact timed out; continuing with current transcript"
             );
             append_preflight_stage_failed_event(
                 repo,
@@ -2797,6 +2826,8 @@ pub async fn send_message(
             send_message_started_at.elapsed().as_millis(),
             serde_json::json!({
                 "toolsEnabled": request.use_tools,
+                "computerUseMode": computer_use_mode.as_str(),
+                "computerUseEnabled": computer_use_mode.is_enabled(),
                 "schedulerBuiltPlan": scheduler_result.is_some(),
             }),
         )
@@ -2888,7 +2919,10 @@ pub async fn send_message(
             }
         };
         validate_permission_deny_entries(&deny_entries);
-        let all_schemas = all_tool_schemas(skills_exist);
+        let mut all_schemas = all_tool_schemas(skills_exist);
+        if computer_use_mode.is_enabled() {
+            all_schemas.extend(crate::domain::computer_use::facade_tool_schemas());
+        }
         let n_builtin_before = all_schemas.len();
         let mut built = filter_tool_schemas_by_deny_rule_entries(all_schemas, &deny_entries);
         let n_builtin_after = built.len();
@@ -3947,6 +3981,7 @@ pub async fn send_message(
                 local_venv_type: agent_runtime.local_venv_type.clone(),
                 local_venv_name: agent_runtime.local_venv_name.clone(),
                 env_store: agent_runtime.env_store.clone(),
+                computer_use_enabled: computer_use_mode.is_enabled(),
             })
             .await;
 
@@ -4138,88 +4173,107 @@ pub async fn send_message(
                             !tools.is_empty(),
                         )
                     {
-                        let op_id = format!("memory-precompact-{}", uuid::Uuid::new_v4());
-                        emit_activity_operation(
-                            &app_clone,
-                            &session_id_clone,
-                            &op_id,
-                            "压缩前摘要",
-                            "running",
-                            Some(format!(
-                                "准备提炼 {} 条即将压缩的消息",
-                                removed_messages.len()
-                            )),
-                        );
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(3),
-                            crate::domain::memory::working_memory::prepare_for_auto_compact(
+                        let should_prepare =
+                            match crate::domain::memory::working_memory::should_prepare_for_auto_compact(
                                 &repo_clone,
                                 &session_id_clone,
-                                &removed_messages,
-                            ),
-                        )
-                        .await
-                        {
-                            Ok(Err(e)) => {
-                                tracing::warn!(
-                                    target: "omiga::working_memory",
-                                    "tool-loop pre-compact summary failed: {}",
-                                    e
-                                );
-                                emit_activity_operation(
-                                    &app_clone,
+                            )
+                            .await
+                            {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "omiga::working_memory",
+                                        "checking tool-loop pre-compact preparation throttle failed: {}",
+                                        e
+                                    );
+                                    true
+                                }
+                            };
+                        if should_prepare {
+                            let op_id = format!("memory-precompact-{}", uuid::Uuid::new_v4());
+                            emit_activity_operation(
+                                &app_clone,
+                                &session_id_clone,
+                                &op_id,
+                                "压缩前摘要",
+                                "running",
+                                Some(format!(
+                                    "准备提炼 {} 条即将压缩的消息",
+                                    removed_messages.len()
+                                )),
+                            );
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(3),
+                                crate::domain::memory::working_memory::prepare_for_auto_compact(
+                                    &repo_clone,
                                     &session_id_clone,
-                                    &op_id,
-                                    "压缩前摘要",
-                                    "error",
-                                    Some(e.to_string()),
-                                );
-                            }
-                            Ok(Ok(compact_state)) => {
-                                emit_activity_operation(
-                                    &app_clone,
-                                    &session_id_clone,
-                                    &op_id,
-                                    "压缩前摘要",
-                                    "done",
-                                    Some("已提炼即将被压缩的上下文".to_string()),
-                                );
-                                // Compression is a semantic trigger for session summary.
-                                //
-                                // Important: this block already holds the sessions write lock.
-                                // Do not re-acquire `sessions_clone.read()` here; tokio RwLock is
-                                // not re-entrant and that self-read deadlocks the tool loop right
-                                // after the UI shows “压缩前摘要” as the last successful step.
-                                let project_root_for_compact =
-                                    resolve_session_project_root(&runtime.session.project_path);
-                                if let Ok(cfg) = crate::domain::memory::load_resolved_config(
-                                    &project_root_for_compact,
-                                )
-                                .await
-                                {
-                                    let lt_path = cfg.long_term_path(&project_root_for_compact);
-                                    crate::commands::chat::turn::archive_on_compact(
+                                    &removed_messages,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Err(e)) => {
+                                    tracing::warn!(
+                                        target: "omiga::working_memory",
+                                        "tool-loop pre-compact summary failed: {}",
+                                        e
+                                    );
+                                    emit_activity_operation(
                                         &app_clone,
                                         &session_id_clone,
-                                        &lt_path,
-                                        &compact_state,
-                                    )
-                                    .await;
+                                        &op_id,
+                                        "压缩前摘要",
+                                        "error",
+                                        Some(e.to_string()),
+                                    );
                                 }
-                            }
-                            Err(_) => {
-                                tracing::warn!(
-                                    target: "omiga::working_memory",
-                                    "tool-loop pre-compact summary timed out; continuing without blocking chat"
-                                );
-                                emit_activity_operation(
-                                    &app_clone,
-                                    &session_id_clone,
-                                    &op_id,
-                                    "压缩前摘要",
-                                    "error",
-                                    Some("prepare_for_auto_compact timed out".to_string()),
-                                );
+                                Ok(Ok(compact_state)) => {
+                                    emit_activity_operation(
+                                        &app_clone,
+                                        &session_id_clone,
+                                        &op_id,
+                                        "压缩前摘要",
+                                        "done",
+                                        Some("已提炼即将被压缩的上下文".to_string()),
+                                    );
+                                    // Compression is a semantic trigger for session summary.
+                                    //
+                                    // Important: this block already holds the sessions write lock.
+                                    // Do not re-acquire `sessions_clone.read()` here; tokio RwLock is
+                                    // not re-entrant and that self-read deadlocks the tool loop right
+                                    // after the UI shows “压缩前摘要” as the last successful step.
+                                    let project_root_for_compact =
+                                        resolve_session_project_root(&runtime.session.project_path);
+                                    if let Ok(cfg) = crate::domain::memory::load_resolved_config(
+                                        &project_root_for_compact,
+                                    )
+                                    .await
+                                    {
+                                        let lt_path = cfg.long_term_path(&project_root_for_compact);
+                                        crate::commands::chat::turn::archive_on_compact(
+                                            &app_clone,
+                                            &session_id_clone,
+                                            &lt_path,
+                                            &compact_state,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        target: "omiga::working_memory",
+                                        "tool-loop pre-compact summary timed out; continuing without blocking chat"
+                                    );
+                                    emit_activity_operation(
+                                        &app_clone,
+                                        &session_id_clone,
+                                        &op_id,
+                                        "压缩前摘要",
+                                        "error",
+                                        Some("prepare_for_auto_compact timed out".to_string()),
+                                    );
+                                }
                             }
                         }
                     }
@@ -5067,6 +5121,11 @@ mod tests {
             !block.contains("sessions_clone.read().await"),
             "tool-loop compaction already holds sessions_clone.write(); \
             reading the same RwLock inside this block deadlocks after 压缩前摘要"
+        );
+        assert!(
+            block.contains("should_prepare_for_auto_compact"),
+            "tool-loop compaction should throttle pre-compact summary/archive emission \
+            to avoid repeating 压缩前摘要 / 归档会话摘要 on every tool round"
         );
     }
 

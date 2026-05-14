@@ -30,6 +30,7 @@ import {
   parseStoredWebSearchSettings,
   WEB_SEARCH_KEYS_STORAGE,
 } from "./utils/webSearchSettings";
+import { getLocalStorageItem } from "./utils/browserStorage";
 
 const CodeWorkspace = lazy(() =>
   import("./components/CodeWorkspace").then((mod) => ({
@@ -238,14 +239,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const raw = localStorage.getItem(WEB_SEARCH_KEYS_STORAGE);
+    const raw = getLocalStorageItem(WEB_SEARCH_KEYS_STORAGE);
     if (raw) {
       const payload = parseStoredWebSearchSettings(raw);
       if (payload) void invoke("set_web_search_api_keys", { ...payload }).catch(() => {});
       return;
     }
-    const tavily = localStorage.getItem("omiga_tavily_search_api_key");
-    const legacy = localStorage.getItem("omiga_brave_search_api_key") ?? undefined;
+    const tavily = getLocalStorageItem("omiga_tavily_search_api_key");
+    const legacy = getLocalStorageItem("omiga_brave_search_api_key") ?? undefined;
     const legacyTavily = (tavily?.trim() ? tavily : legacy)?.trim();
     if (legacyTavily) {
       void invoke("set_web_search_api_keys", {
@@ -279,7 +280,7 @@ export default function App() {
       } catch {
         /* fall through */
       }
-      const raw = localStorage.getItem("omiga_llm_config");
+      const raw = getLocalStorageItem("omiga_llm_config");
       if (!raw?.trim()) return;
       let parsed: {
         provider: string;

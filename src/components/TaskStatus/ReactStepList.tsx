@@ -14,11 +14,19 @@ import { CheckCircle, CloudQueue, RadioButtonUnchecked, WarningAmber } from "@mu
 import { alpha } from "@mui/material/styles";
 import type { ExecutionStep } from "../../state/activityStore";
 import {
+  formatDurationMsCompact,
+  formatStepElapsedLabel,
+} from "../ExecutionStepPanel";
+import {
   formatToolDisplayName,
   getExecutionSurfacePrimaryLabel,
   type ExecutionSurfaceContext,
 } from "../../utils/executionSurfaceLabel";
 import { compactLabel } from "../../utils/compactLabel";
+import {
+  summarizeExecutionInsight,
+  type ExecutionInsight,
+} from "../Chat/executionInsight";
 
 const ACCENT = "#6366f1";
 const BACKGROUND_RUNNING_ACCENT = "#f97316";
@@ -38,7 +46,11 @@ interface StepDisplayRow {
   failed: boolean;
   background: boolean;
   count: number;
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
   output?: string;
+  toolName?: string;
 }
 
 function isBackgroundOperationStep(step: ExecutionStep): boolean {
@@ -52,7 +64,12 @@ function coerceStaleToolStep(
   if (streamActive || step.status !== "running" || !step.id.startsWith("tool-")) {
     return step;
   }
-  return { ...step, status: "done" };
+  return { ...step, status: "done", completedAt: step.completedAt ?? Date.now() };
+}
+
+function stepDurationMs(step: ExecutionStep, now = Date.now()): number | undefined {
+  if (step.startedAt == null) return undefined;
+  return Math.max(0, (step.completedAt ?? now) - step.startedAt);
 }
 
 function buildDisplayRows(
@@ -75,8 +92,13 @@ function buildDisplayRows(
       previous.background === background
     ) {
       previous.count += 1;
+      const durationMs = stepDurationMs(step);
+      if (durationMs !== undefined) {
+        previous.durationMs = (previous.durationMs ?? 0) + durationMs;
+      }
       continue;
     }
+    const durationMs = stepDurationMs(step);
     rows.push({
       id: step.id,
       label,
@@ -84,7 +106,11 @@ function buildDisplayRows(
       failed,
       background,
       count: 1,
+      startedAt: step.startedAt,
+      completedAt: step.completedAt,
+      ...(durationMs !== undefined ? { durationMs } : {}),
       output: step.toolOutput,
+      toolName: step.toolName,
     });
   }
   return rows;
@@ -100,8 +126,13 @@ function buildGroupedFailureRows(steps: ExecutionStep[]): StepDisplayRow[] {
     const existing = byLabel.get(label);
     if (existing) {
       existing.count += 1;
+      const durationMs = stepDurationMs(step);
+      if (durationMs !== undefined) {
+        existing.durationMs = (existing.durationMs ?? 0) + durationMs;
+      }
       continue;
     }
+    const durationMs = stepDurationMs(step);
     const row: StepDisplayRow = {
       id: step.id,
       label,
@@ -109,12 +140,81 @@ function buildGroupedFailureRows(steps: ExecutionStep[]): StepDisplayRow[] {
       failed: true,
       background,
       count: 1,
+      startedAt: step.startedAt,
+      completedAt: step.completedAt,
+      ...(durationMs !== undefined ? { durationMs } : {}),
       output: step.toolOutput,
+      toolName: step.toolName,
     };
     byLabel.set(label, row);
     rows.push(row);
   }
   return rows;
+}
+
+function stepExecutionInsight(row: StepDisplayRow): ExecutionInsight | null {
+  if (!row.output) return null;
+  return summarizeExecutionInsight(row.toolName ?? row.label, row.output);
+}
+
+function StepExecutionInsightPanel({ insight }: { insight: ExecutionInsight }) {
+  return (
+    <Box
+      sx={{
+        mt: 0.45,
+        p: 0.75,
+        borderRadius: 1,
+        border: `1px solid ${alpha(ACCENT, 0.18)}`,
+        bgcolor: alpha(ACCENT, 0.045),
+      }}
+    >
+      <Stack spacing={0.55}>
+        <Stack direction="row" spacing={0.45} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Typography variant="caption" sx={{ fontSize: 9.5, fontWeight: 800 }}>
+            {insight.title}
+          </Typography>
+          {insight.chips.slice(0, 5).map((chip) => (
+            <Chip
+              key={chip}
+              size="small"
+              label={chip}
+              variant="outlined"
+              sx={{ height: 16, fontSize: 8.5, "& .MuiChip-label": { px: 0.55 } }}
+            />
+          ))}
+        </Stack>
+        {insight.sections.slice(0, 3).map((section) => (
+          <Box key={section.label}>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", fontSize: 8.5, fontWeight: 800, mb: 0.15 }}
+            >
+              {section.label}
+            </Typography>
+            <Stack component="ul" spacing={0.15} sx={{ m: 0, pl: 1.75 }}>
+              {section.items.slice(0, 4).map((item) => (
+                <Typography
+                  key={item}
+                  component="li"
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{
+                    display: "list-item",
+                    fontSize: 8.8,
+                    lineHeight: 1.35,
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {item}
+                </Typography>
+              ))}
+            </Stack>
+          </Box>
+        ))}
+      </Stack>
+    </Box>
+  );
 }
 
 interface ReactStepListProps {
@@ -160,6 +260,11 @@ export function ReactStepList({
         const isDone = row.status === "done";
         const isRun = row.status === "running";
         const isBackgroundRun = row.background && isRun;
+        const elapsedLabel =
+          row.status === "running"
+            ? formatStepElapsedLabel(row.startedAt, row.completedAt)
+            : formatDurationMsCompact(row.durationMs);
+        const insight = stepExecutionInsight(row);
         return (
           <ListItem
             key={row.id}
@@ -241,26 +346,45 @@ export function ReactStepList({
                       }}
                     />
                   )}
+                  {elapsedLabel && (
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{
+                        fontSize: 9,
+                        fontVariantNumeric: "tabular-nums",
+                        flexShrink: 0,
+                      }}
+                      title={isRun ? "当前步骤已运行时间" : "步骤执行耗时"}
+                    >
+                      {elapsedLabel}
+                    </Typography>
+                  )}
                 </Stack>
               }
               secondary={
                 row.failed && row.output ? (
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{
-                      display: "block",
-                      fontSize: 9,
-                      lineHeight: 1.35,
-                      mt: 0.1,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                    title={row.output}
-                  >
-                    {compactLabel(row.output, 84)}
-                  </Typography>
+                  <>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{
+                        display: "block",
+                        fontSize: 9,
+                        lineHeight: 1.35,
+                        mt: 0.1,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={row.output}
+                    >
+                      {compactLabel(row.output, 84)}
+                    </Typography>
+                    {insight ? <StepExecutionInsightPanel insight={insight} /> : null}
+                  </>
+                ) : insight ? (
+                  <StepExecutionInsightPanel insight={insight} />
                 ) : undefined
               }
             />

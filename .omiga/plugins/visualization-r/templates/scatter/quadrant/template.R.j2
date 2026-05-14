@@ -1,0 +1,74 @@
+#!/usr/bin/env Rscript
+# Template: scatter/quadrant
+# Purpose: Scatter plot with x/y threshold lines and automatic quadrant labels.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/quadrant
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(x = arg_or(3, "x_value"), y = arg_or(4, "y_value"), label = arg_or(5, "label"), group = arg_or(6, "group")),
+  thresholds = list(x = as.numeric(arg_or(7, "0")), y = as.numeric(arg_or(8, "0"))),
+  labels = list(title = arg_or(9, "Quadrant scatter plot")),
+  style = list(point_size = 2.5, point_alpha = 0.82, label_size = 3, base_size = 12)
+)
+delimiter <- arg_or(10, "auto"); width <- as.numeric(arg_or(11, "7")); height <- as.numeric(arg_or(12, "5.5")); dpi <- as.integer(arg_or(13, "300"))
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$x, config$columns$y), "scatter/quadrant input")
+  df <- ensure_numeric_columns(df, c(config$columns$x, config$columns$y), "scatter/quadrant input")
+  x <- df[[config$columns$x]]
+  y <- df[[config$columns$y]]
+  df$quadrant <- ifelse(x >= config$thresholds$x & y >= config$thresholds$y, "Q1 high/high",
+    ifelse(x < config$thresholds$x & y >= config$thresholds$y, "Q2 low/high",
+      ifelse(x < config$thresholds$x & y < config$thresholds$y, "Q3 low/low", "Q4 high/low")))
+  df
+}
+
+make_plot <- function(df, config) {
+  group_col <- resolve_optional_column(df, config$columns$group)
+  label_col <- resolve_optional_column(df, config$columns$label)
+  color_col <- if (!is.null(group_col)) group_col else "quadrant"
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[[config$columns$x]], y = .data[[config$columns$y]], color = .data[[color_col]])) +
+    ggplot2::geom_hline(yintercept = config$thresholds$y, linetype = "dashed", linewidth = 0.4, color = "grey45") +
+    ggplot2::geom_vline(xintercept = config$thresholds$x, linetype = "dashed", linewidth = 0.4, color = "grey45") +
+    ggplot2::geom_point(size = config$style$point_size, alpha = config$style$point_alpha) +
+    ggplot2::scale_colour_manual(values = visualization_palette(length(unique(df[[color_col]])))) +
+    ggplot2::labs(title = config$labels$title, x = config$columns$x, y = config$columns$y, color = color_col) +
+    theme_visualization(base_size = config$style$base_size)
+  if (!is.null(label_col)) {
+    label_df <- df[nzchar(as.character(df[[label_col]])), , drop = FALSE]
+    p <- p + ggplot2::geom_text(data = label_df, ggplot2::aes(label = .data[[label_col]]), vjust = -0.8, size = config$style$label_size, check_overlap = TRUE, show.legend = FALSE)
+  }
+  p
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows", "quadrants"), value = c("scatter/quadrant", nrow(plot_df), length(unique(plot_df$quadrant)))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "scatter/quadrant", rows = nrow(plot_df), quadrants = length(unique(plot_df$quadrant))))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

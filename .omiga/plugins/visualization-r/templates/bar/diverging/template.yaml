@@ -1,0 +1,176 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_bar_diverging
+  version: 0.1.0
+  name: Diverging
+  description: Two-sided opposite/directional enrichment bar chart, migrated from OmicsAgent bar/opposite.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - bar
+  - diverging
+  - enrichment
+  - table
+classification:
+  category: visualization/bar
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - bar
+  - diverging
+  - opposite
+  - enrichment
+  - pvalue
+  - table
+  stageInput:
+  - table
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Input CSV/TSV table with term label, p-value/FDR, and two-level direction/group column. See example.tsv.
+  params:
+    label_column:
+      kind: string
+      default: Description
+    p_value_column:
+      kind: string
+      default: p.adjust
+    group_column:
+      kind: string
+      default: Change
+    title:
+      kind: string
+      default: ''
+    x_label:
+      kind: string
+      default: -log10(p.adjust)
+    fill_label:
+      kind: string
+      default: Correlation
+    group_order:
+      kind: string
+      default: Positive,Negative
+      description: Comma-separated two-group order.
+    positive_groups:
+      kind: string
+      default: Positive,Up,Activated,Enriched
+      description: Comma-separated group names to draw on the positive/right side.
+    palette:
+      kind: string
+      default: '#acd372,#ed6ca4'
+      description: Comma-separated colors for the two groups.
+    bar_alpha:
+      kind: number
+      default: 0.7
+    bar_width:
+      kind: number
+      default: 0.72
+    center_label_offset:
+      kind: number
+      default: 0.2
+    center_label_size:
+      kind: number
+      default: 3.5
+    base_size:
+      kind: number
+      default: 12
+    max_score:
+      kind: number
+      default: 25
+      description: Cap for -log10(p) when p-values are zero or extremely small.
+    zero_replacement:
+      kind: string
+      default: auto
+      description: Replacement p-value for zero p-values. Use auto or a numeric value.
+    show_center_labels:
+      kind: boolean
+      default: true
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 7
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- diverging_bar
+- bar_diverging
+- opposite_bar
+- bar_opposite
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.label_column}
+  - ${params.p_value_column}
+  - ${params.group_column}
+  - ${params.title}
+  - ${params.x_label}
+  - ${params.fill_label}
+  - ${params.group_order}
+  - ${params.positive_groups}
+  - ${params.palette}
+  - ${params.bar_alpha}
+  - ${params.bar_width}
+  - ${params.center_label_offset}
+  - ${params.center_label_size}
+  - ${params.base_size}
+  - ${params.max_score}
+  - ${params.zero_replacement}
+  - ${params.show_center_labels}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

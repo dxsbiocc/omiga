@@ -6,6 +6,7 @@ import {
   Article,
   Assignment as AssignmentIcon,
   Checklist as ChecklistIcon,
+  Computer as ComputerIcon,
   Construction,
   ExpandMore,
   FolderOpen,
@@ -28,11 +29,16 @@ import {
   toolDisplayOutputText,
   type ToolCallLike,
 } from "./ToolFoldSummary";
+import {
+  summarizeExecutionInsight,
+  type ExecutionInsight,
+} from "./executionInsight";
 
 type ChatTokens = ReturnType<typeof getChatTokens>;
 
 function toolRowIcon(toolName: string) {
   const n = toolName.toLowerCase();
+  if (n.startsWith("computer_")) return ComputerIcon;
   if (n.includes("ask_user") || n.includes("askuserquestion"))
     return ForumOutlined;
   if (n === "Agent" || n === "Task") return SmartToy;
@@ -65,6 +71,155 @@ function toolRowIcon(toolName: string) {
   if (n.includes("taskstop") || n.includes("taskoutput")) return TerminalIcon;
   if (n.includes("read")) return Article;
   return Construction;
+}
+
+function isComputerUseTool(toolName: string): boolean {
+  return toolName.toLowerCase().startsWith("computer_");
+}
+
+function parseToolInput(input: string | undefined): Record<string, unknown> | null {
+  if (!input?.trim()) return null;
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* not JSON */
+  }
+  return null;
+}
+
+function compactString(value: unknown, max = 80): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
+}
+
+function computerUseInputSummary(toolName: string, input: string | undefined): string {
+  const parsed = parseToolInput(input);
+  if (!parsed) return input?.trim() ? "[Computer Use input hidden]" : "";
+
+  const summary: Record<string, unknown> = {};
+  for (const key of [
+    "observationId",
+    "targetWindowId",
+    "x",
+    "y",
+    "button",
+    "elementId",
+    "reason",
+    "targetHint",
+    "appName",
+    "bundleId",
+    "windowTitle",
+  ]) {
+    if (!(key in parsed)) continue;
+    const value = parsed[key];
+    summary[key] = typeof value === "string" ? compactString(value) ?? value : value;
+  }
+
+  if (typeof parsed.text === "string") {
+    summary.text = `[hidden ${parsed.text.length} chars]`;
+  }
+
+  if (Object.keys(summary).length === 0) {
+    summary.kind = toolName;
+  }
+  return JSON.stringify(summary, null, 2);
+}
+
+function computerUsePanelTitle(toolName: string, input: string | undefined): string {
+  const parsed = parseToolInput(input);
+  if (toolName === "computer_type" && typeof parsed?.text === "string") {
+    return `computer_type · text hidden (${parsed.text.length} chars)`;
+  }
+  if (toolName === "computer_click") {
+    const x = parsed?.x;
+    const y = parsed?.y;
+    if (typeof x === "number" && typeof y === "number") {
+      return `computer_click · (${x}, ${y})`;
+    }
+  }
+  if (toolName === "computer_click_element") {
+    const elementId = compactString(parsed?.elementId, 48);
+    if (elementId) return `computer_click_element · ${elementId}`;
+  }
+  return toolName;
+}
+
+interface ExecutionInsightPanelProps {
+  insight: ExecutionInsight;
+  chat: ChatTokens;
+}
+
+function ExecutionInsightPanel({ insight, chat }: ExecutionInsightPanelProps) {
+  return (
+    <Box
+      sx={{
+        mb: 1,
+        borderRadius: "8px",
+        border: `1px solid ${alpha(chat.accent, 0.22)}`,
+        bgcolor: alpha(chat.accent, 0.055),
+        p: 1,
+      }}
+    >
+      <Stack direction="column" spacing={0.8}>
+        <Stack direction="row" alignItems="center" spacing={0.75} flexWrap="wrap">
+          <Typography
+            sx={{
+              fontSize: 11,
+              fontWeight: 700,
+              color: chat.textPrimary,
+              mr: 0.25,
+            }}
+          >
+            {insight.title}
+          </Typography>
+          {insight.chips.map((chip) => (
+            <Chip
+              key={chip}
+              size="small"
+              label={chip}
+              variant="outlined"
+              sx={{ height: 20, fontSize: 10 }}
+            />
+          ))}
+        </Stack>
+        {insight.sections.map((section) => (
+          <Box key={section.label}>
+            <Typography
+              sx={{
+                fontSize: 10,
+                color: chat.labelMuted,
+                fontWeight: 700,
+                mb: 0.35,
+              }}
+            >
+              {section.label}
+            </Typography>
+            <Stack component="ul" spacing={0.25} sx={{ m: 0, pl: 2 }}>
+              {section.items.map((item) => (
+                <Typography
+                  key={item}
+                  component="li"
+                  sx={{
+                    fontSize: 10,
+                    color: chat.textMuted,
+                    lineHeight: 1.35,
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {item}
+                </Typography>
+              ))}
+            </Stack>
+          </Box>
+        ))}
+      </Stack>
+    </Box>
+  );
 }
 
 export interface ToolCallCardProps {
@@ -102,12 +257,23 @@ export const ToolCallCard = memo(function ToolCallCard({
     toolCall,
   );
   const structuredError = parseStructuredToolErrorHint(displayOutput);
-  const hasInput = Boolean(toolCall.input && toolCall.input.trim());
+  const executionInsight = summarizeExecutionInsight(toolCall.name, displayOutput);
+  const isComputerTool = isComputerUseTool(toolCall.name);
+  const displayInput = isComputerTool
+    ? computerUseInputSummary(toolCall.name, toolCall.input)
+    : toolCall.input;
+  const hasInput = Boolean(displayInput && displayInput.trim());
   const hasOutput = Boolean(displayOutput);
   const isBash =
     toolCall.name === "bash" || toolCall.name.toLowerCase().includes("bash");
-  const commandSectionLabel = isBash ? "Command" : toolCall.name;
-  const panelTitle = toolCallPanelTitle(toolCall.input, toolCall.name);
+  const commandSectionLabel = isBash
+    ? "Command"
+    : isComputerTool
+      ? "Computer Use request"
+      : toolCall.name;
+  const panelTitle = isComputerTool
+    ? computerUsePanelTitle(toolCall.name, toolCall.input)
+    : toolCallPanelTitle(toolCall.input, toolCall.name);
   const prefaceThought = prefaceBeforeTools?.trim() ?? "";
   const toolDurationLabel = formatToolDuration(timestamp, toolCall.completedAt);
   const thoughtRow =
@@ -153,16 +319,6 @@ export const ToolCallCard = memo(function ToolCallCard({
             transition: "background-color 150ms ease",
             "&:hover": {
               bgcolor: alpha(chat.accent, 0.06),
-              "& > svg:first-of-type": {
-                color: chat.accent,
-                opacity: 1,
-              },
-              "& > svg:nth-of-type(2)": {
-                color: chat.accent,
-              },
-              "& > .MuiTypography-root": {
-                color: chat.textPrimary,
-              },
             },
           }}
         >
@@ -173,7 +329,7 @@ export const ToolCallCard = memo(function ToolCallCard({
               opacity: 0.65,
               flexShrink: 0,
               transform: nestedOpen ? "rotate(0deg)" : "rotate(-90deg)",
-              transition: "transform 0.2s ease, color 150ms ease, opacity 150ms ease",
+              transition: "transform 0.2s ease",
             }}
           />
           <Chip
@@ -191,7 +347,6 @@ export const ToolCallCard = memo(function ToolCallCard({
               fontSize: 16,
               color: chat.toolIcon,
               flexShrink: 0,
-              transition: "color 150ms ease",
             }}
           />
           <Typography
@@ -202,7 +357,6 @@ export const ToolCallCard = memo(function ToolCallCard({
               flex: 1,
               lineHeight: 1.35,
               wordBreak: "break-word",
-              transition: "color 150ms ease",
             }}
           >
             {panelTitle}
@@ -306,13 +460,17 @@ export const ToolCallCard = memo(function ToolCallCard({
                           wordBreak: "break-word",
                         }}
                       >
-                        {toolCall.input}
+                        {displayInput}
                       </Typography>
                     </Box>
                   </Box>
                 )}
                 {hasOutput && (
                   <Box>
+                    {executionInsight && (
+                      <ExecutionInsightPanel insight={executionInsight} chat={chat} />
+                    )}
+
                     {structuredError && (
                       <Box
                         sx={{
@@ -416,7 +574,7 @@ export const ToolCallCard = memo(function ToolCallCard({
                         fontWeight: 400,
                       }}
                     >
-                      {structuredError ? "Raw output" : "Output"}
+                      {structuredError || executionInsight ? "Raw output" : "Output"}
                     </Typography>
                     <Box
                       sx={{

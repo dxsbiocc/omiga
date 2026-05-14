@@ -2,11 +2,13 @@
 
 use crate::domain::mcp::client::list_tools_for_server;
 use crate::domain::mcp::config::merged_mcp_servers;
-use crate::domain::mcp::names::{build_mcp_tool_name, normalize_name_for_mcp, parse_mcp_tool_name};
+use crate::domain::mcp::names::{
+    build_mcp_tool_name, is_reserved_computer_mcp_tool, normalize_name_for_mcp, parse_mcp_tool_name,
+};
 use crate::domain::tools::ToolSchema;
 use futures::future::join_all;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -22,9 +24,10 @@ pub fn filter_mcp_tool_schemas_by_configured_servers(
     schemas
         .into_iter()
         .filter(|schema| {
-            parse_mcp_tool_name(&schema.name)
-                .map(|(server, _)| configured.contains(&server))
-                .unwrap_or(false)
+            !is_reserved_computer_mcp_tool(&schema.name)
+                && parse_mcp_tool_name(&schema.name)
+                    .map(|(server, _)| configured.contains(&server))
+                    .unwrap_or(false)
         })
         .collect()
 }
@@ -46,7 +49,9 @@ pub async fn discover_mcp_tool_schemas(project_root: &Path, timeout: Duration) -
     if merged.is_empty() {
         return vec![];
     }
-    let mut names: Vec<String> = merged.keys().cloned().collect();
+    let integrations_cfg =
+        crate::domain::integrations_config::load_integrations_config(project_root);
+    let mut names = enabled_mcp_server_names(&merged, &integrations_cfg);
     names.sort();
     let handles = names.into_iter().map(|name| {
         let project_root = project_root.to_path_buf();
@@ -62,6 +67,13 @@ pub async fn discover_mcp_tool_schemas(project_root: &Path, timeout: Duration) -
             Ok(tools) => {
                 for t in tools {
                     let fq = build_mcp_tool_name(&server_name, t.name.as_ref());
+                    if is_reserved_computer_mcp_tool(&fq) {
+                        tracing::debug!(
+                            tool = %fq,
+                            "reserved Computer Use MCP backend tool hidden behind computer_* facade"
+                        );
+                        continue;
+                    }
                     let desc = t.description.as_deref().unwrap_or("MCP tool").to_string();
                     let params = serde_json::to_value(&*t.input_schema)
                         .unwrap_or_else(|_| json!({"type": "object"}));
@@ -75,6 +87,22 @@ pub async fn discover_mcp_tool_schemas(project_root: &Path, timeout: Duration) -
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+fn enabled_mcp_server_names(
+    merged: &HashMap<String, crate::domain::mcp::config::McpServerConfig>,
+    integrations_cfg: &crate::domain::integrations_config::IntegrationsConfig,
+) -> Vec<String> {
+    merged
+        .keys()
+        .filter(|name| {
+            !crate::domain::integrations_config::is_mcp_config_server_disabled(
+                integrations_cfg,
+                name,
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -94,8 +122,10 @@ mod tests {
                 "Playwright",
                 json!({"type":"object"}),
             ),
+            ToolSchema::new("mcp__computer__click", "Computer", json!({"type":"object"})),
         ];
-        let configured_server_names = HashSet::from(["playwright".to_string()]);
+        let configured_server_names =
+            HashSet::from(["playwright".to_string(), "computer".to_string()]);
 
         let filtered =
             filter_mcp_tool_schemas_by_configured_servers(schemas, &configured_server_names);
@@ -105,5 +135,39 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["mcp__playwright__browser_navigate"]);
+    }
+
+    #[test]
+    fn discovery_skips_disabled_mcp_servers_before_connecting() {
+        use crate::domain::integrations_config::IntegrationsConfig;
+        use crate::domain::mcp::config::McpServerConfig;
+
+        let merged = HashMap::from([
+            (
+                "paperclip".to_string(),
+                McpServerConfig::Url {
+                    url: "https://paperclip.gxl.ai/mcp".to_string(),
+                    headers: Default::default(),
+                },
+            ),
+            (
+                "local".to_string(),
+                McpServerConfig::Stdio {
+                    command: "node".to_string(),
+                    args: vec!["server.js".to_string()],
+                    env: Default::default(),
+                    cwd: None,
+                },
+            ),
+        ]);
+        let cfg = IntegrationsConfig {
+            disabled_mcp_servers: vec!["paperclip".to_string()],
+            disabled_skills: vec![],
+        };
+
+        let mut names = enabled_mcp_server_names(&merged, &cfg);
+        names.sort();
+
+        assert_eq!(names, vec!["local"]);
     }
 }

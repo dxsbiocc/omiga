@@ -1,0 +1,266 @@
+#!/usr/bin/env Rscript
+# Template: scatter/marginal
+# Purpose: Scatter plot with grouped marginal boxplots.
+#
+# Migration note:
+#   This template migrates OmicsAgent scatter/marginal from a private
+#   JSON ggplot2 + ggExtra DSL into direct, editable R/ggplot2 code. The
+#   original data.json has been converted to example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/marginal
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default = TRUE) {
+  raw <- tolower(trimws(arg_or(index, if (isTRUE(default)) "true" else "false")))
+  if (raw %in% c("1", "true", "yes", "y", "on")) return(TRUE)
+  if (raw %in% c("0", "false", "no", "n", "off")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    x = arg_or(3, "x"),
+    y = arg_or(4, "y"),
+    group = arg_or(5, "group")
+  ),
+  levels = list(groups = parse_csv_arg(6, "")),
+  labels = list(
+    title = arg_or(7, "Marginal Scatter"),
+    x = arg_or(8, "X value"),
+    y = arg_or(9, "Y value")
+  ),
+  style = list(
+    palette = parse_csv_arg(10, "#333463,#079C9C"),
+    point_alpha = parse_number_arg(11, 0.7),
+    point_size = parse_number_arg(12, 2),
+    show_fit = parse_logical_arg(13, TRUE),
+    fit_se = parse_logical_arg(14, TRUE),
+    fit_alpha = parse_number_arg(15, 0.2),
+    fit_width = parse_number_arg(16, 0.8),
+    show_cor = parse_logical_arg(17, TRUE),
+    cor_method = arg_or(18, "pearson"),
+    marginal_type = arg_or(19, "boxplot"),
+    marginal_size = parse_number_arg(20, 1.2),
+    marginal_alpha = parse_number_arg(21, 0.35),
+    marginal_width = parse_number_arg(22, 0.55),
+    base_size = parse_number_arg(23, 12)
+  )
+)
+delimiter <- arg_or(24, "auto")
+width <- parse_number_arg(25, 6.5)
+height <- parse_number_arg(26, 6)
+dpi <- parse_integer_arg(27, 300)
+
+first_seen <- function(x) unique(as.character(x))
+make_palette <- function(values, levels) {
+  if (!length(values)) values <- visualization_palette(length(levels))
+  if (length(values) < length(levels)) values <- rep(values, length.out = length(levels))
+  stats::setNames(values[seq_along(levels)], levels)
+}
+expand_range <- function(x, pad = 0.06) {
+  rng <- range(x, na.rm = TRUE)
+  if (!all(is.finite(rng))) return(c(0, 1))
+  if (diff(rng) == 0) return(rng + c(-0.5, 0.5))
+  rng + c(-1, 1) * diff(rng) * pad
+}
+format_cor_label <- function(df, method) {
+  ok <- is.finite(df$.x) & is.finite(df$.y)
+  if (sum(ok) < 3) return("r = NA")
+  test <- suppressWarnings(stats::cor.test(df$.x[ok], df$.y[ok], method = method))
+  r_label <- if (method == "pearson") "r" else "rho"
+  p_label <- if (test$p.value < 0.001) "p < 0.001" else sprintf("p = %.3f", test$p.value)
+  sprintf("%s = %.2f, %s", r_label, unname(test$estimate), p_label)
+}
+
+prepare_data <- function(df, config) {
+  required <- c(config$columns$x, config$columns$y)
+  group_col <- resolve_optional_column(df, config$columns$group)
+  if (!is.null(group_col)) required <- c(required, group_col)
+  validate_columns(df, required, "scatter/marginal input")
+  df <- ensure_numeric_columns(df, c(config$columns$x, config$columns$y), "scatter/marginal input")
+  df$.x <- df[[config$columns$x]]
+  df$.y <- df[[config$columns$y]]
+  if (is.null(group_col)) {
+    df$.group_raw <- "Value"
+  } else {
+    df$.group_raw <- as.character(df[[group_col]])
+  }
+  df <- df[is.finite(df$.x) & is.finite(df$.y) & nzchar(df$.group_raw), , drop = FALSE]
+  if (nrow(df) == 0) stop("scatter/marginal input has no usable rows.", call. = FALSE)
+  group_levels <- config$levels$groups
+  if (length(group_levels) == 0) group_levels <- first_seen(df$.group_raw)
+  group_levels <- c(group_levels[group_levels %in% df$.group_raw], setdiff(first_seen(df$.group_raw), group_levels))
+  df <- df[df$.group_raw %in% group_levels, , drop = FALSE]
+  df$.group <- factor(df$.group_raw, levels = group_levels)
+  list(points = df, group_levels = group_levels, xlim = expand_range(df$.x), ylim = expand_range(df$.y))
+}
+
+scatter_plot <- function(prepared, config, palette) {
+  df <- prepared$points
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .x, y = .y, colour = .group, fill = .group)) +
+    ggplot2::geom_point(alpha = config$style$point_alpha, size = config$style$point_size, show.legend = FALSE)
+  if (isTRUE(config$style$show_fit)) {
+    p <- p + ggplot2::geom_smooth(
+      method = "lm",
+      se = isTRUE(config$style$fit_se),
+      alpha = config$style$fit_alpha,
+      linewidth = config$style$fit_width,
+      show.legend = FALSE
+    )
+  }
+  if (isTRUE(config$style$show_cor)) {
+    p <- p + ggplot2::annotate(
+      "label",
+      x = prepared$xlim[1],
+      y = prepared$ylim[2],
+      label = format_cor_label(df, config$style$cor_method),
+      hjust = 0,
+      vjust = 1,
+      size = config$style$base_size * 0.28,
+      label.size = 0,
+      fill = "white",
+      alpha = 0.85
+    )
+  }
+  p +
+    ggplot2::scale_colour_manual(values = palette, guide = "none") +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_x_continuous(limits = prepared$xlim, expand = ggplot2::expansion(mult = c(0, 0))) +
+    ggplot2::scale_y_continuous(limits = prepared$ylim, expand = ggplot2::expansion(mult = c(0, 0))) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    theme_visualization(config$style$base_size) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+      legend.position = "none"
+    )
+}
+
+marginal_top_plot <- function(prepared, config, palette) {
+  ggplot2::ggplot(prepared$points, ggplot2::aes(x = .x, y = .group, colour = .group, fill = .group)) +
+    ggplot2::geom_boxplot(width = config$style$marginal_width, alpha = config$style$marginal_alpha, outlier.shape = NA, linewidth = 0.45, show.legend = FALSE) +
+    ggplot2::scale_colour_manual(values = palette, guide = "none") +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_x_continuous(limits = prepared$xlim, expand = ggplot2::expansion(mult = c(0, 0))) +
+    ggplot2::theme_void(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", colour = NA),
+      panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+      plot.margin = grid::unit(c(4, 4, 0, 4), "pt")
+    )
+}
+
+marginal_right_plot <- function(prepared, config, palette) {
+  ggplot2::ggplot(prepared$points, ggplot2::aes(x = .group, y = .y, colour = .group, fill = .group)) +
+    ggplot2::geom_boxplot(width = config$style$marginal_width, alpha = config$style$marginal_alpha, outlier.shape = NA, linewidth = 0.45, show.legend = FALSE) +
+    ggplot2::scale_colour_manual(values = palette, guide = "none") +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_y_continuous(limits = prepared$ylim, expand = ggplot2::expansion(mult = c(0, 0))) +
+    ggplot2::theme_void(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", colour = NA),
+      panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+      plot.margin = grid::unit(c(4, 4, 4, 0), "pt")
+    )
+}
+
+with_grid_metric_device <- function(expr) {
+  # ggplotGrob() can open R's implicit default PDF device in headless Rscript
+  # while resolving grid metrics. Use an explicit disposable device instead so
+  # template runs never leave Rplots.pdf in the working directory.
+  metric_device <- tempfile(fileext = ".pdf")
+  grDevices::pdf(metric_device, width = 7, height = 7, bg = "white", onefile = FALSE)
+  on.exit({
+    grDevices::dev.off()
+    unlink(metric_device)
+  }, add = TRUE)
+  force(expr)
+}
+
+assemble_plot <- function(scatter, top, right, config) {
+  if (!requireNamespace("gtable", quietly = TRUE)) {
+    stop("scatter/marginal requires the gtable package, installed with ggplot2.", call. = FALSE)
+  }
+  layout <- gtable::gtable(
+    widths = grid::unit.c(grid::unit(1, "null"), grid::unit(config$style$marginal_size, "in")),
+    heights = grid::unit.c(grid::unit(config$style$marginal_size, "in"), grid::unit(1, "null"))
+  )
+  white_bg <- function() grid::rectGrob(gp = grid::gpar(fill = "white", col = NA))
+  layout <- gtable::gtable_add_grob(layout, white_bg(), t = 1, l = 1, name = "bg-top", z = -Inf)
+  layout <- gtable::gtable_add_grob(layout, white_bg(), t = 1, l = 2, name = "bg-spacer", z = -Inf)
+  layout <- gtable::gtable_add_grob(layout, white_bg(), t = 2, l = 1, name = "bg-scatter", z = -Inf)
+  layout <- gtable::gtable_add_grob(layout, white_bg(), t = 2, l = 2, name = "bg-right", z = -Inf)
+  layout <- gtable::gtable_add_grob(layout, with_grid_metric_device(ggplot2::ggplotGrob(top)), t = 1, l = 1, name = "top")
+  layout <- gtable::gtable_add_grob(layout, grid::nullGrob(), t = 1, l = 2, name = "spacer")
+  layout <- gtable::gtable_add_grob(layout, with_grid_metric_device(ggplot2::ggplotGrob(scatter)), t = 2, l = 1, name = "scatter")
+  layout <- gtable::gtable_add_grob(layout, with_grid_metric_device(ggplot2::ggplotGrob(right)), t = 2, l = 2, name = "right")
+  layout
+}
+
+make_plot <- function(prepared, config) {
+  palette <- make_palette(config$style$palette, prepared$group_levels)
+  scatter <- scatter_plot(prepared, config, palette)
+  if (tolower(config$style$marginal_type) == "none") return(scatter)
+  top <- marginal_top_plot(prepared, config, palette)
+  right <- marginal_right_plot(prepared, config, palette)
+  assemble_plot(scatter, top, right, config)
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "groups", "x_min", "x_max", "y_min", "y_max", "correlation"),
+      value = c(
+        "scatter/marginal",
+        nrow(prepared$points),
+        length(prepared$group_levels),
+        min(prepared$points$.x),
+        max(prepared$points$.x),
+        min(prepared$points$.y),
+        max(prepared$points$.y),
+        suppressWarnings(stats::cor(prepared$points$.x, prepared$points$.y, use = "complete.obs", method = config$style$cor_method))
+      )
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/marginal", rows = nrow(prepared$points), groups = length(prepared$group_levels), correlation = suppressWarnings(stats::cor(prepared$points$.x, prepared$points$.y, use = "complete.obs", method = config$style$cor_method))))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

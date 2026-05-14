@@ -1,0 +1,202 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_distribution_polar_heatmap
+  version: 0.1.0
+  name: Polar Heatmap
+  description: Polar/radial fan plot combining per-group distribution violins with an inner heatmap, migrated from OmicsAgent boxplot/polar_heatmap.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - distribution
+  - violin
+  - heatmap
+  - polar
+  - radial
+  - table
+classification:
+  category: visualization/distribution
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - distribution
+  - violin
+  - heatmap
+  - polar
+  - radial
+  - ordered-categories
+  stageInput:
+  - table
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with feature, heatmap category, and numeric value columns. See example.tsv converted from OmicsAgent data.json.
+  params:
+    feature_column:
+      kind: string
+      default: gene
+    value_column:
+      kind: string
+      default: exprs
+    heatmap_category_column:
+      kind: string
+      default: grade
+    title:
+      kind: string
+      default: ''
+    feature_order:
+      kind: string
+      default: auto
+      description: Comma-separated feature order, or auto.
+    heatmap_category_order:
+      kind: string
+      default: auto
+      description: Comma-separated inner heatmap category order, or auto.
+    violin_palette:
+      kind: string
+      default: '#d7689d,#f3d337,#a0c443,#66b5ae,#5da4dc,#40769e'
+      description: Comma-separated colors for outer feature violins; interpolated when needed.
+    heatmap_palette:
+      kind: string
+      default: '#E9E29C,#d7689d'
+      description: Comma-separated colors for the inner heatmap gradient.
+    start_angle:
+      kind: number
+      default: -1.047198
+      description: Start angle in radians for coord_radial.
+    end_angle:
+      kind: number
+      default: 1.047198
+      description: End angle in radians for coord_radial.
+    violin_width:
+      kind: number
+      default: 0.88
+    violin_alpha:
+      kind: number
+      default: 0.9
+    tile_width:
+      kind: number
+      default: 0.96
+    tile_height:
+      kind: number
+      default: 0.96
+    radial_min:
+      kind: string
+      default: auto
+      description: Lower radial limit. Use auto or a numeric value.
+    radial_max:
+      kind: string
+      default: auto
+      description: Upper radial limit. Use auto or a numeric value.
+    value_breaks:
+      kind: string
+      default: auto
+      description: Comma-separated outer value guide labels, or auto.
+    guide_color:
+      kind: string
+      default: grey50
+    heatmap_border_color:
+      kind: string
+      default: '#fffffe'
+    label_size:
+      kind: number
+      default: 3.5
+    base_size:
+      kind: number
+      default: 11
+    legend_title:
+      kind: string
+      default: mean value
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 6
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- polar_heatmap
+- radial_heatmap_violin
+- fan_plot
+- boxplot_polar_heatmap
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.feature_column}
+  - ${params.value_column}
+  - ${params.heatmap_category_column}
+  - ${params.title}
+  - ${params.feature_order}
+  - ${params.heatmap_category_order}
+  - ${params.violin_palette}
+  - ${params.heatmap_palette}
+  - ${params.start_angle}
+  - ${params.end_angle}
+  - ${params.violin_width}
+  - ${params.violin_alpha}
+  - ${params.tile_width}
+  - ${params.tile_height}
+  - ${params.radial_min}
+  - ${params.radial_max}
+  - ${params.value_breaks}
+  - ${params.guide_color}
+  - ${params.heatmap_border_color}
+  - ${params.label_size}
+  - ${params.base_size}
+  - ${params.legend_title}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

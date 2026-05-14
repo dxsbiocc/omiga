@@ -56,6 +56,14 @@ fn canonical_knowledge_source(source: &str) -> Result<String, ToolError> {
             message: format!("Knowledge source `{}` does not support query.", def.id),
         });
     }
+    if !BUILTIN_KNOWLEDGE_QUERY_SOURCES.contains(&def.id) {
+        return Err(ToolError::InvalidArguments {
+            message: format!(
+                "Knowledge source `{}` is plugin-backed. Enable and use the matching retrieval plugin route instead of the built-in knowledge adapter.",
+                def.id
+            ),
+        });
+    }
     Ok(def.id.to_string())
 }
 
@@ -230,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_planned_knowledge_sources_from_registry() {
+    fn rejects_plugin_backed_knowledge_sources_from_builtin_adapter() {
         let err = canonical_knowledge_source("reactome").unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments { .. }));
     }
@@ -250,6 +258,9 @@ mod tests {
                     );
                 }
                 "knowledge" => {
+                    if source.origin != retrieval_registry::RetrievalOrigin::Builtin {
+                        continue;
+                    }
                     assert!(
                         canonical_knowledge_source(source.id).is_ok(),
                         "knowledge source `{}` must route to a knowledge adapter",
@@ -270,6 +281,7 @@ mod tests {
             .into_iter()
             .filter(|source| {
                 source.category == "knowledge"
+                    && source.origin == retrieval_registry::RetrievalOrigin::Builtin
                     && source.can_execute()
                     && source.supports(RetrievalCapability::Query)
             })

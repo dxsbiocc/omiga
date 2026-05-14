@@ -299,13 +299,6 @@ export const ToolFoldHeader = memo(function ToolFoldHeader({
         transition: "background-color 150ms ease",
         "&:hover": {
           bgcolor: alpha(chat.accent, 0.07),
-          "& > svg:first-of-type": {
-            color: chat.accent,
-            opacity: 1,
-          },
-          "& > .MuiTypography-root:first-of-type": {
-            color: chat.textPrimary,
-          },
         },
       }}
     >
@@ -315,7 +308,7 @@ export const ToolFoldHeader = memo(function ToolFoldHeader({
           color: chat.toolIcon,
           opacity: 0.65,
           transform: expanded ? "rotate(0deg)" : "rotate(-90deg)",
-          transition: "transform 0.2s ease, color 150ms ease, opacity 150ms ease",
+          transition: "transform 0.2s ease",
         }}
       />
       <Typography
@@ -326,7 +319,6 @@ export const ToolFoldHeader = memo(function ToolFoldHeader({
           minWidth: 0,
           overflowWrap: "anywhere",
           wordBreak: "break-word",
-          transition: "color 150ms ease",
         }}
       >
         {summary}

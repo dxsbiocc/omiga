@@ -1,0 +1,185 @@
+#!/usr/bin/env Rscript
+# Template: scatter/rank
+# Purpose: Ranked feature scatter plot with highlighted extremes.
+#
+# Migration note:
+#   This template migrates OmicsAgent scatter/rank from a private JSON
+#   ggplot2 DSL into direct, editable R/ggplot2 code. The original data.json
+#   has been converted to example.tsv. ggrepel is used when available, with a
+#   ggplot2 label fallback to keep the template runnable.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/rank
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    rank = arg_or(3, "rank"),
+    value = arg_or(4, "log2FC"),
+    label = arg_or(5, "symbol")
+  ),
+  labels = list(
+    title = arg_or(6, "Yap1-KO"),
+    x = arg_or(7, "Rank"),
+    y = arg_or(8, "log2FC")
+  ),
+  style = list(
+    low_color = arg_or(9, "#7fbc41"),
+    mid_color = arg_or(10, "#f7f7f7"),
+    high_color = arg_or(11, "#de77ae"),
+    point_size_min = parse_number_arg(12, 0.8),
+    point_size_max = parse_number_arg(13, 3.8),
+    point_alpha = parse_number_arg(14, 0.85),
+    highlight_top_k = parse_integer_arg(15, 10),
+    highlight_size = parse_number_arg(16, 5),
+    label_size = parse_number_arg(17, 3),
+    max_overlaps = parse_integer_arg(18, 2000),
+    base_size = parse_number_arg(19, 12)
+  )
+)
+delimiter <- arg_or(20, "auto")
+width <- parse_number_arg(21, 6)
+height <- parse_number_arg(22, 6)
+dpi <- parse_integer_arg(23, 300)
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$rank, config$columns$value, config$columns$label), "scatter/rank input")
+  df <- ensure_numeric_columns(df, c(config$columns$rank, config$columns$value), "scatter/rank input")
+  df$.rank <- df[[config$columns$rank]]
+  df$.value <- df[[config$columns$value]]
+  df$.label <- as.character(df[[config$columns$label]])
+  df <- df[is.finite(df$.rank) & is.finite(df$.value) & nzchar(df$.label), , drop = FALSE]
+  if (nrow(df) == 0) stop("scatter/rank input has no usable rows.", call. = FALSE)
+  df$.abs_value <- abs(df$.value)
+  df
+}
+
+label_data <- function(df, config) {
+  top_k <- max(0L, min(as.integer(config$style$highlight_top_k), nrow(df)))
+  if (top_k == 0) return(df[0, , drop = FALSE])
+  low <- utils::head(df[order(df$.rank, decreasing = FALSE), , drop = FALSE], top_k)
+  high <- utils::head(df[order(df$.rank, decreasing = TRUE), , drop = FALSE], top_k)
+  out <- rbind(low, high)
+  out <- out[!duplicated(out$.label), , drop = FALSE]
+  out
+}
+
+plot_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    plot.background = ggplot2::element_rect(fill = "white", colour = NA),
+    panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+    plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+    legend.title = ggplot2::element_text(size = config$style$base_size),
+    legend.position = "right"
+  )
+}
+
+make_plot <- function(df, config) {
+  labels <- label_data(df, config)
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .rank, y = .value, colour = .value)) +
+    ggplot2::geom_point(
+      ggplot2::aes(size = .abs_value),
+      stroke = 0,
+      alpha = config$style$point_alpha,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_colour_gradient2(
+      name = config$columns$value,
+      low = config$style$low_color,
+      mid = config$style$mid_color,
+      high = config$style$high_color,
+      midpoint = 0
+    ) +
+    ggplot2::scale_size_continuous(range = c(config$style$point_size_min, config$style$point_size_max), guide = "none") +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    plot_theme(config)
+
+  if (nrow(labels) > 0) {
+    p <- p + ggplot2::geom_point(
+      data = labels,
+      ggplot2::aes(x = .rank, y = .value),
+      inherit.aes = FALSE,
+      size = config$style$highlight_size,
+      fill = "transparent",
+      colour = "grey60",
+      shape = 21,
+      show.legend = FALSE
+    )
+    if (requireNamespace("ggrepel", quietly = TRUE)) {
+      p <- p + ggrepel::geom_label_repel(
+        data = labels,
+        ggplot2::aes(x = .rank, y = .value, label = .label),
+        inherit.aes = FALSE,
+        size = config$style$label_size,
+        max.overlaps = config$style$max_overlaps,
+        show.legend = FALSE,
+        label.size = 0.2,
+        fill = "white",
+        alpha = 0.9
+      )
+    } else {
+      p <- p + ggplot2::geom_label(
+        data = labels,
+        ggplot2::aes(x = .rank, y = .value, label = .label),
+        inherit.aes = FALSE,
+        size = config$style$label_size,
+        show.legend = FALSE,
+        label.size = 0.2,
+        fill = "white",
+        alpha = 0.9
+      )
+    }
+  }
+  p
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  labels <- label_data(plot_df, config)
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "labeled", "rank_min", "rank_max", "value_min", "value_max"),
+      value = c("scatter/rank", nrow(plot_df), nrow(labels), min(plot_df$.rank), max(plot_df$.rank), min(plot_df$.value), max(plot_df$.value))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/rank", rows = nrow(plot_df), labeled = nrow(labels), rank_min = min(plot_df$.rank), rank_max = max(plot_df$.rank), value_min = min(plot_df$.value), value_max = max(plot_df$.value)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

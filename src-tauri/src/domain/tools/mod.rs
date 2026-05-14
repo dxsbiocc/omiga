@@ -5,44 +5,112 @@
 //! - Each tool implements the Tool trait with associated types for arguments/results
 //! - Tool execution produces StreamOutput for unified streaming interface
 
+// Keep public module names flat for compatibility while storing same-family
+// tool implementations in subdirectories.
 pub mod agent;
+#[path = "interaction/ask_user_question.rs"]
 pub mod ask_user_question;
 pub mod bash;
 pub mod connector;
+#[path = "plan/enter_mode.rs"]
 pub mod enter_plan_mode;
 pub mod env_store;
+#[path = "environment/profile_check.rs"]
+pub mod environment_profile_check;
+#[path = "environment/profile_prepare_plan.rs"]
+pub mod environment_profile_prepare_plan;
+#[path = "execution/archive_advisor.rs"]
+pub mod execution_archive_advisor;
+#[path = "execution/archive_suggestion_write.rs"]
+pub mod execution_archive_suggestion_write;
+#[path = "execution/lineage_report.rs"]
+pub mod execution_lineage_report;
+#[path = "execution/record_detail.rs"]
+pub mod execution_record_detail;
+#[path = "execution/record_list.rs"]
+pub mod execution_record_list;
+#[path = "plan/exit_mode.rs"]
 pub mod exit_plan_mode;
 pub mod fetch;
+#[path = "file/edit.rs"]
 pub mod file_edit;
+#[path = "file/read.rs"]
 pub mod file_read;
+#[path = "file/write.rs"]
 pub mod file_write;
+#[path = "file/glob.rs"]
 pub mod glob;
+#[path = "file/grep.rs"]
 pub mod grep;
+#[path = "learning/preference_candidate_list.rs"]
+pub mod learning_preference_candidate_list;
+#[path = "learning/preference_candidate_promote.rs"]
+pub mod learning_preference_candidate_promote;
+#[path = "learning/proposal_apply.rs"]
+pub mod learning_proposal_apply;
+#[path = "learning/proposal_decide.rs"]
+pub mod learning_proposal_decide;
+#[path = "learning/proposal_list.rs"]
+pub mod learning_proposal_list;
+#[path = "learning/self_evolution_creator.rs"]
+pub mod learning_self_evolution_creator;
+#[path = "learning/self_evolution_draft_write.rs"]
+pub mod learning_self_evolution_draft_write;
+#[path = "learning/self_evolution_report.rs"]
+pub mod learning_self_evolution_report;
+#[path = "mcp/list_resources.rs"]
 pub mod list_mcp_resources;
+#[path = "skill/list.rs"]
 pub mod list_skills;
+#[path = "notebook/edit.rs"]
 pub mod notebook_edit;
+#[path = "operator/describe.rs"]
 pub mod operator_describe;
+#[path = "operator/list.rs"]
 pub mod operator_list;
 pub mod query;
+#[path = "mcp/read_resource.rs"]
 pub mod read_mcp_resource;
 pub mod recall;
 pub mod search;
+#[path = "interaction/send_user_message.rs"]
 pub mod send_user_message;
+#[path = "file/shell_ops.rs"]
 pub mod shell_file_ops;
+#[path = "skill/config.rs"]
 pub mod skill_config;
+#[path = "skill/invoke.rs"]
 pub mod skill_invoke;
+#[path = "skill/manage.rs"]
 pub mod skill_manage;
+#[path = "skill/view.rs"]
 pub mod skill_view;
 pub mod sleep;
+#[path = "file/ssh_paths.rs"]
 pub mod ssh_paths;
+#[path = "task/create.rs"]
 pub mod task_create;
+#[path = "task/get.rs"]
 pub mod task_get;
+#[path = "task/list.rs"]
 pub mod task_list;
+#[path = "task/output.rs"]
 pub mod task_output;
+#[path = "task/stop.rs"]
 pub mod task_stop;
+#[path = "task/update.rs"]
 pub mod task_update;
+pub mod template_execute;
 pub mod todo_write;
 pub mod tool_search;
+#[path = "unit/authoring_validate.rs"]
+pub mod unit_authoring_validate;
+#[path = "unit/describe.rs"]
+pub mod unit_describe;
+#[path = "unit/list.rs"]
+pub mod unit_list;
+#[path = "unit/search.rs"]
+pub mod unit_search;
 pub mod visualization;
 pub mod web_safety;
 pub mod workflow;
@@ -77,6 +145,26 @@ pub enum ToolKind {
     NotebookEdit,
     OperatorList,
     OperatorDescribe,
+    UnitList,
+    UnitSearch,
+    UnitDescribe,
+    UnitAuthoringValidate,
+    TemplateExecute,
+    EnvironmentProfileCheck,
+    EnvironmentProfilePreparePlan,
+    ExecutionArchiveAdvisor,
+    ExecutionArchiveSuggestionWrite,
+    LearningProposalList,
+    LearningProposalDecide,
+    LearningProposalApply,
+    LearningPreferenceCandidateList,
+    LearningPreferenceCandidatePromote,
+    LearningSelfEvolutionCreator,
+    LearningSelfEvolutionDraftWrite,
+    LearningSelfEvolutionReport,
+    ExecutionLineageReport,
+    ExecutionRecordDetail,
+    ExecutionRecordList,
     Visualization,
     Sleep,
     AskUserQuestion,
@@ -129,6 +217,38 @@ impl fmt::Display for ToolKind {
             ToolKind::NotebookEdit => write!(f, "notebook_edit"),
             ToolKind::OperatorList => write!(f, "operator_list"),
             ToolKind::OperatorDescribe => write!(f, "operator_describe"),
+            ToolKind::UnitList => write!(f, "unit_list"),
+            ToolKind::UnitSearch => write!(f, "unit_search"),
+            ToolKind::UnitDescribe => write!(f, "unit_describe"),
+            ToolKind::UnitAuthoringValidate => write!(f, "unit_authoring_validate"),
+            ToolKind::TemplateExecute => write!(f, "template_execute"),
+            ToolKind::EnvironmentProfileCheck => write!(f, "environment_profile_check"),
+            ToolKind::EnvironmentProfilePreparePlan => {
+                write!(f, "environment_profile_prepare_plan")
+            }
+            ToolKind::ExecutionArchiveAdvisor => write!(f, "execution_archive_advisor"),
+            ToolKind::ExecutionArchiveSuggestionWrite => {
+                write!(f, "execution_archive_suggestion_write")
+            }
+            ToolKind::LearningProposalList => write!(f, "learning_proposal_list"),
+            ToolKind::LearningProposalDecide => write!(f, "learning_proposal_decide"),
+            ToolKind::LearningProposalApply => write!(f, "learning_proposal_apply"),
+            ToolKind::LearningPreferenceCandidateList => {
+                write!(f, "learning_preference_candidate_list")
+            }
+            ToolKind::LearningPreferenceCandidatePromote => {
+                write!(f, "learning_preference_candidate_promote")
+            }
+            ToolKind::LearningSelfEvolutionCreator => {
+                write!(f, "learning_self_evolution_creator")
+            }
+            ToolKind::LearningSelfEvolutionDraftWrite => {
+                write!(f, "learning_self_evolution_draft_write")
+            }
+            ToolKind::LearningSelfEvolutionReport => write!(f, "learning_self_evolution_report"),
+            ToolKind::ExecutionLineageReport => write!(f, "execution_lineage_report"),
+            ToolKind::ExecutionRecordDetail => write!(f, "execution_record_detail"),
+            ToolKind::ExecutionRecordList => write!(f, "execution_record_list"),
             ToolKind::Visualization => write!(f, "visualization"),
             ToolKind::Sleep => write!(f, "sleep"),
             ToolKind::AskUserQuestion => write!(f, "ask_user_question"),
@@ -171,6 +291,36 @@ pub enum Tool {
     NotebookEdit(notebook_edit::NotebookEditArgs),
     OperatorList(operator_list::OperatorListArgs),
     OperatorDescribe(operator_describe::OperatorDescribeArgs),
+    UnitList(unit_list::UnitListArgs),
+    UnitSearch(unit_search::UnitSearchArgs),
+    UnitDescribe(unit_describe::UnitDescribeArgs),
+    UnitAuthoringValidate(unit_authoring_validate::UnitAuthoringValidateArgs),
+    TemplateExecute(template_execute::TemplateExecuteArgs),
+    EnvironmentProfileCheck(environment_profile_check::EnvironmentProfileCheckArgs),
+    EnvironmentProfilePreparePlan(
+        environment_profile_prepare_plan::EnvironmentProfilePreparePlanArgs,
+    ),
+    ExecutionArchiveAdvisor(execution_archive_advisor::ExecutionArchiveAdvisorArgs),
+    ExecutionArchiveSuggestionWrite(
+        execution_archive_suggestion_write::ExecutionArchiveSuggestionWriteArgs,
+    ),
+    LearningProposalList(learning_proposal_list::LearningProposalListArgs),
+    LearningProposalDecide(learning_proposal_decide::LearningProposalDecideArgs),
+    LearningProposalApply(learning_proposal_apply::LearningProposalApplyArgs),
+    LearningPreferenceCandidateList(
+        learning_preference_candidate_list::LearningPreferenceCandidateListArgs,
+    ),
+    LearningPreferenceCandidatePromote(
+        learning_preference_candidate_promote::LearningPreferenceCandidatePromoteArgs,
+    ),
+    LearningSelfEvolutionCreator(learning_self_evolution_creator::LearningSelfEvolutionCreatorArgs),
+    LearningSelfEvolutionDraftWrite(
+        learning_self_evolution_draft_write::LearningSelfEvolutionDraftWriteArgs,
+    ),
+    LearningSelfEvolutionReport(learning_self_evolution_report::LearningSelfEvolutionReportArgs),
+    ExecutionLineageReport(execution_lineage_report::ExecutionLineageReportArgs),
+    ExecutionRecordDetail(execution_record_detail::ExecutionRecordDetailArgs),
+    ExecutionRecordList(execution_record_list::ExecutionRecordListArgs),
     Visualization(visualization::VisualizationArgs),
     Sleep(sleep::SleepArgs),
     AskUserQuestion(ask_user_question::AskUserQuestionArgs),
@@ -214,6 +364,28 @@ impl Tool {
             Tool::NotebookEdit(_) => ToolKind::NotebookEdit,
             Tool::OperatorList(_) => ToolKind::OperatorList,
             Tool::OperatorDescribe(_) => ToolKind::OperatorDescribe,
+            Tool::UnitList(_) => ToolKind::UnitList,
+            Tool::UnitSearch(_) => ToolKind::UnitSearch,
+            Tool::UnitDescribe(_) => ToolKind::UnitDescribe,
+            Tool::UnitAuthoringValidate(_) => ToolKind::UnitAuthoringValidate,
+            Tool::TemplateExecute(_) => ToolKind::TemplateExecute,
+            Tool::EnvironmentProfileCheck(_) => ToolKind::EnvironmentProfileCheck,
+            Tool::EnvironmentProfilePreparePlan(_) => ToolKind::EnvironmentProfilePreparePlan,
+            Tool::ExecutionArchiveAdvisor(_) => ToolKind::ExecutionArchiveAdvisor,
+            Tool::ExecutionArchiveSuggestionWrite(_) => ToolKind::ExecutionArchiveSuggestionWrite,
+            Tool::LearningProposalList(_) => ToolKind::LearningProposalList,
+            Tool::LearningProposalDecide(_) => ToolKind::LearningProposalDecide,
+            Tool::LearningProposalApply(_) => ToolKind::LearningProposalApply,
+            Tool::LearningPreferenceCandidateList(_) => ToolKind::LearningPreferenceCandidateList,
+            Tool::LearningPreferenceCandidatePromote(_) => {
+                ToolKind::LearningPreferenceCandidatePromote
+            }
+            Tool::LearningSelfEvolutionCreator(_) => ToolKind::LearningSelfEvolutionCreator,
+            Tool::LearningSelfEvolutionDraftWrite(_) => ToolKind::LearningSelfEvolutionDraftWrite,
+            Tool::LearningSelfEvolutionReport(_) => ToolKind::LearningSelfEvolutionReport,
+            Tool::ExecutionLineageReport(_) => ToolKind::ExecutionLineageReport,
+            Tool::ExecutionRecordDetail(_) => ToolKind::ExecutionRecordDetail,
+            Tool::ExecutionRecordList(_) => ToolKind::ExecutionRecordList,
             Tool::Visualization(_) => ToolKind::Visualization,
             Tool::Sleep(_) => ToolKind::Sleep,
             Tool::AskUserQuestion(_) => ToolKind::AskUserQuestion,
@@ -254,6 +426,26 @@ impl Tool {
             Tool::NotebookEdit(_) => "NotebookEdit",
             Tool::OperatorList(_) => "operator_list",
             Tool::OperatorDescribe(_) => "operator_describe",
+            Tool::UnitList(_) => "unit_list",
+            Tool::UnitSearch(_) => "unit_search",
+            Tool::UnitDescribe(_) => "unit_describe",
+            Tool::UnitAuthoringValidate(_) => "unit_authoring_validate",
+            Tool::TemplateExecute(_) => "template_execute",
+            Tool::EnvironmentProfileCheck(_) => "environment_profile_check",
+            Tool::EnvironmentProfilePreparePlan(_) => "environment_profile_prepare_plan",
+            Tool::ExecutionArchiveAdvisor(_) => "execution_archive_advisor",
+            Tool::ExecutionArchiveSuggestionWrite(_) => "execution_archive_suggestion_write",
+            Tool::LearningProposalList(_) => "learning_proposal_list",
+            Tool::LearningProposalDecide(_) => "learning_proposal_decide",
+            Tool::LearningProposalApply(_) => "learning_proposal_apply",
+            Tool::LearningPreferenceCandidateList(_) => "learning_preference_candidate_list",
+            Tool::LearningPreferenceCandidatePromote(_) => "learning_preference_candidate_promote",
+            Tool::LearningSelfEvolutionCreator(_) => "learning_self_evolution_creator",
+            Tool::LearningSelfEvolutionDraftWrite(_) => "learning_self_evolution_draft_write",
+            Tool::LearningSelfEvolutionReport(_) => "learning_self_evolution_report",
+            Tool::ExecutionLineageReport(_) => "execution_lineage_report",
+            Tool::ExecutionRecordDetail(_) => "execution_record_detail",
+            Tool::ExecutionRecordList(_) => "execution_record_list",
             Tool::Visualization(_) => "Visualization",
             Tool::Sleep(_) => "Sleep",
             Tool::AskUserQuestion(_) => "AskUserQuestion",
@@ -294,6 +486,34 @@ impl Tool {
             Tool::NotebookEdit(_) => notebook_edit::DESCRIPTION,
             Tool::OperatorList(_) => operator_list::DESCRIPTION,
             Tool::OperatorDescribe(_) => operator_describe::DESCRIPTION,
+            Tool::UnitList(_) => unit_list::DESCRIPTION,
+            Tool::UnitSearch(_) => unit_search::DESCRIPTION,
+            Tool::UnitDescribe(_) => unit_describe::DESCRIPTION,
+            Tool::UnitAuthoringValidate(_) => unit_authoring_validate::DESCRIPTION,
+            Tool::TemplateExecute(_) => template_execute::DESCRIPTION,
+            Tool::EnvironmentProfileCheck(_) => environment_profile_check::DESCRIPTION,
+            Tool::EnvironmentProfilePreparePlan(_) => environment_profile_prepare_plan::DESCRIPTION,
+            Tool::ExecutionArchiveAdvisor(_) => execution_archive_advisor::DESCRIPTION,
+            Tool::ExecutionArchiveSuggestionWrite(_) => {
+                execution_archive_suggestion_write::DESCRIPTION
+            }
+            Tool::LearningProposalList(_) => learning_proposal_list::DESCRIPTION,
+            Tool::LearningProposalDecide(_) => learning_proposal_decide::DESCRIPTION,
+            Tool::LearningProposalApply(_) => learning_proposal_apply::DESCRIPTION,
+            Tool::LearningPreferenceCandidateList(_) => {
+                learning_preference_candidate_list::DESCRIPTION
+            }
+            Tool::LearningPreferenceCandidatePromote(_) => {
+                learning_preference_candidate_promote::DESCRIPTION
+            }
+            Tool::LearningSelfEvolutionCreator(_) => learning_self_evolution_creator::DESCRIPTION,
+            Tool::LearningSelfEvolutionDraftWrite(_) => {
+                learning_self_evolution_draft_write::DESCRIPTION
+            }
+            Tool::LearningSelfEvolutionReport(_) => learning_self_evolution_report::DESCRIPTION,
+            Tool::ExecutionLineageReport(_) => execution_lineage_report::DESCRIPTION,
+            Tool::ExecutionRecordDetail(_) => execution_record_detail::DESCRIPTION,
+            Tool::ExecutionRecordList(_) => execution_record_list::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
             Tool::Sleep(_) => sleep::DESCRIPTION,
             Tool::AskUserQuestion(_) => ask_user_question::DESCRIPTION,
@@ -338,6 +558,79 @@ impl Tool {
             Tool::OperatorList(args) => operator_list::OperatorListTool::execute(ctx, args).await?,
             Tool::OperatorDescribe(args) => {
                 operator_describe::OperatorDescribeTool::execute(ctx, args).await?
+            }
+            Tool::UnitList(args) => unit_list::UnitListTool::execute(ctx, args).await?,
+            Tool::UnitSearch(args) => unit_search::UnitSearchTool::execute(ctx, args).await?,
+            Tool::UnitDescribe(args) => unit_describe::UnitDescribeTool::execute(ctx, args).await?,
+            Tool::UnitAuthoringValidate(args) => {
+                unit_authoring_validate::UnitAuthoringValidateTool::execute(ctx, args).await?
+            }
+            Tool::TemplateExecute(args) => {
+                template_execute::TemplateExecuteTool::execute(ctx, args).await?
+            }
+            Tool::EnvironmentProfileCheck(args) => {
+                environment_profile_check::EnvironmentProfileCheckTool::execute(ctx, args).await?
+            }
+            Tool::EnvironmentProfilePreparePlan(args) => {
+                environment_profile_prepare_plan::EnvironmentProfilePreparePlanTool::execute(
+                    ctx, args,
+                )
+                .await?
+            }
+            Tool::ExecutionArchiveAdvisor(args) => {
+                execution_archive_advisor::ExecutionArchiveAdvisorTool::execute(ctx, args).await?
+            }
+            Tool::ExecutionArchiveSuggestionWrite(args) => {
+                execution_archive_suggestion_write::ExecutionArchiveSuggestionWriteTool::execute(
+                    ctx, args,
+                )
+                .await?
+            }
+            Tool::LearningProposalList(args) => {
+                learning_proposal_list::LearningProposalListTool::execute(ctx, args).await?
+            }
+            Tool::LearningProposalDecide(args) => {
+                learning_proposal_decide::LearningProposalDecideTool::execute(ctx, args).await?
+            }
+            Tool::LearningProposalApply(args) => {
+                learning_proposal_apply::LearningProposalApplyTool::execute(ctx, args).await?
+            }
+            Tool::LearningPreferenceCandidateList(args) => {
+                learning_preference_candidate_list::LearningPreferenceCandidateListTool::execute(
+                    ctx, args,
+                )
+                .await?
+            }
+            Tool::LearningPreferenceCandidatePromote(args) => {
+                learning_preference_candidate_promote::LearningPreferenceCandidatePromoteTool::execute(
+                    ctx, args,
+                )
+                .await?
+            }
+            Tool::LearningSelfEvolutionCreator(args) => {
+                learning_self_evolution_creator::LearningSelfEvolutionCreatorTool::execute(
+                    ctx, args,
+                )
+                .await?
+            }
+            Tool::LearningSelfEvolutionDraftWrite(args) => {
+                learning_self_evolution_draft_write::LearningSelfEvolutionDraftWriteTool::execute(
+                    ctx, args,
+                )
+                .await?
+            }
+            Tool::LearningSelfEvolutionReport(args) => {
+                learning_self_evolution_report::LearningSelfEvolutionReportTool::execute(ctx, args)
+                    .await?
+            }
+            Tool::ExecutionLineageReport(args) => {
+                execution_lineage_report::ExecutionLineageReportTool::execute(ctx, args).await?
+            }
+            Tool::ExecutionRecordDetail(args) => {
+                execution_record_detail::ExecutionRecordDetailTool::execute(ctx, args).await?
+            }
+            Tool::ExecutionRecordList(args) => {
+                execution_record_list::ExecutionRecordListTool::execute(ctx, args).await?
             }
             Tool::Visualization(args) => {
                 visualization::VisualizationTool::execute(ctx, args).await?
@@ -498,6 +791,135 @@ impl Tool {
                 })?;
                 Ok(Tool::OperatorDescribe(args))
             }
+            ToolKind::UnitList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid unit_list arguments: {}", e),
+                })?;
+                Ok(Tool::UnitList(args))
+            }
+            ToolKind::UnitSearch => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid unit_search arguments: {}", e),
+                })?;
+                Ok(Tool::UnitSearch(args))
+            }
+            ToolKind::UnitDescribe => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid unit_describe arguments: {}", e),
+                })?;
+                Ok(Tool::UnitDescribe(args))
+            }
+            ToolKind::UnitAuthoringValidate => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid unit_authoring_validate arguments: {}", e),
+                })?;
+                Ok(Tool::UnitAuthoringValidate(args))
+            }
+            ToolKind::TemplateExecute => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid template_execute arguments: {}", e),
+                })?;
+                Ok(Tool::TemplateExecute(args))
+            }
+            ToolKind::EnvironmentProfileCheck => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid environment_profile_check arguments: {}", e),
+                })?;
+                Ok(Tool::EnvironmentProfileCheck(args))
+            }
+            ToolKind::EnvironmentProfilePreparePlan => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid environment_profile_prepare_plan arguments: {}", e),
+                })?;
+                Ok(Tool::EnvironmentProfilePreparePlan(args))
+            }
+            ToolKind::ExecutionArchiveAdvisor => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid execution_archive_advisor arguments: {}", e),
+                })?;
+                Ok(Tool::ExecutionArchiveAdvisor(args))
+            }
+            ToolKind::ExecutionArchiveSuggestionWrite => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!(
+                        "Invalid execution_archive_suggestion_write arguments: {}",
+                        e
+                    ),
+                })?;
+                Ok(Tool::ExecutionArchiveSuggestionWrite(args))
+            }
+            ToolKind::LearningProposalList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid learning_proposal_list arguments: {}", e),
+                })?;
+                Ok(Tool::LearningProposalList(args))
+            }
+            ToolKind::LearningProposalDecide => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid learning_proposal_decide arguments: {}", e),
+                })?;
+                Ok(Tool::LearningProposalDecide(args))
+            }
+            ToolKind::LearningProposalApply => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid learning_proposal_apply arguments: {}", e),
+                })?;
+                Ok(Tool::LearningProposalApply(args))
+            }
+            ToolKind::LearningPreferenceCandidateList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!(
+                        "Invalid learning_preference_candidate_list arguments: {}",
+                        e
+                    ),
+                })?;
+                Ok(Tool::LearningPreferenceCandidateList(args))
+            }
+            ToolKind::LearningPreferenceCandidatePromote => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!(
+                        "Invalid learning_preference_candidate_promote arguments: {}",
+                        e
+                    ),
+                })?;
+                Ok(Tool::LearningPreferenceCandidatePromote(args))
+            }
+            ToolKind::LearningSelfEvolutionCreator => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid learning_self_evolution_creator arguments: {e}"),
+                })?;
+                Ok(Tool::LearningSelfEvolutionCreator(args))
+            }
+            ToolKind::LearningSelfEvolutionDraftWrite => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid learning_self_evolution_draft_write arguments: {e}"),
+                })?;
+                Ok(Tool::LearningSelfEvolutionDraftWrite(args))
+            }
+            ToolKind::LearningSelfEvolutionReport => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid learning_self_evolution_report arguments: {}", e),
+                })?;
+                Ok(Tool::LearningSelfEvolutionReport(args))
+            }
+            ToolKind::ExecutionLineageReport => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid execution_lineage_report arguments: {}", e),
+                })?;
+                Ok(Tool::ExecutionLineageReport(args))
+            }
+            ToolKind::ExecutionRecordDetail => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid execution_record_detail arguments: {}", e),
+                })?;
+                Ok(Tool::ExecutionRecordDetail(args))
+            }
+            ToolKind::ExecutionRecordList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid execution_record_list arguments: {}", e),
+                })?;
+                Ok(Tool::ExecutionRecordList(args))
+            }
             ToolKind::Visualization => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid visualization arguments: {}", e),
@@ -641,6 +1063,48 @@ impl Tool {
             "notebook_edit" => ToolKind::NotebookEdit,
             "operator_list" | "OperatorList" => ToolKind::OperatorList,
             "operator_describe" | "OperatorDescribe" => ToolKind::OperatorDescribe,
+            "unit_list" | "UnitList" => ToolKind::UnitList,
+            "unit_search" | "UnitSearch" => ToolKind::UnitSearch,
+            "unit_describe" | "UnitDescribe" => ToolKind::UnitDescribe,
+            "unit_authoring_validate" | "UnitAuthoringValidate" => ToolKind::UnitAuthoringValidate,
+            "template_execute" | "TemplateExecute" => ToolKind::TemplateExecute,
+            "environment_profile_check" | "EnvironmentProfileCheck" => {
+                ToolKind::EnvironmentProfileCheck
+            }
+            "environment_profile_prepare_plan" | "EnvironmentProfilePreparePlan" => {
+                ToolKind::EnvironmentProfilePreparePlan
+            }
+            "execution_archive_advisor" | "ExecutionArchiveAdvisor" => {
+                ToolKind::ExecutionArchiveAdvisor
+            }
+            "execution_archive_suggestion_write" | "ExecutionArchiveSuggestionWrite" => {
+                ToolKind::ExecutionArchiveSuggestionWrite
+            }
+            "learning_proposal_list" | "LearningProposalList" => ToolKind::LearningProposalList,
+            "learning_proposal_decide" | "LearningProposalDecide" => {
+                ToolKind::LearningProposalDecide
+            }
+            "learning_proposal_apply" | "LearningProposalApply" => ToolKind::LearningProposalApply,
+            "learning_preference_candidate_list" | "LearningPreferenceCandidateList" => {
+                ToolKind::LearningPreferenceCandidateList
+            }
+            "learning_preference_candidate_promote" | "LearningPreferenceCandidatePromote" => {
+                ToolKind::LearningPreferenceCandidatePromote
+            }
+            "learning_self_evolution_creator" | "LearningSelfEvolutionCreator" => {
+                ToolKind::LearningSelfEvolutionCreator
+            }
+            "learning_self_evolution_draft_write" | "LearningSelfEvolutionDraftWrite" => {
+                ToolKind::LearningSelfEvolutionDraftWrite
+            }
+            "learning_self_evolution_report" | "LearningSelfEvolutionReport" => {
+                ToolKind::LearningSelfEvolutionReport
+            }
+            "execution_lineage_report" | "ExecutionLineageReport" => {
+                ToolKind::ExecutionLineageReport
+            }
+            "execution_record_detail" | "ExecutionRecordDetail" => ToolKind::ExecutionRecordDetail,
+            "execution_record_list" | "ExecutionRecordList" => ToolKind::ExecutionRecordList,
             "visualization" => ToolKind::Visualization,
             "sleep" => ToolKind::Sleep,
             "ask_user_question" | "AskUserQuestion" => ToolKind::AskUserQuestion,
@@ -735,7 +1199,15 @@ pub const QUERY_DATASET_SOURCE_IDS: &[&str] = &[
 ];
 pub const DEFAULT_QUERY_DATASET_SOURCE_IDS: &[&str] = &["geo", "ena"];
 
-pub const QUERY_KNOWLEDGE_SOURCE_IDS: &[&str] = &["ncbi_gene", "ensembl", "uniprot"];
+pub const QUERY_KNOWLEDGE_SOURCE_IDS: &[&str] = &[
+    "ncbi_gene",
+    "ensembl",
+    "uniprot",
+    "reactome",
+    "gene_ontology",
+    "msigdb",
+    "kegg",
+];
 pub const DEFAULT_QUERY_KNOWLEDGE_SOURCE_IDS: &[&str] = &["ncbi_gene"];
 
 fn normalize_query_setting_id(value: &str) -> String {
@@ -771,12 +1243,16 @@ impl WebSearchApiKeys {
             .as_ref()
             .and_then(|map| map.get(&category))
         {
-            return retrieval_registry::normalize_enabled_ids(
-                &category,
-                values,
-                RegistryEntryKind::Source,
-                false,
-            );
+            return if retrieval_registry::category_ids().contains(&category.as_str()) {
+                retrieval_registry::normalize_enabled_ids(
+                    &category,
+                    values,
+                    RegistryEntryKind::Source,
+                    false,
+                )
+            } else {
+                retrieval_registry::normalize_unregistered_enabled_ids(values)
+            };
         }
 
         match category.as_str() {
@@ -837,6 +1313,11 @@ impl WebSearchApiKeys {
 
     pub fn enabled_sources_by_category(&self) -> HashMap<String, Vec<String>> {
         let mut out = retrieval_registry::defaults_by_category(RegistryEntryKind::Source);
+        if let Some(values) = self.enabled_sources_by_category.as_ref() {
+            out.extend(retrieval_registry::configured_extra_enabled_categories(
+                values,
+            ));
+        }
         for category in retrieval_registry::category_ids() {
             out.insert(
                 category.to_string(),
@@ -1270,6 +1751,26 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         todo_write::schema(),
         operator_list::schema(),
         operator_describe::schema(),
+        unit_list::schema(),
+        unit_search::schema(),
+        unit_describe::schema(),
+        unit_authoring_validate::schema(),
+        template_execute::schema(),
+        environment_profile_check::schema(),
+        environment_profile_prepare_plan::schema(),
+        execution_archive_advisor::schema(),
+        execution_archive_suggestion_write::schema(),
+        learning_proposal_list::schema(),
+        learning_proposal_decide::schema(),
+        learning_proposal_apply::schema(),
+        learning_preference_candidate_list::schema(),
+        learning_preference_candidate_promote::schema(),
+        learning_self_evolution_creator::schema(),
+        learning_self_evolution_draft_write::schema(),
+        learning_self_evolution_report::schema(),
+        execution_lineage_report::schema(),
+        execution_record_detail::schema(),
+        execution_record_list::schema(),
         visualization::schema(),
         sleep::schema(),
         ask_user_question::schema(),
@@ -1318,14 +1819,34 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "connector" => (1, 3),
         "operator_list" => (1, 4),
         "operator_describe" => (1, 5),
-        "list_mcp_resources" => (1, 6),
-        "read_mcp_resource" => (1, 7),
+        "unit_list" => (1, 6),
+        "unit_search" => (1, 7),
+        "unit_describe" => (1, 8),
+        "unit_authoring_validate" => (1, 9),
+        "list_mcp_resources" => (1, 10),
+        "read_mcp_resource" => (1, 11),
+        "execution_record_list" => (1, 12),
+        "execution_record_detail" => (1, 13),
+        "execution_lineage_report" => (1, 14),
+        "execution_archive_advisor" => (1, 15),
+        "learning_proposal_list" => (1, 16),
+        "learning_preference_candidate_list" => (1, 17),
+        "environment_profile_check" => (1, 18),
 
         // Mutating tools.
         "file_edit" => (2, 0),
         "file_write" => (2, 1),
         "notebook_edit" => (2, 2),
         "todo_write" => (2, 3),
+        "template_execute" => (2, 4),
+        "learning_proposal_decide" => (2, 5),
+        "learning_proposal_apply" => (2, 6),
+        "learning_preference_candidate_promote" => (2, 7),
+        "execution_archive_suggestion_write" => (2, 8),
+        "environment_profile_prepare_plan" => (2, 9),
+        "learning_self_evolution_report" => (2, 10),
+        "learning_self_evolution_draft_write" => (2, 11),
+        "learning_self_evolution_creator" => (2, 12),
 
         // Orchestration and app-specific tools.
         "agent" | "Agent" => (3, 0),
@@ -1522,6 +2043,15 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "connector"
             | "operator_list"
             | "operator_describe"
+            | "unit_list"
+            | "unit_search"
+            | "unit_describe"
+            | "unit_authoring_validate"
+            | "execution_record_list"
+            | "execution_record_detail"
+            | "execution_lineage_report"
+            | "execution_archive_advisor"
+            | "environment_profile_check"
             | "ToolSearch"
             | "tool_search"
             | "visualization"
@@ -1577,6 +2107,91 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("grep", r#"{"pattern":"x"}"#).unwrap();
         assert!(matches!(t, Tool::Grep(_)));
+
+        let t = Tool::from_json_str("unit_list", r#"{"kind":"template"}"#).unwrap();
+        assert!(matches!(t, Tool::UnitList(_)));
+
+        let t = Tool::from_json_str("unit_search", r#"{"query":"diff","stage":"count"}"#).unwrap();
+        assert!(matches!(t, Tool::UnitSearch(_)));
+
+        let t = Tool::from_json_str("unit_describe", r#"{"id":"provider/template/demo"}"#).unwrap();
+        assert!(matches!(t, Tool::UnitDescribe(_)));
+
+        let t = Tool::from_json_str("unit_authoring_validate", r#"{"includeOk":true}"#).unwrap();
+        assert!(matches!(t, Tool::UnitAuthoringValidate(_)));
+
+        let t = Tool::from_json_str(
+            "template_execute",
+            r#"{"id":"demo","inputs":{},"params":{},"resources":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::TemplateExecute(_)));
+
+        let t = Tool::from_json_str("execution_record_list", r#"{"limit":5}"#).unwrap();
+        assert!(matches!(t, Tool::ExecutionRecordList(_)));
+
+        let t =
+            Tool::from_json_str("execution_record_detail", r#"{"recordId":"execrec_1"}"#).unwrap();
+        assert!(matches!(t, Tool::ExecutionRecordDetail(_)));
+
+        let t = Tool::from_json_str("execution_lineage_report", r#"{"limit":5}"#).unwrap();
+        assert!(matches!(t, Tool::ExecutionLineageReport(_)));
+
+        let t = Tool::from_json_str("execution_archive_advisor", r#"{"limit":5}"#).unwrap();
+        assert!(matches!(t, Tool::ExecutionArchiveAdvisor(_)));
+
+        let t =
+            Tool::from_json_str("execution_archive_suggestion_write", r#"{"limit":5}"#).unwrap();
+        assert!(matches!(t, Tool::ExecutionArchiveSuggestionWrite(_)));
+
+        let t = Tool::from_json_str("learning_proposal_list", r#"{"refresh":true}"#).unwrap();
+        assert!(matches!(t, Tool::LearningProposalList(_)));
+
+        let t = Tool::from_json_str(
+            "learning_proposal_decide",
+            r#"{"proposalId":"learn_1","decision":"approve"}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::LearningProposalDecide(_)));
+
+        let t = Tool::from_json_str(
+            "learning_proposal_apply",
+            r#"{"proposalId":"learn_1","note":"confirmed"}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::LearningProposalApply(_)));
+
+        let t = Tool::from_json_str(
+            "learning_preference_candidate_list",
+            r#"{"includePromoted":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::LearningPreferenceCandidateList(_)));
+
+        let t = Tool::from_json_str(
+            "learning_preference_candidate_promote",
+            r#"{"candidateId":"pref_learn_1","note":"confirmed"}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::LearningPreferenceCandidatePromote(_)));
+
+        let t = Tool::from_json_str("learning_self_evolution_report", r#"{"limit":5}"#).unwrap();
+        assert!(matches!(t, Tool::LearningSelfEvolutionReport(_)));
+
+        let t =
+            Tool::from_json_str("learning_self_evolution_draft_write", r#"{"limit":5}"#).unwrap();
+        assert!(matches!(t, Tool::LearningSelfEvolutionDraftWrite(_)));
+
+        let t =
+            Tool::from_json_str("learning_self_evolution_creator", r#"{"refresh":true}"#).unwrap();
+        assert!(matches!(t, Tool::LearningSelfEvolutionCreator(_)));
+
+        let t = Tool::from_json_str("environment_profile_check", r#"{"envRef":"r-bioc"}"#).unwrap();
+        assert!(matches!(t, Tool::EnvironmentProfileCheck(_)));
+
+        let t = Tool::from_json_str("environment_profile_prepare_plan", r#"{"envRef":"r-bioc"}"#)
+            .unwrap();
+        assert!(matches!(t, Tool::EnvironmentProfilePreparePlan(_)));
     }
 
     #[test]

@@ -1,0 +1,319 @@
+#!/usr/bin/env Rscript
+# Template: distribution/polar-heatmap
+# Purpose: Polar/radial fan plot with outer distribution violins and an inner heatmap.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/boxplot/polar_heatmap
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   The source data.json is bundled as example.tsv.
+#
+# Input example:
+#   See example.tsv with grade/gene/exprs columns.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template distribution/polar-heatmap
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+parse_auto_number <- function(raw, fallback) {
+  if (is.null(raw) || !nzchar(raw) || tolower(raw) == "auto") return(fallback())
+  parsed <- suppressWarnings(as.numeric(raw))
+  if (is.na(parsed)) fallback() else parsed
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    feature = arg_or(3, "gene"),
+    value = arg_or(4, "exprs"),
+    heatmap_category = arg_or(5, "grade")
+  ),
+  labels = list(
+    title = arg_or(6, ""),
+    legend_title = arg_or(24, "mean value")
+  ),
+  feature_order = parse_csv_arg(7, "auto"),
+  heatmap_category_order = parse_csv_arg(8, "auto"),
+  style = list(
+    violin_palette = parse_csv_arg(9, "#d7689d,#f3d337,#a0c443,#66b5ae,#5da4dc,#40769e"),
+    heatmap_palette = parse_csv_arg(10, "#E9E29C,#d7689d"),
+    start_angle = parse_number_arg(11, -1.047198),
+    end_angle = parse_number_arg(12, 1.047198),
+    violin_width = parse_number_arg(13, 0.88),
+    violin_alpha = parse_number_arg(14, 0.9),
+    tile_width = parse_number_arg(15, 0.96),
+    tile_height = parse_number_arg(16, 0.96),
+    radial_min_raw = arg_or(17, "auto"),
+    radial_max_raw = arg_or(18, "auto"),
+    value_breaks = parse_csv_arg(19, "auto"),
+    guide_color = arg_or(20, "grey50"),
+    heatmap_border_color = arg_or(21, "#fffffe"),
+    label_size = parse_number_arg(22, 3.5),
+    base_size = parse_number_arg(23, 11)
+  )
+)
+delimiter <- arg_or(25, "auto")
+width <- parse_number_arg(26, 8)
+height <- parse_number_arg(27, 6)
+dpi <- parse_integer_arg(28, 300)
+
+extend_palette <- function(values, palette, fallback) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- fallback
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+ordered_values <- function(values, preferred_order) {
+  values <- unique(as.character(values))
+  if (length(preferred_order) == 0) return(values)
+  ordered <- preferred_order[preferred_order %in% values]
+  c(ordered, setdiff(values, ordered))
+}
+
+prepare_data <- function(df, config) {
+  required <- c(config$columns$feature, config$columns$value, config$columns$heatmap_category)
+  validate_columns(df, required, "distribution/polar-heatmap input")
+  df <- ensure_numeric_columns(df, config$columns$value, "distribution/polar-heatmap input")
+  df$.feature_raw <- as.character(df[[config$columns$feature]])
+  df$.heatmap_category_raw <- as.character(df[[config$columns$heatmap_category]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.feature_raw) & nzchar(df$.heatmap_category_raw), , drop = FALSE]
+
+  features <- ordered_values(df$.feature_raw, config$feature_order)
+  categories <- ordered_values(df$.heatmap_category_raw, config$heatmap_category_order)
+  if (length(features) < 2) stop("distribution/polar-heatmap requires at least two features.", call. = FALSE)
+  if (length(categories) < 2) stop("distribution/polar-heatmap requires at least two heatmap categories.", call. = FALSE)
+
+  df$.feature <- factor(df$.feature_raw, levels = features)
+  df$.heatmap_category <- factor(df$.heatmap_category_raw, levels = categories)
+  df <- df[!is.na(df$.feature) & !is.na(df$.heatmap_category), , drop = FALSE]
+  df$.x <- as.numeric(df$.feature)
+  df$.outer_y <- df$.value + length(categories) + 1
+  df
+}
+
+axis_config <- function(df, config) {
+  category_count <- length(levels(df$.heatmap_category))
+  offset <- category_count + 1
+  shifted <- df$.outer_y
+  y_max <- ceiling(max(shifted, na.rm = TRUE))
+  lower <- parse_auto_number(config$style$radial_min_raw, function() -1)
+  upper <- parse_auto_number(config$style$radial_max_raw, function() y_max + 0.6)
+  breaks <- suppressWarnings(as.numeric(config$style$value_breaks))
+  if (length(breaks) == 0 || any(!is.finite(breaks))) {
+    breaks <- unique(as.integer(seq(floor(min(shifted, na.rm = TRUE)), y_max, length.out = 4)))
+  } else {
+    breaks <- breaks + offset
+  }
+  breaks <- breaks[is.finite(breaks) & breaks >= lower & breaks <= upper]
+  if (length(breaks) == 0) breaks <- pretty(c(offset, y_max), n = 4)
+  list(
+    lower = lower,
+    upper = upper,
+    offset = offset,
+    y_max = y_max,
+    value_breaks = unique(breaks),
+    value_labels = unique(breaks) - offset,
+    label_y = y_max + 0.45
+  )
+}
+
+heatmap_data <- function(df) {
+  features <- levels(df$.feature)
+  categories <- levels(df$.heatmap_category)
+  summarized <- stats::aggregate(.value ~ .feature + .heatmap_category, data = df, FUN = mean)
+  grid <- expand.grid(.feature = features, .heatmap_category = categories, stringsAsFactors = FALSE)
+  merged <- merge(grid, summarized, by = c(".feature", ".heatmap_category"), all.x = TRUE, sort = FALSE)
+  merged$.feature <- factor(merged$.feature, levels = features)
+  merged$.heatmap_category <- factor(merged$.heatmap_category, levels = categories)
+  merged$.x <- as.numeric(merged$.feature)
+  merged$.heatmap_y <- as.numeric(merged$.heatmap_category)
+  merged$.mu <- merged$.value
+  merged
+}
+
+guide_data <- function(df, axis) {
+  features <- levels(df$.feature)
+  categories <- levels(df$.heatmap_category)
+  list(
+    radial_guides = data.frame(.x = seq_along(features), y = axis$lower, yend = axis$label_y),
+    category_labels = data.frame(y = seq_along(categories), label = categories),
+    value_rings = data.frame(yintercept = axis$value_breaks),
+    feature_labels = data.frame(.x = seq_along(features), y = axis$label_y, label = features),
+    boundary = data.frame(
+      x = c(0.5, 0.5),
+      xend = c(length(features) + 0.5, 0.5),
+      y = c(axis$label_y, axis$offset),
+      yend = c(axis$label_y, axis$y_max)
+    )
+  )
+}
+
+plot_theme <- function(config) {
+  ggplot2::theme_minimal(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      axis.text.x = ggplot2::element_blank(),
+      axis.text.y = ggplot2::element_text(face = "bold"),
+      axis.title = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      axis.line = ggplot2::element_blank(),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+      legend.position = "bottom",
+      legend.title = ggplot2::element_blank(),
+      legend.key.height = grid::unit(4, "mm"),
+      plot.margin = ggplot2::margin(10, 28, 10, 28)
+    )
+}
+
+make_plot <- function(df, config) {
+  features <- levels(df$.feature)
+  categories <- levels(df$.heatmap_category)
+  axis <- axis_config(df, config)
+  guides <- guide_data(df, axis)
+  hm <- heatmap_data(df)
+  violin_colors <- extend_palette(
+    features,
+    config$style$violin_palette,
+    c("#d7689d", "#f3d337", "#a0c443", "#66b5ae", "#5da4dc", "#40769e")
+  )
+  heatmap_palette <- config$style$heatmap_palette
+  if (length(heatmap_palette) == 0) heatmap_palette <- c("#E9E29C", "#d7689d")
+  if (length(heatmap_palette) < 2) heatmap_palette <- rep(heatmap_palette, 2)
+
+  p <- ggplot2::ggplot() +
+    ggplot2::geom_segment(
+      data = guides$radial_guides,
+      ggplot2::aes(x = .x, xend = .x, y = y, yend = yend),
+      inherit.aes = FALSE,
+      linetype = "dashed",
+      color = config$style$guide_color,
+      linewidth = 0.35
+    ) +
+    ggplot2::geom_hline(
+      data = guides$value_rings,
+      ggplot2::aes(yintercept = yintercept),
+      inherit.aes = FALSE,
+      color = config$style$guide_color,
+      linewidth = 0.25,
+      alpha = 0.7
+    ) +
+    ggplot2::geom_tile(
+      data = hm,
+      ggplot2::aes(x = .x, y = .heatmap_y, fill = .mu),
+      width = config$style$tile_width,
+      height = config$style$tile_height,
+      colour = config$style$heatmap_border_color,
+      linewidth = 0.5,
+      inherit.aes = FALSE
+    ) +
+    ggplot2::scale_fill_gradientn(name = config$labels$legend_title, colours = grDevices::colorRampPalette(heatmap_palette)(50), na.value = "grey95")
+
+  for (feature in features) {
+    layer_df <- df[df$.feature == feature, , drop = FALSE]
+    p <- p + ggplot2::geom_violin(
+      data = layer_df,
+      ggplot2::aes(x = .x, y = .outer_y, group = .feature),
+      fill = violin_colors[[feature]],
+      color = "white",
+      linewidth = 0.25,
+      width = config$style$violin_width,
+      alpha = config$style$violin_alpha,
+      trim = TRUE,
+      show.legend = FALSE,
+      inherit.aes = FALSE
+    )
+  }
+
+  p +
+    ggplot2::geom_segment(
+      data = guides$boundary,
+      ggplot2::aes(x = x, xend = xend, y = y, yend = yend),
+      inherit.aes = FALSE,
+      color = config$style$guide_color,
+      linewidth = 0.35
+    ) +
+    ggplot2::geom_text(
+      data = guides$feature_labels,
+      ggplot2::aes(x = .x, y = y, label = label),
+      inherit.aes = FALSE,
+      vjust = 1.5,
+      size = config$style$label_size,
+      fontface = "bold",
+      color = "#111827",
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_x_continuous(limits = c(0.5, length(features) + 0.5), breaks = seq_along(features), labels = features, expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(
+      limits = c(axis$lower, axis$upper),
+      breaks = c(seq_along(categories), axis$value_breaks),
+      labels = c(categories, axis$value_labels),
+      expand = c(0, 0)
+    ) +
+    ggplot2::coord_radial(start = config$style$start_angle, end = config$style$end_angle, clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = "", y = "") +
+    plot_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  features <- levels(plot_df$.feature)
+  categories <- levels(plot_df$.heatmap_category)
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "features", "heatmap_categories", "min_value", "max_value"),
+      value = c("distribution/polar-heatmap", nrow(plot_df), length(features), length(categories), min(plot_df$.value, na.rm = TRUE), max(plot_df$.value, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(
+    template = "distribution/polar-heatmap",
+    rows = nrow(plot_df),
+    features = length(features),
+    heatmap_categories = length(categories),
+    min_value = min(plot_df$.value, na.rm = TRUE),
+    max_value = max(plot_df$.value, na.rm = TRUE)
+  ))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

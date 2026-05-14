@@ -1,0 +1,192 @@
+#!/usr/bin/env Rscript
+# Template: bar/waffle
+# Purpose: Faceted waffle chart for categorical counts/proportions.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/bar/waffle
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   It uses ggplot2::geom_tile instead of the extra waffle package so the
+#   reusable template stays dependency-light.
+#
+# Input example:
+#   See example.tsv, converted from OmicsAgent data.json.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template bar/waffle
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, if (default) "true" else "false"))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    fill = arg_or(3, "Symbol"),
+    count = arg_or(4, "Count"),
+    row_facet = arg_or(5, "Gender"),
+    col_facet = arg_or(6, "Cancer_type")
+  ),
+  labels = list(
+    title = arg_or(7, "Gene mutation in Pancancer"),
+    fill = arg_or(8, "Genes")
+  ),
+  style = list(
+    palette = parse_csv_arg(9, "#009392,#39b185,#9ccb86,#e9e29c,#eeb479,#e88471,#cf597e"),
+    n_rows = parse_integer_arg(10, 3),
+    unit_size = parse_number_arg(11, 1),
+    tile_color = arg_or(12, "white"),
+    tile_linewidth = parse_number_arg(13, 0.18),
+    strip_fill = arg_or(14, "#ffc6c4"),
+    base_size = parse_number_arg(15, 12)
+  ),
+  flip = parse_logical_arg(16, TRUE)
+)
+delimiter <- arg_or(17, "auto")
+width <- parse_number_arg(18, 8)
+height <- parse_number_arg(19, 6)
+dpi <- parse_integer_arg(20, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- c("#009392", "#39b185", "#9ccb86", "#e9e29c", "#eeb479", "#e88471", "#cf597e")
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+optional_or_default <- function(df, column, default_value) {
+  resolved <- resolve_optional_column(df, column)
+  if (is.null(resolved)) rep(default_value, nrow(df)) else as.character(df[[resolved]])
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$fill, config$columns$count), "bar/waffle input")
+  df <- ensure_numeric_columns(df, config$columns$count, "bar/waffle input")
+  df$.fill <- as.character(df[[config$columns$fill]])
+  df$.count <- df[[config$columns$count]]
+  df$.row_facet <- optional_or_default(df, config$columns$row_facet, "All")
+  df$.col_facet <- optional_or_default(df, config$columns$col_facet, "All")
+  df <- df[is.finite(df$.count) & df$.count > 0 & nzchar(df$.fill), , drop = FALSE]
+  if (nrow(df) == 0) stop("bar/waffle input has no positive finite counts.", call. = FALSE)
+  df$.tile_count <- pmax(1L, as.integer(round(df$.count / config$style$unit_size)))
+  df$.row_facet <- factor(df$.row_facet, levels = unique(df$.row_facet))
+  df$.col_facet <- factor(df$.col_facet, levels = unique(df$.col_facet))
+  df$.fill <- factor(df$.fill, levels = unique(df$.fill))
+  df
+}
+
+expand_waffle_tiles <- function(df, config) {
+  panels <- split(df, interaction(df$.row_facet, df$.col_facet, drop = TRUE), drop = TRUE)
+  tile_rows <- lapply(panels, function(panel) {
+    panel <- panel[order(panel$.fill), , drop = FALSE]
+    rows <- lapply(seq_len(nrow(panel)), function(i) {
+      n <- panel$.tile_count[[i]]
+      if (n <= 0) return(NULL)
+      data.frame(
+        .fill = rep(as.character(panel$.fill[[i]]), n),
+        .row_facet = rep(as.character(panel$.row_facet[[i]]), n),
+        .col_facet = rep(as.character(panel$.col_facet[[i]]), n),
+        .source_count = rep(panel$.count[[i]], n),
+        stringsAsFactors = FALSE
+      )
+    })
+    expanded <- do.call(rbind, rows)
+    expanded$.tile_index <- seq_len(nrow(expanded))
+    if (isTRUE(config$flip)) {
+      expanded$.x <- floor((expanded$.tile_index - 1) / config$style$n_rows) + 1
+      expanded$.y <- ((expanded$.tile_index - 1) %% config$style$n_rows) + 1
+    } else {
+      expanded$.x <- ((expanded$.tile_index - 1) %% config$style$n_rows) + 1
+      expanded$.y <- floor((expanded$.tile_index - 1) / config$style$n_rows) + 1
+    }
+    expanded
+  })
+  out <- do.call(rbind, tile_rows)
+  out$.fill <- factor(out$.fill, levels = levels(df$.fill))
+  out$.row_facet <- factor(out$.row_facet, levels = levels(df$.row_facet))
+  out$.col_facet <- factor(out$.col_facet, levels = levels(df$.col_facet))
+  out
+}
+
+make_plot <- function(df, config) {
+  tiles <- expand_waffle_tiles(df, config)
+  palette <- extend_palette(df$.fill, config$style$palette)
+  ggplot2::ggplot(tiles, ggplot2::aes(x = .x, y = .y, fill = .fill)) +
+    ggplot2::geom_tile(color = config$style$tile_color, linewidth = config$style$tile_linewidth, width = 0.94, height = 0.94) +
+    ggplot2::facet_grid(.row_facet ~ .col_facet, switch = "both") +
+    ggplot2::scale_fill_manual(name = config$labels$fill, values = palette, drop = FALSE) +
+    ggplot2::scale_x_continuous(expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(expand = c(0, 0)) +
+    ggplot2::labs(title = config$labels$title, x = "", y = "") +
+    ggplot2::theme_minimal(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+      axis.title = ggplot2::element_blank(),
+      axis.text = ggplot2::element_blank(),
+      axis.ticks = ggplot2::element_blank(),
+      panel.grid = ggplot2::element_blank(),
+      strip.background.x = ggplot2::element_blank(),
+      strip.background.y = ggplot2::element_rect(fill = config$style$strip_fill, color = NA),
+      strip.placement = "outside",
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.position = "right",
+      panel.spacing.x = grid::unit(0.35, "lines"),
+      panel.spacing.y = grid::unit(0.45, "lines")
+    )
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "tiles", "unit_size"),
+      value = c("bar/waffle", nrow(plot_df), sum(plot_df$.tile_count), config$style$unit_size)
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/waffle", rows = nrow(plot_df), tiles = sum(plot_df$.tile_count), unit_size = config$style$unit_size))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

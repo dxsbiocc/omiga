@@ -1,0 +1,187 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_bar_enrichment_points
+  version: 0.1.0
+  name: Enrich Points
+  description: Composite enrichment bar and point-line plot showing pathway significance and gene ratio by ontology, migrated from OmicsAgent bar/enrichment_points.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - bar
+  - enrichment
+  - pathway
+  - gene-ratio
+  - table
+classification:
+  category: visualization/bar
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - bar
+  - enrichment
+  - pathway
+  - gene-ratio
+  stageInput:
+  - table
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Enrichment result CSV/TSV with term label, ontology/category, gene-ratio, and q-value columns. See example.tsv converted from OmicsAgent data.json.
+  params:
+    term_column:
+      kind: string
+      default: Description
+    ontology_column:
+      kind: string
+      default: ONTOLOGY
+    gene_ratio_column:
+      kind: string
+      default: GeneRatio
+    qvalue_column:
+      kind: string
+      default: qvalue
+    title:
+      kind: string
+      default: ''
+    x_label:
+      kind: string
+      default: "Gene Ratio(%) \t -log10(qvalue)"
+    ontology_order:
+      kind: string
+      default: auto
+      description: Comma-separated ontology/facet order, or auto.
+    palette:
+      kind: string
+      default: '#3BE8B0,#1AAFD0,#6A67CE,#FFB900,#FC636B'
+      description: Comma-separated ontology colors; interpolated when there are more ontologies.
+    qvalue_floor:
+      kind: number
+      default: 1e-35
+      description: Minimum q-value used before -log10 transform; prevents Inf for zero q-values.
+    max_log10_qvalue:
+      kind: number
+      default: 35
+      description: Cap for -log10(qvalue), matching the right-side bar axis.
+    ratio_scale:
+      kind: number
+      default: 100
+      description: Multiplier for GeneRatio before plotting on the negative axis.
+    x_min:
+      kind: number
+      default: -9
+    x_max:
+      kind: number
+      default: 35
+    label_x:
+      kind: number
+      default: 0
+    term_label_size:
+      kind: number
+      default: 3
+    point_size_outer:
+      kind: number
+      default: 4
+    point_size_inner:
+      kind: number
+      default: 3
+    bar_alpha:
+      kind: number
+      default: 0.6
+    line_width:
+      kind: number
+      default: 0.5
+    base_size:
+      kind: number
+      default: 11
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 9
+    height:
+      kind: number
+      default: 7
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- enrichment_points
+- enrichment_bar_points
+- pathway_ratio_bar
+- composite_enrichment_bar
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.term_column}
+  - ${params.ontology_column}
+  - ${params.gene_ratio_column}
+  - ${params.qvalue_column}
+  - ${params.title}
+  - ${params.x_label}
+  - ${params.ontology_order}
+  - ${params.palette}
+  - ${params.qvalue_floor}
+  - ${params.max_log10_qvalue}
+  - ${params.ratio_scale}
+  - ${params.x_min}
+  - ${params.x_max}
+  - ${params.label_x}
+  - ${params.term_label_size}
+  - ${params.point_size_outer}
+  - ${params.point_size_inner}
+  - ${params.bar_alpha}
+  - ${params.line_width}
+  - ${params.base_size}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

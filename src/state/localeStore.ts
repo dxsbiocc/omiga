@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { safeLocalStorage } from "../utils/browserStorage";
 
 /** UI locale — persisted for next launch */
 export type AppLocale = "en" | "zh-CN";
@@ -15,6 +16,9 @@ export const useLocaleStore = create<LocaleState>()(
       locale: "en",
       setLocale: (locale) => set({ locale }),
     }),
-    { name: "omiga-locale" },
+    {
+      name: "omiga-locale",
+      storage: createJSONStorage(() => safeLocalStorage),
+    },
   ),
 );

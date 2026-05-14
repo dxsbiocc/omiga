@@ -3,6 +3,7 @@ import {
   ListItem,
   ListItemIcon,
   ListItemText,
+  Stack,
   Typography,
 } from "@mui/material";
 import {
@@ -12,11 +13,26 @@ import {
   CheckCircle,
 } from "@mui/icons-material";
 import { alpha } from "@mui/material/styles";
+import { formatStepElapsedLabel } from "../ExecutionStepPanel";
 
 export interface PlanTodoItem {
   id: string;
   name: string;
   status: "pending" | "running" | "completed" | "error";
+  /** Unix ms when this plan item entered execution. */
+  startedAt?: number;
+  /** Unix ms when this plan item finished or failed. */
+  completedAt?: number;
+}
+
+export function planTodoRuntimeLabel(
+  item: Pick<PlanTodoItem, "status" | "startedAt" | "completedAt">,
+): string | null {
+  if (item.startedAt == null) return null;
+  return formatStepElapsedLabel(
+    item.startedAt,
+    item.status === "running" ? null : item.completedAt,
+  );
 }
 
 interface PlanTodoListProps {
@@ -52,6 +68,7 @@ export function PlanTodoList({
         const isRun = item.status === "running";
         const isErr = item.status === "error";
         const clickable = Boolean(onItemClick);
+        const runtimeLabel = planTodoRuntimeLabel(item);
         
         return (
           <ListItem
@@ -125,22 +142,45 @@ export function PlanTodoList({
             </ListItemIcon>
             <ListItemText
               primary={
-                <Typography
-                  variant="body2"
-                  sx={{
-                    fontSize: compact ? 11 : 12,
-                    lineHeight: 1.4,
-                    fontWeight: isRun ? 600 : isDone ? 400 : 500,
-                    color: isErr 
-                      ? "error.main" 
-                      : isDone 
-                        ? "text.disabled" 
-                        : "text.primary",
-                    textDecoration: isDone ? "line-through" : "none",
-                  }}
+                <Stack
+                  direction="row"
+                  spacing={0.75}
+                  alignItems="baseline"
+                  sx={{ minWidth: 0 }}
                 >
-                  {item.name}
-                </Typography>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      fontSize: compact ? 11 : 12,
+                      lineHeight: 1.4,
+                      fontWeight: isRun ? 600 : isDone ? 400 : 500,
+                      color: isErr
+                        ? "error.main"
+                        : isDone
+                          ? "text.disabled"
+                          : "text.primary",
+                      textDecoration: isDone ? "line-through" : "none",
+                      minWidth: 0,
+                      flex: 1,
+                    }}
+                  >
+                    {item.name}
+                  </Typography>
+                  {runtimeLabel && (
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{
+                        fontSize: 9,
+                        fontVariantNumeric: "tabular-nums",
+                        flexShrink: 0,
+                      }}
+                      title={isRun ? "当前步骤已运行时间" : "步骤执行耗时"}
+                    >
+                      {runtimeLabel}
+                    </Typography>
+                  )}
+                </Stack>
               }
             />
           </ListItem>

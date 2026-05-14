@@ -4,7 +4,6 @@ use super::patterns::DangerousPatternDB;
 use super::tool_rules::canonical_permission_tool_name;
 use super::types::*;
 use crate::domain::connectors;
-#[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -25,13 +24,14 @@ pub struct PermissionManager {
     rules: Arc<RwLock<Vec<PermissionRule>>>,
     /// 危险模式数据库
     patterns: DangerousPatternDB,
-    /// 会话级批准缓存: session_id → 规范化工具名（忽略参数，同一会话内同一工具只问一次）
+    /// 会话级批准缓存: session_id → 批准单元键。
+    /// 大多数工具按规范化工具名缓存；bash/shell 额外带上命令类别，避免一次批准放行全部命令。
     session_approvals: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     /// 时间窗口批准: "session_id:tool_key" → expire_time
     window_approvals: Arc<RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
     /// 单次批准: "session_id:tool_key" → expire_time（30 秒内有效）
     once_approvals: Arc<RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
-    /// 会话级拒绝: session_id → 规范化工具名（拒绝后本会话内该工具一律不再询问）
+    /// 会话级拒绝: session_id → 拒绝单元键（与批准单元一致）。
     session_denials: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     /// 最近拒绝记录（审计日志）
     recent_denials: Arc<RwLock<VecDeque<DenialRecord>>>,
@@ -62,7 +62,7 @@ impl PermissionManager {
     pub async fn check_permission(&self, context: &PermissionContext) -> PermissionDecision {
         let tool_key = Self::approval_cache_key_for_context(context);
 
-        // 0. 检查本会话是否已主动拒绝此工具（按工具名，不区分参数）
+        // 0. 检查本会话是否已主动拒绝此批准单元（bash/shell 精确到命令类别）
         {
             let denials = self.session_denials.read().await;
             if let Some(session_denied) = denials.get(&context.session_id) {
@@ -176,6 +176,11 @@ impl PermissionManager {
             }
         }
 
+        if Self::approval_must_be_single_use(context) {
+            self.remember_once_approval(session_id, &tool_key).await;
+            return Ok(());
+        }
+
         match mode {
             PermissionMode::Session | PermissionMode::Plan => {
                 let mut approvals = self.session_approvals.write().await;
@@ -194,10 +199,7 @@ impl PermissionManager {
             PermissionMode::AskEveryTime => {
                 // 单次批准：存储在临时缓存中，30秒内有效
                 // 这给用户时间重新触发操作，但不会长期保留
-                let expire_at = chrono::Utc::now() + chrono::Duration::seconds(30);
-                let mut once = self.once_approvals.write().await;
-                let session_key = format!("{}:{}", session_id, tool_key);
-                once.insert(session_key, expire_at);
+                self.remember_once_approval(session_id, &tool_key).await;
             }
             PermissionMode::Auto => {
                 // Auto 模式由规则控制，单次批准无需持久化
@@ -290,27 +292,51 @@ impl PermissionManager {
         self.rules.read().await.clone()
     }
 
-    /// 会话级别批准（按工具名，忽略参数）
+    /// 会话级别批准（bash/shell 按命令类别，其它工具按规范化工具名）
     pub async fn approve_session(
         &self,
         session_id: String,
         tool_name: String,
-        _arguments: &serde_json::Value,
+        arguments: &serde_json::Value,
     ) {
-        let tool_key = Self::approval_cache_key(&tool_name);
+        let context = PermissionContext {
+            tool_name,
+            arguments: arguments.clone(),
+            session_id: session_id.clone(),
+            file_paths: None,
+            timestamp: chrono::Utc::now(),
+            project_root: None,
+        };
+        let tool_key = Self::approval_cache_key_for_context(&context);
+        if Self::approval_must_be_single_use(&context) {
+            self.remember_once_approval(&session_id, &tool_key).await;
+            return;
+        }
         let mut approvals = self.session_approvals.write().await;
         approvals.entry(session_id).or_default().insert(tool_key);
     }
 
-    /// 时间窗口批准（按工具名，绑定到 session）
+    /// 时间窗口批准（bash/shell 按命令类别，绑定到 session）
     pub async fn approve_time_window(
         &self,
         session_id: String,
         tool_name: String,
-        _arguments: &serde_json::Value,
+        arguments: &serde_json::Value,
         minutes: i64,
     ) {
-        let tool_key = Self::approval_cache_key(&tool_name);
+        let context = PermissionContext {
+            tool_name,
+            arguments: arguments.clone(),
+            session_id: session_id.clone(),
+            file_paths: None,
+            timestamp: chrono::Utc::now(),
+            project_root: None,
+        };
+        let tool_key = Self::approval_cache_key_for_context(&context);
+        if Self::approval_must_be_single_use(&context) {
+            self.remember_once_approval(&session_id, &tool_key).await;
+            return;
+        }
         let expire_at = chrono::Utc::now() + chrono::Duration::minutes(minutes);
         let mut windows = self.window_approvals.write().await;
         let session_key = format!("{}:{}", session_id, tool_key);
@@ -318,7 +344,7 @@ impl PermissionManager {
     }
 
     /// 按 `tool_name` 记入本会话批准（与 `approve_session` 相同语义）。
-    /// `_legacy_hash` 已废弃：旧调用方传入 SHA-256(tool+args)，现在只按工具名缓存，不再区分参数。
+    /// `_legacy_hash` 已废弃：旧调用方没有参数上下文，因此仅保留非 bash 的宽松兼容行为。
     pub async fn approve_with_hash(
         &self,
         session_id: String,
@@ -336,7 +362,7 @@ impl PermissionManager {
         // 这里可以添加临时缓存如果需要
     }
 
-    /// 拒绝工具（按工具名记入本会话拒绝列表，`hash` 参数已忽略）
+    /// 旧接口：拒绝工具（无参数上下文，按工具名记入本会话拒绝列表，`hash` 参数已忽略）
     pub async fn deny_tool(
         &self,
         session_id: String,
@@ -461,7 +487,7 @@ impl PermissionManager {
     // 内部辅助方法
     // =========================================================================
 
-    /// 用户「记住」批准 / 本会话拒绝 使用的键：与 `tool_rules` 一致，Read/Search 等与内置名合并
+    /// 用户「记住」批准 / 本会话拒绝 使用的基础键：与 `tool_rules` 一致，Read/Search 等与内置名合并
     fn approval_cache_key(tool_name: &str) -> String {
         let c = canonical_permission_tool_name(tool_name.trim());
         if c.starts_with("mcp__") {
@@ -473,18 +499,377 @@ impl PermissionManager {
 
     fn approval_cache_key_for_context(context: &PermissionContext) -> String {
         let base = Self::approval_cache_key(&context.tool_name);
-        if base != "connector" {
-            return base;
+        match base.as_str() {
+            "connector" => {
+                let Some((connector_id, operation)) =
+                    connectors::connector_permission_identity_from_args(&context.arguments)
+                else {
+                    return base;
+                };
+                format!("connector:{connector_id}:{operation}")
+            }
+            "bash" | "shell" => Self::bash_approval_cache_key(&base, &context.arguments),
+            _ => base,
         }
-        let Some((connector_id, operation)) =
-            connectors::connector_permission_identity_from_args(&context.arguments)
-        else {
-            return base;
-        };
-        format!("connector:{connector_id}:{operation}")
     }
 
-    /// 使用 SHA-256 计算工具+参数哈希（仅单元测试校验 canonical 行为；批准缓存按工具名）
+    fn bash_approval_cache_key(base: &str, arguments: &serde_json::Value) -> String {
+        let Some(command) = arguments
+            .get("command")
+            .or_else(|| arguments.get("cmd"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return base.to_string();
+        };
+
+        format!("{base}:{}", Self::bash_command_class(command))
+    }
+
+    fn approval_must_be_single_use(context: &PermissionContext) -> bool {
+        let base = Self::approval_cache_key(&context.tool_name);
+        if base == "computer_type" {
+            return true;
+        }
+        if base != "bash" && base != "shell" {
+            return false;
+        }
+        let Some(command) = context
+            .arguments
+            .get("command")
+            .or_else(|| context.arguments.get("cmd"))
+            .and_then(|v| v.as_str())
+        else {
+            return false;
+        };
+        Self::shell_command_requires_fresh_approval(command)
+    }
+
+    fn shell_command_requires_fresh_approval(command: &str) -> bool {
+        let lower = command.to_ascii_lowercase();
+        if lower.contains("curl") && lower.contains('|') && lower.contains("sh") {
+            return true;
+        }
+        if lower.contains("wget") && lower.contains('|') && lower.contains("sh") {
+            return true;
+        }
+        if lower.contains("find ") && (lower.contains(" -delete") || lower.contains(" -exec rm")) {
+            return true;
+        }
+
+        let words = Self::shell_words(command);
+        let Some((exe, rest)) = Self::command_word_and_rest(&words) else {
+            return false;
+        };
+        Self::is_file_deletion_command(&exe, &rest)
+            || Self::is_software_install_command(&exe, &rest)
+            || Self::is_destructive_git_command(&exe, &rest)
+    }
+
+    fn is_file_deletion_command(exe: &str, rest: &[String]) -> bool {
+        matches!(
+            exe,
+            "rm" | "rmdir" | "unlink" | "shred" | "trash" | "trash-put"
+        ) || (exe == "find"
+            && (rest.iter().any(|t| t == "-delete")
+                || rest
+                    .windows(2)
+                    .any(|w| w[0] == "-exec" && matches!(w[1].as_str(), "rm" | "/bin/rm"))))
+    }
+
+    fn is_destructive_git_command(exe: &str, rest: &[String]) -> bool {
+        if exe != "git" {
+            return false;
+        }
+        match Self::git_subcommand(rest).as_deref() {
+            Some("clean") => true,
+            Some("reset") => rest.iter().any(|t| t == "--hard"),
+            Some("push") => rest
+                .iter()
+                .any(|t| matches!(t.as_str(), "--force" | "--force-with-lease" | "-f")),
+            _ => false,
+        }
+    }
+
+    fn is_software_install_command(exe: &str, rest: &[String]) -> bool {
+        let first = Self::first_non_option_token(rest);
+        match exe {
+            "npm" => matches!(first, Some("install" | "i" | "add" | "ci")),
+            "yarn" | "pnpm" | "bun" => matches!(first, Some("add" | "install")),
+            "pip" | "pip3" => matches!(first, Some("install")),
+            "python" | "python2" | "python3" => {
+                rest.first().map(String::as_str) == Some("-m")
+                    && rest.get(1).map(String::as_str) == Some("pip")
+                    && rest.iter().any(|t| t == "install")
+            }
+            "uv" => match first {
+                Some("add" | "sync") => true,
+                Some("pip") => Self::token_after(rest, "pip") == Some("install"),
+                Some("tool") => Self::token_after(rest, "tool") == Some("install"),
+                _ => false,
+            },
+            "cargo" | "gem" | "brew" | "port" => matches!(first, Some("install")),
+            "go" => matches!(first, Some("install" | "get")),
+            "apt" | "apt-get" | "yum" | "dnf" => matches!(first, Some("install")),
+            "apk" => matches!(first, Some("add")),
+            "pacman" => rest.iter().any(|t| t == "-S" || t.starts_with("-S")),
+            "conda" | "mamba" | "micromamba" => matches!(first, Some("install" | "create")),
+            _ => false,
+        }
+    }
+
+    fn bash_command_class(command: &str) -> String {
+        let normalized = Self::normalize_command_for_cache(command);
+        if Self::has_shell_control_or_redirection(command) {
+            return format!("hash:{}", Self::short_hash(&normalized));
+        }
+
+        let words = Self::shell_words(command);
+        let Some((exe, rest)) = Self::command_word_and_rest(&words) else {
+            return format!("hash:{}", Self::short_hash(&normalized));
+        };
+
+        if Self::hash_scoped_shell_command(&exe) {
+            return format!("cmd:{exe}:{}", Self::short_hash(&normalized));
+        }
+
+        let mut parts = vec![format!("cmd:{exe}")];
+        match exe.as_str() {
+            "git" | "cargo" | "docker" | "docker-compose" | "kubectl" | "go" | "pip" | "pip3"
+            | "poetry" | "brew" | "apt" | "apt-get" | "yum" | "dnf" | "pacman" | "apk" | "make"
+            | "just" => {
+                if let Some(sub) = Self::first_non_option_token(&rest) {
+                    parts.push(sub.to_string());
+                }
+            }
+            "npm" | "pnpm" | "yarn" | "bun" | "uv" => {
+                if let Some(sub) = Self::first_non_option_token(&rest) {
+                    parts.push(sub.to_string());
+                    if matches!(sub, "run" | "exec" | "dlx" | "tool") {
+                        if let Some(next) = Self::token_after(&rest, sub) {
+                            parts.push(next.to_string());
+                        }
+                    }
+                }
+            }
+            "python" | "python2" | "python3" | "node" | "ruby" | "perl" | "rscript" => {
+                if rest.iter().any(|t| matches!(t.as_str(), "-c" | "-e" | "-"))
+                    || command.contains("<<")
+                {
+                    parts.push(Self::short_hash(&normalized));
+                } else if rest.first().map(|s| s.as_str()) == Some("-m") {
+                    parts.push("-m".to_string());
+                    if let Some(module) = rest.get(1) {
+                        parts.push(module.clone());
+                    }
+                } else if let Some(script) = Self::first_non_option_token(&rest) {
+                    parts.push(script.to_string());
+                }
+            }
+            _ => {}
+        }
+        parts.join(":")
+    }
+
+    fn command_word_and_rest(words: &[String]) -> Option<(String, Vec<String>)> {
+        let mut i = 0usize;
+        while i < words.len() && Self::looks_like_env_assignment(&words[i]) {
+            i += 1;
+        }
+        if words.get(i).map(String::as_str) == Some("env") {
+            i += 1;
+            while i < words.len()
+                && (Self::looks_like_env_assignment(&words[i]) || words[i].starts_with('-'))
+            {
+                i += 1;
+            }
+        }
+        if words.get(i).map(String::as_str) == Some("sudo") {
+            i += 1;
+            while i < words.len() && words[i].starts_with('-') {
+                i += 1;
+            }
+        }
+        let exe = words.get(i)?;
+        let exe = std::path::Path::new(exe)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(exe)
+            .to_ascii_lowercase();
+        let rest = words[i + 1..]
+            .iter()
+            .map(|s| Self::normalize_cache_token(s))
+            .collect();
+        Some((exe, rest))
+    }
+
+    fn git_subcommand(rest: &[String]) -> Option<String> {
+        let mut i = 0usize;
+        while i < rest.len() {
+            let token = rest[i].as_str();
+            if token == "-C" || token == "-c" {
+                i += 2;
+                continue;
+            }
+            if token.starts_with('-') {
+                i += 1;
+                continue;
+            }
+            return Some(token.to_string());
+        }
+        None
+    }
+
+    fn hash_scoped_shell_command(exe: &str) -> bool {
+        matches!(
+            exe,
+            "rm" | "rmdir"
+                | "mv"
+                | "cp"
+                | "chmod"
+                | "chown"
+                | "dd"
+                | "find"
+                | "rsync"
+                | "scp"
+                | "curl"
+                | "wget"
+                | "ssh"
+                | "nc"
+                | "ftp"
+                | "open"
+                | "osascript"
+        )
+    }
+
+    fn first_non_option_token(tokens: &[String]) -> Option<&str> {
+        tokens
+            .iter()
+            .map(String::as_str)
+            .find(|token| !token.starts_with('-') && !Self::looks_like_env_assignment(token))
+    }
+
+    fn token_after<'a>(tokens: &'a [String], needle: &str) -> Option<&'a str> {
+        let pos = tokens.iter().position(|token| token == needle)?;
+        tokens
+            .iter()
+            .skip(pos + 1)
+            .map(String::as_str)
+            .find(|token| !token.starts_with('-') && !Self::looks_like_env_assignment(token))
+    }
+
+    fn normalize_cache_token(token: &str) -> String {
+        token.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn normalize_command_for_cache(command: &str) -> String {
+        command
+            .trim()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn looks_like_env_assignment(token: &str) -> bool {
+        let Some((name, _)) = token.split_once('=') else {
+            return false;
+        };
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            && name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+    }
+
+    fn short_hash(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        let full = format!("{:x}", hasher.finalize());
+        full.chars().take(16).collect()
+    }
+
+    fn has_shell_control_or_redirection(command: &str) -> bool {
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+        let bytes = command.as_bytes();
+
+        for (i, ch) in command.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if in_double && ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if !in_double && ch == '\'' {
+                in_single = !in_single;
+                continue;
+            }
+            if !in_single && ch == '"' {
+                in_double = !in_double;
+                continue;
+            }
+            if in_single || in_double {
+                continue;
+            }
+            match ch {
+                ';' | '\n' | '|' | '&' | '>' | '`' => return true,
+                '$' if bytes.get(i + 1) == Some(&b'(') => return true,
+                '<' => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn shell_words(command: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+
+        for ch in command.chars() {
+            if escaped {
+                current.push(ch);
+                escaped = false;
+                continue;
+            }
+            if in_double && ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if !in_double && ch == '\'' {
+                in_single = !in_single;
+                continue;
+            }
+            if !in_single && ch == '"' {
+                in_double = !in_double;
+                continue;
+            }
+            if !in_single && !in_double && ch.is_whitespace() {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            current.push(ch);
+        }
+        if !current.is_empty() {
+            words.push(current);
+        }
+        words
+    }
+
+    /// 使用 SHA-256 计算工具+参数哈希（仅单元测试校验 canonical 行为）
     #[cfg(test)]
     fn compute_tool_hash(tool_name: &str, arguments: &serde_json::Value) -> String {
         let mut hasher = Sha256::new();
@@ -532,7 +917,7 @@ impl PermissionManager {
         }
     }
 
-    /// 本会话 / 时间窗口 / 单次「记住」是否已覆盖该工具（`tool_key` = `approval_cache_key`）
+    /// 本会话 / 时间窗口 / 单次「记住」是否已覆盖该批准单元
     async fn is_remembered_tool_allowed(&self, session_id: &str, tool_key: &str) -> bool {
         let session_key = format!("{}:{}", session_id, tool_key);
         let now = chrono::Utc::now();
@@ -576,6 +961,13 @@ impl PermissionManager {
         }
 
         false
+    }
+
+    async fn remember_once_approval(&self, session_id: &str, tool_key: &str) {
+        let expire_at = chrono::Utc::now() + chrono::Duration::seconds(30);
+        let mut once = self.once_approvals.write().await;
+        let session_key = format!("{}:{}", session_id, tool_key);
+        once.insert(session_key, expire_at);
     }
 
     /// 递增规则使用计数（同时更新 last_used_at）
@@ -882,6 +1274,20 @@ impl PermissionManager {
             categories.push(RiskCategory::Privacy);
         }
 
+        if Self::approval_cache_key(&context.tool_name) == "computer_type"
+            && crate::domain::computer_use::value_contains_probable_secret(&context.arguments)
+        {
+            detected_risks.push(DetectedRisk {
+                category: RiskCategory::Privacy,
+                severity: RiskLevel::Critical,
+                description: "Computer Use 将输入疑似 secret/token/password".to_string(),
+                mitigation: Some(
+                    "确认目标窗口可信；该输入只允许单次批准，审计日志会脱敏保存。".to_string(),
+                ),
+            });
+            categories.push(RiskCategory::Privacy);
+        }
+
         // 2. 参数级别风险（bash/shell 危险命令检测）
         if context.tool_name == "bash" || context.tool_name == "shell" {
             if let Some(cmd) = context.arguments.get("command").and_then(|v| v.as_str()) {
@@ -1126,6 +1532,66 @@ impl PermissionManager {
                     mitigation: None,
                 }],
             },
+            "computer_observe" => RiskAssessment {
+                level: RiskLevel::Medium,
+                categories: vec![RiskCategory::Privacy],
+                description: "观察本机屏幕/前台窗口".to_string(),
+                recommendations: vec!["确认当前屏幕未显示不应共享的敏感内容".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::Privacy,
+                    severity: RiskLevel::Medium,
+                    description: "可能读取屏幕截图、窗口标题或页面内容".to_string(),
+                    mitigation: Some("只在需要本机 UI 自动化的任务中开启 Computer Use".to_string()),
+                }],
+            },
+            "computer_set_target" => RiskAssessment {
+                level: RiskLevel::Medium,
+                categories: vec![RiskCategory::System],
+                description: "选择本机目标应用/窗口".to_string(),
+                recommendations: vec!["确认目标应用和窗口正确".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::System,
+                    severity: RiskLevel::Medium,
+                    description: "可能切换或聚焦本机应用窗口".to_string(),
+                    mitigation: Some("跨 App 操作前应显式确认目标".to_string()),
+                }],
+            },
+            "computer_click" | "computer_click_element" => RiskAssessment {
+                level: RiskLevel::Medium,
+                categories: vec![RiskCategory::System],
+                description: "在本机目标窗口执行点击".to_string(),
+                recommendations: vec!["确认最近 observation 与当前窗口一致".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::System,
+                    severity: RiskLevel::Medium,
+                    description: "将向本机应用发送鼠标点击".to_string(),
+                    mitigation: Some(
+                        "动作前由 Computer Use facade 执行观察/限速/stop 检查".to_string(),
+                    ),
+                }],
+            },
+            "computer_type" => RiskAssessment {
+                level: RiskLevel::High,
+                categories: vec![RiskCategory::Privacy, RiskCategory::System],
+                description: "向本机目标窗口输入文本".to_string(),
+                recommendations: vec![
+                    "确认目标窗口可信".to_string(),
+                    "不要输入 secret/token/password，除非用户明确要求".to_string(),
+                ],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::Privacy,
+                    severity: RiskLevel::High,
+                    description: "将向本机应用输入可能包含隐私的数据".to_string(),
+                    mitigation: Some("Computer Use 审计日志会脱敏保存输入".to_string()),
+                }],
+            },
+            "computer_stop" => RiskAssessment {
+                level: RiskLevel::Safe,
+                categories: vec![],
+                description: "停止 Computer Use 运行".to_string(),
+                recommendations: vec![],
+                detected_risks: vec![],
+            },
             // 其他常见安全工具
             "list_skills" | "skills_list" | "skill_view" | "tool_search" | "get_current_time"
             | "get_system_info" => RiskAssessment {
@@ -1262,6 +1728,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn computer_use_tool_risks_are_classified() {
+        let mgr = PermissionManager::new();
+
+        let observe = mgr
+            .check_tool("s_computer", "computer_observe", &serde_json::json!({}))
+            .await;
+        let req = match observe {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected observe approval, got {other:?}"),
+        };
+        assert_eq!(req.risk.level, RiskLevel::Medium);
+
+        let type_text = mgr
+            .check_tool(
+                "s_computer_type",
+                "computer_type",
+                &serde_json::json!({"text": "hello"}),
+            )
+            .await;
+        let req = match type_text {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected type approval, got {other:?}"),
+        };
+        assert_eq!(req.risk.level, RiskLevel::High);
+
+        let stop = mgr
+            .check_tool("s_computer_stop", "computer_stop", &serde_json::json!({}))
+            .await;
+        assert!(matches!(stop, PermissionDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn computer_type_probable_secret_forces_critical_single_use() {
+        let mgr = PermissionManager::new();
+        let args = serde_json::json!({"text": "password=hunter2"});
+
+        let first = mgr
+            .check_tool("s_computer_secret", "computer_type", &args)
+            .await;
+        let req = match first {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected secret approval, got {other:?}"),
+        };
+        assert_eq!(req.risk.level, RiskLevel::Critical);
+
+        mgr.approve_request("s_computer_secret", PermissionMode::Session, &req.context)
+            .await
+            .unwrap();
+
+        let allowed_once = mgr
+            .check_tool("s_computer_secret", "computer_type", &args)
+            .await;
+        assert!(matches!(allowed_once, PermissionDecision::Allow));
+
+        let second = mgr
+            .check_tool("s_computer_secret", "computer_type", &args)
+            .await;
+        assert!(matches!(second, PermissionDecision::RequireApproval(_)));
+    }
+
+    #[tokio::test]
     async fn connector_write_approval_is_scoped_to_connector_operation() {
         let mgr = PermissionManager::new();
         let slack_post = serde_json::json!({
@@ -1330,7 +1857,7 @@ mod tests {
         let mgr = PermissionManager::new();
         let ctx = PermissionContext {
             tool_name: "bash".to_string(),
-            arguments: serde_json::json!({"command": "ls /tmp"}),
+            arguments: serde_json::json!({"command": "git status --short"}),
             session_id: "session_deny_test".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
@@ -1340,22 +1867,33 @@ mod tests {
         // 第一次拒绝
         mgr.deny_request(&ctx, "用户拒绝").await.unwrap();
 
-        // 后续调用应直接返回 Deny（同工具不同参数也拒绝）
+        // 后续同类命令应直接返回 Deny
         let dec = mgr.check_permission(&ctx).await;
         assert!(
             matches!(dec, PermissionDecision::Deny(_)),
             "后续调用应返回 Deny，实际: {:?}",
             dec
         );
-        let ctx_other_cmd = PermissionContext {
-            arguments: serde_json::json!({"command": "echo other"}),
+        let ctx_same_class = PermissionContext {
+            arguments: serde_json::json!({"command": "git status --porcelain"}),
             ..ctx.clone()
         };
-        let dec2 = mgr.check_permission(&ctx_other_cmd).await;
+        let dec2 = mgr.check_permission(&ctx_same_class).await;
         assert!(
             matches!(dec2, PermissionDecision::Deny(_)),
-            "同工具不同参数仍应 Deny，实际: {:?}",
+            "同类 git status 仍应 Deny，实际: {:?}",
             dec2
+        );
+
+        let ctx_other_cmd = PermissionContext {
+            arguments: serde_json::json!({"command": "git push origin main"}),
+            ..ctx.clone()
+        };
+        let dec3 = mgr.check_permission(&ctx_other_cmd).await;
+        assert!(
+            !matches!(dec3, PermissionDecision::Deny(_)),
+            "不同命令类别不应被 git status 的拒绝覆盖，实际: {:?}",
+            dec3
         );
     }
 
@@ -1390,11 +1928,11 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_session_approve_allows_subsequent() {
+    async fn test_session_approve_bash_is_scoped_to_command_class() {
         let mgr = PermissionManager::new();
         let ctx = PermissionContext {
             tool_name: "bash".to_string(),
-            arguments: serde_json::json!({"command": "ls /tmp"}),
+            arguments: serde_json::json!({"command": "git status --short"}),
             session_id: "s_approve".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
@@ -1411,15 +1949,117 @@ mod tests {
             "批准后应 Allow，实际: {:?}",
             dec
         );
-        let ctx_other = PermissionContext {
-            arguments: serde_json::json!({"command": "cp a b"}),
+        let ctx_same_class = PermissionContext {
+            arguments: serde_json::json!({"command": "git status --porcelain"}),
             ..ctx.clone()
         };
-        let dec2 = mgr.check_permission(&ctx_other).await;
+        let dec2 = mgr.check_permission(&ctx_same_class).await;
         assert!(
             matches!(dec2, PermissionDecision::Allow),
-            "同工具不同参数也应 Allow，实际: {:?}",
+            "同类 git status 应共享本会话批准，实际: {:?}",
             dec2
+        );
+
+        let ctx_other = PermissionContext {
+            arguments: serde_json::json!({"command": "git push origin main"}),
+            ..ctx.clone()
+        };
+        let dec3 = mgr.check_permission(&ctx_other).await;
+        assert!(
+            matches!(dec3, PermissionDecision::RequireApproval(_)),
+            "不同命令类别不应被 git status 的本会话批准覆盖，实际: {:?}",
+            dec3
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_approve_bash_inline_code_does_not_allow_other_code() {
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "bash".to_string(),
+            arguments: serde_json::json!({
+                "command": "python3 - <<'PY'\nprint('safe')\nPY"
+            }),
+            session_id: "s_inline".to_string(),
+            file_paths: None,
+            timestamp: chrono::Utc::now(),
+            project_root: None,
+        };
+
+        mgr.approve_request("s_inline", PermissionMode::Session, &ctx)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            mgr.check_permission(&ctx).await,
+            PermissionDecision::Allow
+        ));
+
+        let destructive = PermissionContext {
+            arguments: serde_json::json!({"command": "rm -rf /tmp/omiga-inline-test"}),
+            ..ctx.clone()
+        };
+        let dec = mgr.check_permission(&destructive).await;
+        assert!(
+            matches!(dec, PermissionDecision::RequireApproval(_)),
+            "批准一段 inline Python 不应放行其它 bash 代码，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_approve_install_command_is_single_use() {
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "bash".to_string(),
+            arguments: serde_json::json!({"command": "npm install left-pad"}),
+            session_id: "s_install_once".to_string(),
+            file_paths: None,
+            timestamp: chrono::Utc::now(),
+            project_root: None,
+        };
+
+        mgr.approve_request("s_install_once", PermissionMode::Session, &ctx)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            mgr.check_permission(&ctx).await,
+            PermissionDecision::Allow
+        ));
+        let second = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(second, PermissionDecision::RequireApproval(_)),
+            "软件安装即使选择本会话也必须下次重新询问，实际: {:?}",
+            second
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_approve_file_deletion_is_single_use() {
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "bash".to_string(),
+            arguments: serde_json::json!({"command": "rm -rf /tmp/omiga-delete-test"}),
+            session_id: "s_delete_once".to_string(),
+            file_paths: None,
+            timestamp: chrono::Utc::now(),
+            project_root: None,
+        };
+
+        mgr.approve_request("s_delete_once", PermissionMode::Session, &ctx)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            mgr.check_permission(&ctx).await,
+            PermissionDecision::Allow
+        ));
+        let second = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(second, PermissionDecision::RequireApproval(_)),
+            "文件删除即使选择本会话也必须下次重新询问，实际: {:?}",
+            second
         );
     }
 
@@ -1479,7 +2119,7 @@ mod tests {
     }
 
     /// Critical 风险（patterns 中如直接写磁盘设备）在未批准前走 Critical 分支；
-    /// 本会话批准后应命中缓存而不再弹窗
+    /// 本会话批准后仅相同命令类别命中缓存，不应覆盖其它 bash 命令。
     #[tokio::test]
     async fn test_session_approve_allows_critical_bash_same_args() {
         let mgr = PermissionManager::new();
@@ -1514,8 +2154,8 @@ mod tests {
         };
         let after_other = mgr.check_permission(&ctx_other).await;
         assert!(
-            matches!(after_other, PermissionDecision::Allow),
-            "Critical 工具本会话记住后，其它 bash 参数也应 Allow，实际: {:?}",
+            matches!(after_other, PermissionDecision::RequireApproval(_)),
+            "Critical bash 批准不应覆盖其它命令类别，实际: {:?}",
             after_other
         );
     }
@@ -1539,14 +2179,34 @@ mod tests {
         let dec = mgr.check_permission(&ctx).await;
         assert!(matches!(dec, PermissionDecision::Allow));
         let ctx2 = PermissionContext {
-            arguments: serde_json::json!({"command": "different"}),
+            arguments: serde_json::json!({"command": "echo different"}),
             ..ctx.clone()
         };
         let dec2 = mgr.check_permission(&ctx2).await;
         assert!(
             matches!(dec2, PermissionDecision::Allow),
-            "时间窗口内同工具不同参数应 Allow，实际: {:?}",
+            "时间窗口内同类命令应 Allow，实际: {:?}",
             dec2
+        );
+        let ctx3 = PermissionContext {
+            arguments: serde_json::json!({"command": "rm -rf /tmp/omiga-time-window-test"}),
+            ..ctx.clone()
+        };
+        let dec3 = mgr.check_permission(&ctx3).await;
+        assert!(
+            matches!(dec3, PermissionDecision::RequireApproval(_)),
+            "时间窗口批准不应覆盖不同 bash 命令类别，实际: {:?}",
+            dec3
+        );
+        let ctx4 = PermissionContext {
+            arguments: serde_json::json!({"command": "echo $(rm -rf /tmp/omiga-substitution-test)"}),
+            ..ctx.clone()
+        };
+        let dec4 = mgr.check_permission(&ctx4).await;
+        assert!(
+            matches!(dec4, PermissionDecision::RequireApproval(_)),
+            "普通 echo 批准不应覆盖带命令替换的 shell 代码，实际: {:?}",
+            dec4
         );
     }
 

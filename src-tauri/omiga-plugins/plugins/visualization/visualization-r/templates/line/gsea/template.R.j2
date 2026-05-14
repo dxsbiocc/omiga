@@ -1,0 +1,70 @@
+#!/usr/bin/env Rscript
+# Template: line/gsea
+# Purpose: GSEA-style running enrichment-score curve with hit markers.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template line/gsea
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(columns = list(rank = arg_or(3, "rank"), score = arg_or(4, "running_score"), hit = arg_or(5, "hit"), pathway = arg_or(6, "pathway")), labels = list(title = arg_or(7, "GSEA enrichment curve")), style = list(base_size = 12))
+delimiter <- arg_or(8, "auto"); width <- as.numeric(arg_or(9, "8")); height <- as.numeric(arg_or(10, "5")); dpi <- as.integer(arg_or(11, "300"))
+
+is_hit <- function(x) {
+  value <- tolower(trimws(as.character(x)))
+  value %in% c("1", "true", "t", "yes", "y", "hit")
+}
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$rank, config$columns$score), "line/gsea input")
+  df <- ensure_numeric_columns(df, c(config$columns$rank, config$columns$score), "line/gsea input")
+  df[order(df[[config$columns$rank]]), , drop = FALSE]
+}
+make_plot <- function(df, config) {
+  pathway_col <- resolve_optional_column(df, config$columns$pathway)
+  hit_col <- resolve_optional_column(df, config$columns$hit)
+  mapping <- ggplot2::aes(x = .data[[config$columns$rank]], y = .data[[config$columns$score]])
+  if (!is.null(pathway_col)) {
+    mapping$colour <- ggplot2::expr(.data[[pathway_col]])
+    mapping$group <- ggplot2::expr(.data[[pathway_col]])
+  }
+  p <- ggplot2::ggplot(df, mapping) +
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "grey55") +
+    ggplot2::geom_line(linewidth = 0.9) +
+    ggplot2::labs(title = config$labels$title, x = config$columns$rank, y = config$columns$score, color = pathway_col) +
+    theme_visualization(base_size = config$style$base_size)
+  if (!is.null(pathway_col)) p <- p + ggplot2::scale_colour_manual(values = visualization_palette(length(unique(df[[pathway_col]]))))
+  if (!is.null(hit_col)) {
+    hits <- df[is_hit(df[[hit_col]]), , drop = FALSE]
+    if (nrow(hits) > 0) {
+      p <- p + ggplot2::geom_rug(data = hits, ggplot2::aes(x = .data[[config$columns$rank]]), inherit.aes = FALSE, sides = "b", color = "#111827", linewidth = 0.45)
+    }
+  }
+  p
+}
+customize_plot <- function(p, df, config) { p }
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows"), value = c("line/gsea", nrow(plot_df))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "line/gsea", rows = nrow(plot_df)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

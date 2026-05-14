@@ -12,7 +12,7 @@ Use it as the canonical minimal example when authoring or testing a retrieval pl
 
 ## Boundaries and guarantees
 
-- The plugin process is spawned from the local plugin directory declared in `.omiga-plugin/plugin.json`.
+- The plugin process is spawned from the local plugin directory declared in `plugin.json`.
 - Omiga sends exactly one request at a time to a child process. `runtime.concurrency` must be `1` for protocol version 1.
 - Successful idle child processes may be pooled and reused until `runtime.idleTtlMs` expires.
 - Failed, cancelled, timed-out, malformed, disabled, removed, or expired child processes are discarded and are not reused.
@@ -21,7 +21,7 @@ Use it as the canonical minimal example when authoring or testing a retrieval pl
 
 ## Manifest shape
 
-Declare retrieval support under the top-level `retrieval` key in `.omiga-plugin/plugin.json`:
+Declare retrieval support under the top-level `retrieval` key in `plugin.json`:
 
 ```json
 {
@@ -30,7 +30,7 @@ Declare retrieval support under the top-level `retrieval` key in `.omiga-plugin/
   "retrieval": {
     "protocolVersion": 1,
     "runtime": {
-      "command": "./bin/basic_retrieval_plugin.py",
+      "command": "./scripts/basic_retrieval_plugin.py",
       "args": [],
       "cwd": ".",
       "idleTtlMs": 30000,
@@ -38,12 +38,12 @@ Declare retrieval support under the top-level `retrieval` key in `.omiga-plugin/
       "cancelGraceMs": 500,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "example_dataset",
         "category": "dataset",
         "label": "Example Dataset",
-        "description": "Local fixture source that demonstrates search, query, and fetch responses.",
+        "description": "Local fixture resource that demonstrates search, query, and fetch responses.",
         "aliases": ["example data"],
         "subcategories": ["sample metadata"],
         "capabilities": ["search", "query", "fetch"],
@@ -73,11 +73,11 @@ Declare retrieval support under the top-level `retrieval` key in `.omiga-plugin/
 | `cancelGraceMs` | no | Grace period for shutdown after cancellation. |
 | `concurrency` | yes | Must be `1` in protocol version 1. |
 
-### Source fields
+### Resource fields
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `id` | yes | Route source id. Normalized to lowercase snake_case. |
+| `id` | yes | Route resource id. Normalized to lowercase snake_case. |
 | `category` | yes | Route category, for example `dataset`, `literature`, `knowledge`, or `web`. Dataset aliases such as `data` normalize to `dataset`. |
 | `capabilities` | yes | Any non-empty subset of `search`, `query`, `fetch`. |
 | `label` / `description` | no | Displayed in Settings and tool descriptions. |
@@ -87,7 +87,7 @@ Declare retrieval support under the top-level `retrieval` key in `.omiga-plugin/
 | `riskLevel` / `riskNotes` | no | UI and review metadata. |
 | `defaultEnabled` | yes | Must be `false` in this version. Users enable plugins explicitly. |
 | `replacesBuiltin` | no | Reserved for future controlled replacement behavior. |
-| `parameters` | no | JSON metadata for source-specific parameters. |
+| `parameters` | no | JSON metadata for resource-specific parameters. |
 
 Allowed credential refs currently include:
 
@@ -116,14 +116,14 @@ Omiga sends this immediately after spawning the child process:
 }
 ```
 
-The plugin must respond with every manifest-declared retrieval source and capability:
+The plugin must respond with every manifest-declared retrieval resource and capability:
 
 ```json
 {
   "id": "initialize",
   "type": "initialized",
   "protocolVersion": 1,
-  "sources": [
+  "resources": [
     {
       "category": "dataset",
       "id": "example_dataset",
@@ -133,7 +133,7 @@ The plugin must respond with every manifest-declared retrieval source and capabi
 }
 ```
 
-Omiga rejects initialization if the protocol version, source ids, categories, or declared capabilities do not match the manifest.
+Omiga rejects initialization if the protocol version, resource ids, categories, or declared capabilities do not match the manifest.
 
 ### Execute
 
@@ -260,6 +260,6 @@ await invoke("validate_omiga_retrieval_plugin", {
 });
 ```
 
-The report includes manifest checks, a retrieval source summary, the protocol doc path, and optional smoke results. When `smoke` is `true`, Omiga starts the plugin without installing it and runs credential-free `search`, `query`, and `fetch` smoke requests for sources that declare those capabilities. Sources with required credentials are skipped for smoke execution instead of projecting secrets.
+The report includes manifest checks, a retrieval resource summary, the protocol doc path, and optional smoke results. When `smoke` is `true`, Omiga starts the plugin without installing it and runs credential-free `search`, `query`, and `fetch` smoke requests for resources that declare those capabilities. Resources with required credentials are skipped for smoke execution instead of projecting secrets.
 
 Validation is local and read-only from Omiga's perspective, but it **does execute the plugin runtime command** when `smoke` is enabled. Only smoke-test plugin roots you trust.

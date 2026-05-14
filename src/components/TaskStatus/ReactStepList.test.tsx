@@ -44,6 +44,8 @@ describe("ReactStepList", () => {
         status: "done",
         toolName: "file_write",
         failed: false,
+        startedAt: 1_000,
+        completedAt: 3_500,
       },
     ]);
 
@@ -54,7 +56,31 @@ describe("ReactStepList", () => {
     expect(html).toContain("×2");
     expect(html).toContain("成功调用（最近优先）");
     expect(html).toContain("1 次成功");
+    expect(html).toContain("2s");
     expect(html).not.toContain("需处理");
+  });
+
+  it("shows per-step execution time for running and completed rows", () => {
+    const html = renderSteps([
+      {
+        id: "tool-read",
+        title: "file_read",
+        status: "done",
+        toolName: "file_read",
+        startedAt: 1_000,
+        completedAt: 4_100,
+      },
+      {
+        id: "tool-bash",
+        title: "bash",
+        status: "running",
+        toolName: "bash",
+        startedAt: Date.now() - 2_200,
+      },
+    ]);
+
+    expect(html).toContain("3s");
+    expect(html).toContain("2s");
   });
 
   it("marks running background operation steps with a dedicated badge", () => {
@@ -93,5 +119,53 @@ describe("ReactStepList", () => {
     expect(html).not.toContain("正在执行");
     expect(html).toContain("成功调用（最近优先）");
     expect(html).toContain("1 次成功");
+  });
+
+  it("renders execution record insights inside the task execution step list", () => {
+    const html = renderSteps([
+      {
+        id: "tool-record-detail",
+        title: "execution_record_detail",
+        status: "done",
+        toolName: "execution_record_detail",
+        toolOutput: JSON.stringify({
+          found: true,
+          recordId: "execrec_parent",
+          record: {
+            id: "execrec_parent",
+            unitId: "bulk_de",
+            kind: "template",
+            status: "success",
+          },
+          parsed: {
+            metadata: {
+              paramSources: {
+                method: "user_preflight",
+                fdr: "default",
+              },
+              preflight: {
+                answeredParams: [{ param: "method" }],
+              },
+            },
+            outputSummary: {
+              outputs: {
+                table: ["de.tsv"],
+              },
+            },
+          },
+          lineage: {
+            parentExecutionId: null,
+            childCount: 1,
+          },
+          children: [{ id: "execrec_child" }],
+        }),
+      },
+    ]);
+
+    expect(html).toContain("Execution record detail");
+    expect(html).toContain("Execution detail");
+    expect(html).toContain("paramSources user_preflight: 1");
+    expect(html).toContain("1 answered question");
+    expect(html).toContain("table: 1");
   });
 });

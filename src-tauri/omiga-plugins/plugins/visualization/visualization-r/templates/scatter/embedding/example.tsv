@@ -1,0 +1,13 @@
+sample_id	umap_1	umap_2	label	cluster
+S01	-4.2	1.1	B1	B cell
+S02	-3.8	1.5		B cell
+S03	-3.4	0.6		B cell
+S04	-2.9	1.9		B cell
+S05	0.8	-2.2	T1	T cell
+S06	1.2	-1.7		T cell
+S07	1.9	-2.8		T cell
+S08	2.3	-1.9		T cell
+S09	3.4	2.7	M1	Myeloid
+S10	3.9	3.1		Myeloid
+S11	4.3	2.2		Myeloid
+S12	2.9	3.6		Myeloid

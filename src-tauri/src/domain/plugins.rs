@@ -1,36 +1,50 @@
-//! Omiga native plugin discovery, marketplace, installation, and runtime capability loading.
+//! Omiga native plugin discovery, marketplace, installation, and runtime contribution loading.
 //!
-//! A plugin is an Omiga-native capability bundle: skills, MCP server configs, app connector
+//! A plugin is an Omiga-native extension bundle: skills, MCP server configs, app connector
 //! references, and UI metadata. It intentionally does not execute VS Code extension code.
 
+use crate::domain::environments::{
+    check_environment_profile, discover_environment_manifest_paths, environment_summary,
+    load_environment_manifest, EnvironmentCheckResult, EnvironmentProfileSummary,
+};
 use crate::domain::mcp::config::{servers_from_mcp_json, McpServerConfig};
-use crate::domain::retrieval::plugin::lifecycle::{
+use crate::domain::operators::OperatorCandidateSummary;
+use crate::domain::plugin_runtime::retrieval::lifecycle::{
     PluginLifecycleKey, PluginLifecycleRouteStatus, PluginLifecycleState,
 };
-use crate::domain::retrieval::plugin::manifest::{
+use crate::domain::plugin_runtime::retrieval::manifest::{
     load_plugin_retrieval_manifest, PluginRetrievalManifest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 use tokio::time::Instant;
 
+pub const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 pub const OMIGA_PLUGIN_MANIFEST_PATH: &str = ".omiga-plugin/plugin.json";
 pub const CODEX_PLUGIN_MANIFEST_PATH: &str = ".codex-plugin/plugin.json";
 const MARKETPLACE_FILE_NAME: &str = "marketplace.json";
 const USER_PLUGINS_CONFIG_FILE: &str = "plugins/config.json";
 const PLUGINS_CACHE_DIR: &str = "plugins/cache";
 const PLUGINS_ROOT_DIR: &str = "plugins";
-const SOURCE_RUNNERS_DIR: &str = "source_runners";
+const RESOURCE_RUNNERS_DIR: &str = "resource_runners";
+const LEGACY_SOURCE_RUNNERS_DIR: &str = "source_runners";
+const RESOURCE_UTILS_DIR: &str = "utils";
 const DEFAULT_PLUGIN_VERSION: &str = "local";
+const PLUGIN_INSTALL_STATE_RELATIVE_PATH: &str = ".omiga-plugin/install-state.json";
+const PLUGIN_SYNC_CONFLICTS_RELATIVE_DIR: &str = ".omiga-plugin/sync-conflicts";
+const MAX_CHANGELOG_BYTES: usize = 128 * 1024;
+const MAX_REMOTE_MARKETPLACE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PluginKind {
     Operator,
-    Source,
+    Resource,
     Workflow,
     Tool,
     Other,
@@ -39,7 +53,7 @@ enum PluginKind {
 impl PluginKind {
     const ALL: [Self; 5] = [
         Self::Operator,
-        Self::Source,
+        Self::Resource,
         Self::Workflow,
         Self::Tool,
         Self::Other,
@@ -48,7 +62,7 @@ impl PluginKind {
     fn dir_name(self) -> &'static str {
         match self {
             Self::Operator => "operators",
-            Self::Source => "source",
+            Self::Resource => "resources",
             Self::Workflow => "workflow",
             Self::Tool => "tools",
             Self::Other => "other",
@@ -87,9 +101,15 @@ pub struct PluginManifest {
     pub name: String,
     pub version: Option<String>,
     pub description: Option<String>,
+    pub operators: Option<PathBuf>,
+    pub templates: Option<PathBuf>,
     pub skills: Option<PathBuf>,
+    pub agents: Option<PathBuf>,
+    pub environments: Option<PathBuf>,
     pub mcp_servers: Option<PathBuf>,
     pub apps: Option<PathBuf>,
+    pub hooks: Option<PathBuf>,
+    pub changelog: Option<PathBuf>,
     pub retrieval: Option<PluginRetrievalManifest>,
     pub interface: Option<PluginInterface>,
 }
@@ -104,11 +124,23 @@ struct RawPluginManifest {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    operators: Option<String>,
+    #[serde(default)]
+    templates: Option<String>,
+    #[serde(default)]
     skills: Option<String>,
+    #[serde(default)]
+    agents: Option<String>,
+    #[serde(default)]
+    environments: Option<String>,
     #[serde(default)]
     mcp_servers: Option<String>,
     #[serde(default)]
     apps: Option<String>,
+    #[serde(default)]
+    hooks: Option<String>,
+    #[serde(default)]
+    changelog: Option<String>,
     #[serde(default)]
     retrieval: Option<JsonValue>,
     #[serde(default)]
@@ -164,6 +196,18 @@ pub struct MarketplaceInterface {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceRemote {
+    pub url: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default, alias = "repositoryURL")]
+    pub repository_url: Option<String>,
+    #[serde(default, alias = "changelogURL")]
+    pub changelog_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PluginInstallPolicy {
     NotAvailable,
@@ -199,6 +243,8 @@ struct RawMarketplaceManifest {
     #[serde(default)]
     interface: Option<MarketplaceInterface>,
     #[serde(default)]
+    remote: Option<MarketplaceRemote>,
+    #[serde(default)]
     plugins: Vec<RawMarketplacePlugin>,
 }
 
@@ -207,6 +253,8 @@ struct RawMarketplaceManifest {
 struct RawMarketplacePlugin {
     name: String,
     source: RawMarketplacePluginSource,
+    #[serde(default)]
+    version: Option<String>,
     #[serde(default)]
     policy: RawMarketplacePluginPolicy,
     #[serde(default)]
@@ -239,16 +287,17 @@ impl Default for RawMarketplacePluginPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginMarketplaceEntry {
     pub name: String,
     pub path: String,
     pub interface: Option<MarketplaceInterface>,
+    pub remote: Option<MarketplaceRemote>,
     pub plugins: Vec<PluginSummary>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginSummary {
     pub id: String,
@@ -263,18 +312,143 @@ pub struct PluginSummary {
     pub auth_policy: PluginAuthPolicy,
     pub interface: Option<PluginInterface>,
     pub retrieval: Option<PluginRetrievalSummary>,
+    pub operators: Vec<OperatorCandidateSummary>,
+    pub templates: Option<PluginTemplateSummary>,
+    pub environments: Vec<PluginEnvironmentSummary>,
+    pub sync: Option<PluginSyncSummary>,
+    pub changelog: Option<PluginChangelogSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSyncSummary {
+    pub state: String,
+    pub label: String,
+    pub message: String,
+    pub source_digest: Option<String>,
+    pub installed_digest: Option<String>,
+    pub installed_from_digest: Option<String>,
+    pub changed_count: usize,
+    pub local_modified_count: usize,
+    pub conflict_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSyncResult {
+    pub plugin_id: String,
+    pub status: String,
+    pub installed_path: String,
+    pub updated: Vec<String>,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub kept_local: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginChangelogSummary {
+    pub path: String,
+    pub latest_version: Option<String>,
+    pub entries: Vec<PluginChangelogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginChangelogEntry {
+    pub version: Option<String>,
+    pub date: Option<String>,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceRemoteCheckResult {
+    pub name: String,
+    pub path: String,
+    pub remote: MarketplaceRemote,
+    pub state: String,
+    pub label: String,
+    pub message: String,
+    pub local_digest: Option<String>,
+    pub remote_digest: Option<String>,
+    pub remote_plugin_count: Option<usize>,
+    pub changed_plugins: Vec<String>,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEnvironmentSummary {
+    pub id: String,
+    pub version: String,
+    pub canonical_id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub manifest_path: String,
+    pub runtime_type: String,
+    pub runtime_file: Option<String>,
+    pub runtime_file_kind: Option<String>,
+    pub install_hint: Option<String>,
+    pub check_command: Vec<String>,
+    pub availability_status: String,
+    pub availability_manager: Option<String>,
+    pub availability_message: String,
+    pub exposed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEnvironmentCheckResult {
+    pub plugin_id: String,
+    pub environment_id: String,
+    pub canonical_id: String,
+    pub installed: bool,
+    pub plugin_root: String,
+    pub check: EnvironmentCheckResult,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTemplateSummary {
+    pub count: usize,
+    pub groups: Vec<PluginTemplateGroupSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTemplateGroupSummary {
+    pub id: String,
+    pub title: String,
+    pub count: usize,
+    pub templates: Vec<PluginTemplateItemSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTemplateItemSummary {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+    pub exposed: bool,
+    pub execute: JsonValue,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginRetrievalSummary {
     pub protocol_version: u32,
-    pub sources: Vec<PluginRetrievalSourceSummary>,
+    pub resources: Vec<PluginRetrievalResourceSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct PluginRetrievalSourceSummary {
+pub struct PluginRetrievalResourceSummary {
     pub id: String,
     pub category: String,
     pub label: String,
@@ -285,6 +459,7 @@ pub struct PluginRetrievalSourceSummary {
     pub optional_credential_refs: Vec<String>,
     pub default_enabled: bool,
     pub replaces_builtin: bool,
+    pub exposed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -295,11 +470,12 @@ pub struct PluginSkillSummary {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginDetail {
     pub summary: PluginSummary,
     pub description: Option<String>,
+    pub changelog: Option<PluginChangelogSummary>,
     pub skills: Vec<PluginSkillSummary>,
     pub mcp_servers: Vec<String>,
     pub apps: Vec<String>,
@@ -322,6 +498,8 @@ pub struct PluginCapabilitySummary {
     pub mcp_servers: Vec<String>,
     pub apps: Vec<String>,
     pub retrieval_routes: Vec<String>,
+    pub template_count: usize,
+    pub template_groups: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -464,6 +642,17 @@ fn plugin_capability_parts(plugin: &PluginCapabilitySummary) -> Vec<String> {
             backtick_list(&plugin.retrieval_routes)
         ));
     }
+    if plugin.template_count > 0 {
+        let groups = if plugin.template_groups.is_empty() {
+            String::new()
+        } else {
+            format!("; groups: {}", backtick_list(&plugin.template_groups))
+        };
+        capabilities.push(format!(
+            "templates: {} via `unit_search` / `unit_describe` / `template_execute`{}",
+            plugin.template_count, groups
+        ));
+    }
     capabilities
 }
 
@@ -507,6 +696,7 @@ pub fn format_plugins_system_section(outcome: &PluginLoadOutcome) -> Option<Stri
     lines.push("### How to use plugins".to_string());
     lines.push(
         "- Plugins are not invoked directly; use their underlying skills, MCP tools, or explicitly available app tools.\n\
+         - Template plugins expose Template units. Discover them with `unit_search` / `unit_describe`, then run bundled templates with `template_execute`; do not rebuild template logic with ad-hoc shell/file writes unless the user explicitly asks for custom code.\n\
          - Retrieval plugin routes are local Search / Query / Fetch routes, not MCP tool names. If a plugin lists `retrieval routes: category.source`, call `search`, `query`, or `fetch` with that category/source.\n\
          - If the user explicitly names a plugin, prefer capabilities associated with that plugin for that turn.\n\
          - If a plugin contributes skills, those skills also appear in the Skills list and should be loaded with `skill_view` / `skill` before use.\n\
@@ -572,6 +762,34 @@ struct PluginConfigFile {
 struct PluginConfigEntry {
     #[serde(default)]
     enabled: bool,
+    #[serde(default)]
+    disabled_templates: HashSet<String>,
+    #[serde(default)]
+    retrieval_resources_configured: bool,
+    #[serde(default, alias = "enabledRetrievalSources")]
+    enabled_retrieval_resources: HashSet<String>,
+    #[serde(default, alias = "disabledRetrievalSources")]
+    disabled_retrieval_resources: HashSet<String>,
+    #[serde(default)]
+    disabled_environments: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PluginInstallState {
+    #[serde(default = "plugin_install_state_schema_version")]
+    schema_version: u32,
+    plugin_id: String,
+    installed_from_version: Option<String>,
+    installed_from_digest: String,
+    installed_at: String,
+    last_synced_at: String,
+    #[serde(default)]
+    files: BTreeMap<String, String>,
+}
+
+fn plugin_install_state_schema_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -652,6 +870,12 @@ fn plugin_store_root_from_cache_root(cache_root: &Path) -> PathBuf {
 
 pub fn dev_builtin_marketplace_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("omiga-plugins")
+        .join(MARKETPLACE_FILE_NAME)
+}
+
+fn dev_bundled_marketplace_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("bundled_plugins")
         .join(MARKETPLACE_FILE_NAME)
 }
@@ -659,6 +883,21 @@ pub fn dev_builtin_marketplace_path() -> PathBuf {
 fn resource_builtin_marketplace_path(resource_dir: &Path) -> PathBuf {
     resource_dir
         .join("bundled_plugins")
+        .join(MARKETPLACE_FILE_NAME)
+}
+
+fn resource_curated_marketplace_path(resource_dir: &Path) -> PathBuf {
+    resource_dir
+        .join("omiga-plugins")
+        .join(MARKETPLACE_FILE_NAME)
+}
+
+fn dev_project_marketplace_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .join(".omiga")
+        .join("plugins")
         .join(MARKETPLACE_FILE_NAME)
 }
 
@@ -675,27 +914,45 @@ fn project_marketplace_path(project_root: &Path) -> PathBuf {
 
 pub fn marketplace_paths(project_root: Option<&Path>, resource_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let builtin = dev_builtin_marketplace_path();
-    if builtin.is_file() {
-        paths.push(builtin);
-    }
+    let mut push_path = |path: PathBuf| {
+        if path.is_file() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    };
+    push_path(dev_builtin_marketplace_path());
+    push_path(dev_bundled_marketplace_path());
+    push_path(dev_project_marketplace_path());
     if let Some(resource_dir) = resource_dir {
-        let builtin = resource_builtin_marketplace_path(resource_dir);
-        if builtin.is_file() && !paths.contains(&builtin) {
-            paths.push(builtin);
-        }
+        push_path(resource_curated_marketplace_path(resource_dir));
+        push_path(resource_builtin_marketplace_path(resource_dir));
     }
-    let user = user_marketplace_path();
-    if user.is_file() && !paths.contains(&user) {
-        paths.push(user);
-    }
+    push_path(user_marketplace_path());
     if let Some(root) = project_root {
-        let project = project_marketplace_path(root);
-        if project.is_file() && !paths.contains(&project) {
-            paths.push(project);
-        }
+        push_path(project_marketplace_path(root));
     }
     paths
+}
+
+pub fn marketplace_plugin_source_root(
+    plugin_id: &str,
+    project_root: Option<&Path>,
+    resource_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let plugin_id = PluginId::parse(plugin_id).ok()?;
+    for path in marketplace_paths(project_root, resource_dir) {
+        let Ok(marketplace) = read_marketplace(&path) else {
+            continue;
+        };
+        if marketplace.name != plugin_id.marketplace {
+            continue;
+        }
+        for entry in &marketplace.plugins {
+            if entry.name == plugin_id.name {
+                return resolve_marketplace_source_path(&path, &entry.source).ok();
+            }
+        }
+    }
+    None
 }
 
 fn marketplace_root_dir(marketplace_path: &Path) -> PathBuf {
@@ -768,14 +1025,7 @@ fn default_prompts(value: Option<RawDefaultPrompt>) -> Vec<String> {
 }
 
 pub fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest> {
-    let manifest_path = if plugin_root.join(OMIGA_PLUGIN_MANIFEST_PATH).is_file() {
-        plugin_root.join(OMIGA_PLUGIN_MANIFEST_PATH)
-    } else {
-        plugin_root.join(CODEX_PLUGIN_MANIFEST_PATH)
-    };
-    if !manifest_path.is_file() {
-        return None;
-    }
+    let manifest_path = plugin_manifest_path(plugin_root)?;
     let raw = fs::read_to_string(&manifest_path).ok()?;
     let parsed: RawPluginManifest = serde_json::from_str(&raw)
         .map_err(|err| {
@@ -837,23 +1087,277 @@ pub fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest> {
         name,
         version: parsed.version,
         description: parsed.description,
+        operators: resolve_optional_path(plugin_root, parsed.operators.as_deref(), "operators"),
+        templates: resolve_optional_path(plugin_root, parsed.templates.as_deref(), "templates"),
         skills: resolve_optional_path(plugin_root, parsed.skills.as_deref(), "skills"),
+        agents: resolve_optional_path(plugin_root, parsed.agents.as_deref(), "agents"),
+        environments: resolve_optional_path(
+            plugin_root,
+            parsed.environments.as_deref(),
+            "environments",
+        ),
         mcp_servers: resolve_optional_path(
             plugin_root,
             parsed.mcp_servers.as_deref(),
             "mcpServers",
         ),
         apps: resolve_optional_path(plugin_root, parsed.apps.as_deref(), "apps"),
+        hooks: resolve_optional_path(plugin_root, parsed.hooks.as_deref(), "hooks"),
+        changelog: resolve_optional_path(plugin_root, parsed.changelog.as_deref(), "changelog"),
         retrieval,
         interface,
     })
 }
 
+pub fn plugin_manifest_path(plugin_root: &Path) -> Option<PathBuf> {
+    [
+        PLUGIN_MANIFEST_FILE,
+        OMIGA_PLUGIN_MANIFEST_PATH,
+        CODEX_PLUGIN_MANIFEST_PATH,
+    ]
+    .into_iter()
+    .map(|relative| plugin_root.join(relative))
+    .find(|path| path.is_file())
+}
+
+fn default_changelog_path(plugin_root: &Path) -> Option<PathBuf> {
+    ["CHANGELOG.md", "changelog.md", "CHANGELOG"]
+        .into_iter()
+        .map(|relative| plugin_root.join(relative))
+        .find(|path| path.is_file())
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+fn changelog_heading_parts(raw: &str) -> (Option<String>, Option<String>, String) {
+    let title = raw.trim().trim_matches('#').trim().to_string();
+    let mut date = None;
+    let mut version_source = title.as_str();
+    if let Some((left, right)) = title.split_once(" - ") {
+        let candidate = right.trim();
+        if candidate.len() >= 10
+            && candidate
+                .chars()
+                .take(10)
+                .all(|ch| ch.is_ascii_digit() || ch == '-')
+        {
+            date = Some(candidate.chars().take(10).collect::<String>());
+            version_source = left.trim();
+        }
+    }
+    let version = version_source
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_start_matches('v')
+        .trim()
+        .to_string();
+    let version =
+        (version.chars().any(|ch| ch.is_ascii_digit()) && version.len() <= 40).then_some(version);
+    (version, date, title)
+}
+
+fn parse_changelog_entries(raw: &str, fallback_version: Option<&str>) -> Vec<PluginChangelogEntry> {
+    let mut entries = Vec::new();
+    let mut current_title: Option<String> = None;
+    let mut current_body = Vec::<String>::new();
+
+    fn flush_entry(
+        entries: &mut Vec<PluginChangelogEntry>,
+        title: Option<String>,
+        body: &mut Vec<String>,
+    ) {
+        let Some(title) = title else {
+            body.clear();
+            return;
+        };
+        if title.eq_ignore_ascii_case("changelog") {
+            body.clear();
+            return;
+        }
+        let (version, date, title) = changelog_heading_parts(&title);
+        let body_text = body.join("\n").trim().to_string();
+        entries.push(PluginChangelogEntry {
+            version,
+            date,
+            title,
+            body: truncate_text(&body_text, 900),
+        });
+        body.clear();
+    }
+
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        let is_entry_heading = (trimmed.starts_with("## ") && !trimmed.starts_with("### "))
+            || trimmed.starts_with("### ");
+        if is_entry_heading {
+            flush_entry(&mut entries, current_title.take(), &mut current_body);
+            current_title = Some(trimmed.trim_start_matches('#').trim().to_string());
+        } else if current_title.is_some() {
+            current_body.push(line.to_string());
+        }
+    }
+    flush_entry(&mut entries, current_title.take(), &mut current_body);
+
+    if entries.is_empty() {
+        let body = truncate_text(raw.trim(), 1200);
+        if !body.is_empty() {
+            entries.push(PluginChangelogEntry {
+                version: fallback_version.map(str::to_string),
+                date: None,
+                title: fallback_version
+                    .map(|version| format!("Version {version}"))
+                    .unwrap_or_else(|| "Changelog".to_string()),
+                body,
+            });
+        }
+    }
+
+    entries.truncate(8);
+    entries
+}
+
+fn plugin_changelog_summary(
+    plugin_root: &Path,
+    manifest: Option<&PluginManifest>,
+) -> Option<PluginChangelogSummary> {
+    let path = manifest
+        .and_then(|manifest| manifest.changelog.clone())
+        .or_else(|| default_changelog_path(plugin_root))?;
+    let metadata = fs::metadata(&path).ok()?;
+    if metadata.len() as usize > MAX_CHANGELOG_BYTES {
+        tracing::warn!(path = %path.display(), "plugin changelog is too large; skipping preview");
+        return None;
+    }
+    let raw = fs::read_to_string(&path).ok()?;
+    let entries = parse_changelog_entries(
+        &raw,
+        manifest.and_then(|manifest| manifest.version.as_deref()),
+    );
+    if entries.is_empty() {
+        return None;
+    }
+    let latest_version = entries
+        .iter()
+        .find_map(|entry| entry.version.clone())
+        .or_else(|| manifest.and_then(|manifest| manifest.version.clone()));
+    Some(PluginChangelogSummary {
+        path: path.to_string_lossy().into_owned(),
+        latest_version,
+        entries,
+    })
+}
+
 fn read_config() -> PluginConfigFile {
-    fs::read_to_string(config_path())
+    let mut config = fs::read_to_string(config_path())
         .ok()
         .and_then(|raw| serde_json::from_str::<PluginConfigFile>(&raw).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if migrate_superseded_builtin_plugin_config(&mut config) {
+        if let Err(err) = write_config(&config) {
+            tracing::warn!("failed to persist superseded bundled plugin migration: {err}");
+        }
+    }
+    config
+}
+
+fn superseded_builtin_plugin_replacement(plugin_name: &str) -> Option<&'static str> {
+    match plugin_name {
+        "operator-pca-r" | "operator-differential-expression-r" | "operator-enrichment-r" => {
+            Some("transcriptomics")
+        }
+        "operator-pubmed-search"
+        | "operator-geo-search"
+        | "retrieval-dataset-geo"
+        | "retrieval-dataset-biosample"
+        | "retrieval-dataset-ncbi-datasets"
+        | "retrieval-literature-pubmed"
+        | "retrieval-knowledge-ncbi-gene" => Some("resource-ncbi"),
+        "retrieval-dataset-ena"
+        | "retrieval-dataset-arrayexpress"
+        | "retrieval-knowledge-ensembl" => Some("resource-embl-ebi"),
+        "operator-uniprot-search" => Some("retrieval-knowledge-uniprot"),
+        _ => None,
+    }
+}
+
+fn superseded_builtin_plugin_resource_key(plugin_name: &str) -> Option<&'static str> {
+    match plugin_name {
+        "retrieval-dataset-geo" => Some("dataset.geo"),
+        "retrieval-dataset-biosample" => Some("dataset.biosample"),
+        "retrieval-dataset-ncbi-datasets" => Some("dataset.ncbi_datasets"),
+        "retrieval-literature-pubmed" => Some("literature.pubmed"),
+        "retrieval-knowledge-ncbi-gene" => Some("knowledge.ncbi_gene"),
+        "retrieval-dataset-ena" => Some("dataset.ena"),
+        "retrieval-dataset-arrayexpress" => Some("dataset.arrayexpress"),
+        "retrieval-knowledge-ensembl" => Some("knowledge.ensembl"),
+        _ => None,
+    }
+}
+
+fn removed_builtin_plugin(plugin_name: &str) -> bool {
+    matches!(plugin_name, "operator-smoke" | "notebook-helper")
+}
+
+fn migrate_superseded_builtin_plugin_config(config: &mut PluginConfigFile) -> bool {
+    let mut changed = false;
+    let mut replacements = HashMap::<String, PluginConfigEntry>::new();
+    let keys = config.plugins.keys().cloned().collect::<Vec<_>>();
+    for key in keys {
+        let Ok(plugin_id) = PluginId::parse(&key) else {
+            continue;
+        };
+        if plugin_id.marketplace != "omiga-curated" {
+            continue;
+        }
+        if removed_builtin_plugin(&plugin_id.name) {
+            config.plugins.remove(&key);
+            changed = true;
+            continue;
+        }
+        let Some(replacement_name) = superseded_builtin_plugin_replacement(&plugin_id.name) else {
+            continue;
+        };
+        let removed_entry = config.plugins.remove(&key).unwrap_or_default();
+        let replacement = replacements
+            .entry(format!("{replacement_name}@omiga-curated"))
+            .or_default();
+        replacement.enabled = replacement.enabled || removed_entry.enabled;
+        if let Some(resource_key) = superseded_builtin_plugin_resource_key(&plugin_id.name) {
+            if removed_entry.enabled {
+                replacement
+                    .disabled_retrieval_resources
+                    .remove(resource_key);
+            } else {
+                replacement
+                    .disabled_retrieval_resources
+                    .insert(resource_key.to_string());
+            }
+        }
+        changed = true;
+    }
+
+    for (key, replacement) in replacements {
+        let entry = config.plugins.entry(key).or_default();
+        entry.enabled = entry.enabled || replacement.enabled;
+        if !replacement.enabled_retrieval_resources.is_empty() {
+            entry
+                .enabled_retrieval_resources
+                .extend(replacement.enabled_retrieval_resources);
+        }
+        if !replacement.disabled_retrieval_resources.is_empty() {
+            entry
+                .disabled_retrieval_resources
+                .extend(replacement.disabled_retrieval_resources);
+        }
+    }
+    changed
 }
 
 fn write_config(config: &PluginConfigFile) -> Result<(), String> {
@@ -874,9 +1378,169 @@ pub fn set_plugin_enabled(plugin_id: &str, enabled: bool) -> Result<(), String> 
     } else if let Some(entry) = config.plugins.get_mut(&key) {
         entry.enabled = false;
     } else {
-        config
-            .plugins
-            .insert(key, PluginConfigEntry { enabled: false });
+        config.plugins.insert(
+            key,
+            PluginConfigEntry {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+    }
+    write_config(&config)
+}
+
+pub fn set_template_enabled(
+    plugin_id: &str,
+    template_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let plugin_id = PluginId::parse(plugin_id)?;
+    let template_id = template_id.trim();
+    if template_id.is_empty() {
+        return Err("template id must not be empty".to_string());
+    }
+    if template_id.contains('/') || template_id.contains('\\') {
+        return Err("template id must not contain path separators".to_string());
+    }
+    let plugin_root = active_plugin_root(&plugin_id)
+        .ok_or_else(|| format!("plugin `{}` is not installed", plugin_id.key()))?;
+    let template_exists = crate::domain::templates::discover_template_manifest_paths(&plugin_root)
+        .into_iter()
+        .filter_map(|manifest_path| {
+            crate::domain::templates::load_template_manifest(
+                &manifest_path,
+                plugin_id.key(),
+                plugin_root.clone(),
+            )
+            .ok()
+        })
+        .any(|template| template.spec.metadata.id == template_id);
+    if !template_exists {
+        return Err(format!(
+            "template `{template_id}` was not found in plugin `{}`",
+            plugin_id.key()
+        ));
+    }
+
+    let mut config = read_config();
+    let entry = config.plugins.entry(plugin_id.key()).or_default();
+    if enabled {
+        entry.disabled_templates.remove(template_id);
+    } else {
+        entry.disabled_templates.insert(template_id.to_string());
+    }
+    write_config(&config)
+}
+
+pub fn set_retrieval_resource_enabled(
+    plugin_id: &str,
+    category: &str,
+    source_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let plugin_id = PluginId::parse(plugin_id)?;
+    let category = normalize_id(category);
+    let source_id = normalize_id(source_id);
+    if category.is_empty() || source_id.is_empty() {
+        return Err("retrieval resource category and id must not be empty".to_string());
+    }
+    let plugin_root = active_plugin_root(&plugin_id)
+        .ok_or_else(|| format!("plugin `{}` is not installed", plugin_id.key()))?;
+    let Some(manifest) = load_plugin_manifest(&plugin_root) else {
+        return Err(format!(
+            "plugin `{}` has no valid manifest",
+            plugin_id.key()
+        ));
+    };
+    let resource = manifest.retrieval.as_ref().and_then(|retrieval| {
+        retrieval
+            .resources
+            .iter()
+            .find(|source| source.category == category && source.id == source_id)
+    });
+    let Some(resource) = resource else {
+        return Err(format!(
+            "retrieval resource `{category}.{source_id}` was not found in plugin `{}`",
+            plugin_id.key()
+        ));
+    };
+
+    let mut config = read_config();
+    let entry = config.plugins.entry(plugin_id.key()).or_default();
+    materialize_retrieval_resource_config(entry, manifest.retrieval.as_ref().unwrap());
+    let key = retrieval_resource_config_key(&category, &source_id);
+    if enabled {
+        entry.disabled_retrieval_resources.remove(&key);
+        if !resource.default_enabled {
+            entry.enabled_retrieval_resources.insert(key);
+        }
+    } else {
+        entry.enabled_retrieval_resources.remove(&key);
+        if resource.default_enabled {
+            entry.disabled_retrieval_resources.insert(key);
+        } else {
+            entry.disabled_retrieval_resources.remove(&key);
+        }
+    }
+    write_config(&config)
+}
+
+fn materialize_retrieval_resource_config(
+    entry: &mut PluginConfigEntry,
+    retrieval: &PluginRetrievalManifest,
+) {
+    if entry.retrieval_resources_configured {
+        return;
+    }
+    if entry.enabled {
+        for source in &retrieval.resources {
+            if source.default_enabled {
+                continue;
+            }
+            let key = retrieval_resource_config_key(&source.category, &source.id);
+            if !entry.disabled_retrieval_resources.contains(&key) {
+                entry.enabled_retrieval_resources.insert(key);
+            }
+        }
+    }
+    entry.retrieval_resources_configured = true;
+}
+
+pub fn set_environment_enabled(
+    plugin_id: &str,
+    environment_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let plugin_id = PluginId::parse(plugin_id)?;
+    let environment_id = environment_id.trim();
+    if environment_id.is_empty() {
+        return Err("environment id must not be empty".to_string());
+    }
+    if environment_id.contains('/') || environment_id.contains('\\') {
+        return Err("environment id must not contain path separators".to_string());
+    }
+    let plugin_root = active_plugin_root(&plugin_id)
+        .ok_or_else(|| format!("plugin `{}` is not installed", plugin_id.key()))?;
+    let environment_exists = discover_environment_manifest_paths(&plugin_root)
+        .into_iter()
+        .filter_map(|manifest_path| {
+            load_environment_manifest(&manifest_path, plugin_id.key(), plugin_root.clone()).ok()
+        })
+        .any(|environment| environment.spec.metadata.id == environment_id);
+    if !environment_exists {
+        return Err(format!(
+            "environment `{environment_id}` was not found in plugin `{}`",
+            plugin_id.key()
+        ));
+    }
+
+    let mut config = read_config();
+    let entry = config.plugins.entry(plugin_id.key()).or_default();
+    let key = environment_config_key(environment_id);
+    if enabled {
+        entry.disabled_environments.remove(&key);
+    } else {
+        entry.disabled_environments.insert(key);
     }
     write_config(&config)
 }
@@ -887,6 +1551,85 @@ fn is_plugin_enabled(config: &PluginConfigFile, key: &str) -> bool {
         .get(key)
         .map(|entry| entry.enabled)
         .unwrap_or(false)
+}
+
+fn normalize_id(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn retrieval_resource_config_key(category: &str, source_id: &str) -> String {
+    format!("{}.{}", normalize_id(category), normalize_id(source_id))
+}
+
+fn retrieval_resource_exposed_from_config(
+    config: &PluginConfigFile,
+    source_plugin: &str,
+    category: &str,
+    source_id: &str,
+    default_enabled: bool,
+) -> bool {
+    let key = retrieval_resource_config_key(category, source_id);
+    let Some(entry) = config.plugins.get(source_plugin) else {
+        return default_enabled;
+    };
+    if default_enabled {
+        !entry.disabled_retrieval_resources.contains(&key)
+    } else if entry.enabled_retrieval_resources.contains(&key) {
+        true
+    } else if entry.retrieval_resources_configured {
+        false
+    } else if entry.enabled {
+        !entry.disabled_retrieval_resources.contains(&key)
+    } else {
+        false
+    }
+}
+
+pub(crate) fn template_expose_to_agent(
+    source_plugin: &str,
+    template_id: &str,
+    manifest_exposed: bool,
+) -> bool {
+    if !manifest_exposed {
+        return false;
+    }
+    let config = read_config();
+    template_expose_to_agent_from_config(&config, source_plugin, template_id, manifest_exposed)
+}
+
+fn template_expose_to_agent_from_config(
+    config: &PluginConfigFile,
+    source_plugin: &str,
+    template_id: &str,
+    manifest_exposed: bool,
+) -> bool {
+    manifest_exposed
+        && !config
+            .plugins
+            .get(source_plugin)
+            .map(|entry| entry.disabled_templates.contains(template_id))
+            .unwrap_or(false)
+}
+
+fn environment_config_key(environment_id: &str) -> String {
+    normalize_id(environment_id)
+}
+
+fn environment_exposed_from_config(
+    config: &PluginConfigFile,
+    source_plugin: &str,
+    environment_id: &str,
+) -> bool {
+    let key = environment_config_key(environment_id);
+    !config
+        .plugins
+        .get(source_plugin)
+        .map(|entry| entry.disabled_environments.contains(&key))
+        .unwrap_or(false)
+}
+
+pub fn environment_profile_enabled(source_plugin: &str, environment_id: &str) -> bool {
+    environment_exposed_from_config(&read_config(), source_plugin, environment_id)
 }
 
 #[cfg(test)]
@@ -947,11 +1690,16 @@ fn plugin_kind_for_manifest(
             || plugin_interface_matches(manifest.interface.as_ref(), needles)
     };
 
-    if source_path.join("operators").is_dir() || category_matches(&["operator"]) {
+    if manifest.operators.is_some()
+        || source_path.join("operators").is_dir()
+        || category_matches(&["operator"])
+    {
         return PluginKind::Operator;
     }
     if manifest.retrieval.is_some()
         || category_matches(&[
+            "resource",
+            "resources",
             "source",
             "retrieval",
             "dataset",
@@ -962,9 +1710,9 @@ fn plugin_kind_for_manifest(
             "fetch",
         ])
     {
-        return PluginKind::Source;
+        return PluginKind::Resource;
     }
-    if category_matches(&["workflow", "notebook"]) {
+    if manifest.templates.is_some() || category_matches(&["workflow", "notebook", "template"]) {
         return PluginKind::Workflow;
     }
     if manifest.skills.is_some()
@@ -981,9 +1729,7 @@ fn plugin_kind_for_manifest(
 }
 
 fn active_plugin_root_in_base(base: &Path) -> Option<PathBuf> {
-    if base.join(OMIGA_PLUGIN_MANIFEST_PATH).is_file()
-        || base.join(CODEX_PLUGIN_MANIFEST_PATH).is_file()
-    {
+    if plugin_manifest_path(base).is_some() {
         return Some(base.to_path_buf());
     }
     let mut versions = fs::read_dir(base)
@@ -1037,7 +1783,7 @@ fn plugin_retrieval_route_names(retrieval: Option<&PluginRetrievalManifest>) -> 
         .into_iter()
         .flat_map(|retrieval| {
             retrieval
-                .sources
+                .resources
                 .iter()
                 .map(|source| format!("{}.{}", source.category, source.id))
         })
@@ -1048,12 +1794,14 @@ fn plugin_retrieval_route_names(retrieval: Option<&PluginRetrievalManifest>) -> 
 
 fn plugin_retrieval_summary(
     retrieval: Option<&PluginRetrievalManifest>,
+    source_plugin: &str,
+    config: &PluginConfigFile,
 ) -> Option<PluginRetrievalSummary> {
     let retrieval = retrieval?;
-    let mut sources = retrieval
-        .sources
+    let mut resources = retrieval
+        .resources
         .iter()
-        .map(|source| PluginRetrievalSourceSummary {
+        .map(|source| PluginRetrievalResourceSummary {
             id: source.id.clone(),
             category: source.category.clone(),
             label: source.label.clone(),
@@ -1064,17 +1812,774 @@ fn plugin_retrieval_summary(
             optional_credential_refs: source.optional_credential_refs.clone(),
             default_enabled: source.default_enabled,
             replaces_builtin: source.replaces_builtin,
+            exposed: retrieval_resource_exposed_from_config(
+                config,
+                source_plugin,
+                &source.category,
+                &source.id,
+                source.default_enabled,
+            ),
         })
         .collect::<Vec<_>>();
-    sources.sort_by(|left, right| {
+    resources.sort_by(|left, right| {
         left.category
             .cmp(&right.category)
             .then_with(|| left.id.cmp(&right.id))
     });
     Some(PluginRetrievalSummary {
         protocol_version: retrieval.protocol_version,
-        sources,
+        resources,
     })
+}
+
+fn plugin_environment_summaries(
+    plugin_root: &Path,
+    source_plugin: &str,
+    config: &PluginConfigFile,
+) -> Vec<PluginEnvironmentSummary> {
+    let mut out = discover_environment_manifest_paths(plugin_root)
+        .into_iter()
+        .filter_map(|manifest_path| {
+            load_environment_manifest(&manifest_path, source_plugin.to_string(), plugin_root)
+                .ok()
+                .map(environment_summary)
+        })
+        .map(|profile| {
+            let runtime_type = profile
+                .runtime
+                .kind
+                .as_deref()
+                .unwrap_or("system")
+                .trim()
+                .to_ascii_lowercase();
+            let (runtime_file, runtime_file_kind) = plugin_environment_runtime_file(
+                &profile.manifest_path,
+                &profile.runtime,
+                &runtime_type,
+            );
+            let (availability_status, availability_manager, availability_message) =
+                plugin_environment_availability(&profile.runtime, &runtime_type);
+            let exposed = environment_exposed_from_config(config, source_plugin, &profile.id);
+            PluginEnvironmentSummary {
+                id: profile.id,
+                version: profile.version,
+                canonical_id: profile.canonical_id,
+                name: profile.name,
+                description: profile.description,
+                manifest_path: profile.manifest_path,
+                runtime_type,
+                runtime_file,
+                runtime_file_kind,
+                install_hint: profile.diagnostics.install_hint,
+                check_command: profile.diagnostics.check_command,
+                availability_status,
+                availability_manager,
+                availability_message,
+                exposed,
+            }
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        left.runtime_type
+            .cmp(&right.runtime_type)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    out
+}
+
+fn plugin_environment_runtime_file(
+    manifest_path: &str,
+    runtime: &crate::domain::environments::EnvironmentRuntimeProfile,
+    runtime_type: &str,
+) -> (Option<String>, Option<String>) {
+    let manifest = PathBuf::from(manifest_path);
+    let manifest_dir = manifest.parent().map(Path::to_path_buf);
+    let extra_path = |keys: &[&str]| -> Option<PathBuf> {
+        keys.iter()
+            .find_map(|key| runtime.extra.get(*key).and_then(JsonValue::as_str))
+            .map(|raw| {
+                let path = PathBuf::from(raw.trim());
+                if path.is_absolute() {
+                    path
+                } else {
+                    manifest_dir
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join(path)
+                }
+            })
+    };
+    let candidate = match runtime_type {
+        "conda" | "mamba" | "micromamba" => extra_path(&[
+            "condaEnvFile",
+            "conda_env_file",
+            "condaFile",
+            "conda_file",
+            "environmentFile",
+            "environment_file",
+        ])
+        .or_else(|| {
+            let dir = manifest_dir?;
+            ["conda.yaml", "conda.yml"]
+                .into_iter()
+                .map(|name| dir.join(name))
+                .find(|path| path.is_file())
+        })
+        .map(|path| (path, "conda.yaml|conda.yml".to_string())),
+        "docker" => extra_path(&["dockerfile", "dockerFile"])
+            .or_else(|| {
+                let path = manifest_dir?.join("Dockerfile");
+                path.is_file().then_some(path)
+            })
+            .map(|path| (path, "Dockerfile".to_string())),
+        "singularity" => extra_path(&[
+            "definitionFile",
+            "definition_file",
+            "singularityDef",
+            "singularity_def",
+        ])
+        .or_else(|| {
+            let path = manifest_dir?.join("singularity.def");
+            path.is_file().then_some(path)
+        })
+        .map(|path| (path, "singularity.def".to_string())),
+        _ => None,
+    };
+    match candidate {
+        Some((path, kind)) => (Some(path.to_string_lossy().into_owned()), Some(kind)),
+        None => (None, None),
+    }
+}
+
+fn plugin_environment_availability(
+    runtime: &crate::domain::environments::EnvironmentRuntimeProfile,
+    runtime_type: &str,
+) -> (String, Option<String>, String) {
+    let result = match runtime_type {
+        "conda" | "mamba" | "micromamba" => find_conda_manager(),
+        "docker" => find_executable_on_path("docker").map(|path| ("docker".to_string(), path)),
+        "singularity" => find_executable_on_path("singularity")
+            .map(|path| ("singularity".to_string(), path))
+            .or_else(|| {
+                find_executable_on_path("apptainer").map(|path| ("apptainer".to_string(), path))
+            }),
+        "system" | "local" | "host" => runtime
+            .command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|command| {
+                find_executable_on_path(command).map(|path| (command.to_string(), path))
+            }),
+        _ => None,
+    };
+    if let Some((manager, path)) = result {
+        (
+            "available".to_string(),
+            Some(manager.clone()),
+            format!(
+                "Found `{manager}` at {} in the Omiga app process PATH.",
+                path.display()
+            ),
+        )
+    } else {
+        (
+            "missing".to_string(),
+            None,
+            match runtime_type {
+                "conda" | "mamba" | "micromamba" => "No micromamba, mamba, or conda executable was found in the Omiga app process PATH. Operator execution checks the selected base/virtual environment again.".to_string(),
+                "docker" => "Docker CLI was not found in the Omiga app process PATH. Install Docker Desktop/Engine and ensure `docker` is available.".to_string(),
+                "singularity" => "Neither singularity nor apptainer was found in the Omiga app process PATH.".to_string(),
+                "system" | "local" | "host" => "Profile runtime.command was not found or not configured in PATH.".to_string(),
+                other => format!("Runtime type `{other}` is not supported by plugin-level availability probing."),
+            },
+        )
+    }
+}
+
+pub fn check_plugin_environment(
+    plugin_id: &str,
+    marketplace_path: Option<&Path>,
+    plugin_name: Option<&str>,
+    env_ref: &str,
+    project_root: Option<&Path>,
+) -> Result<PluginEnvironmentCheckResult, String> {
+    let plugin_id = PluginId::parse(plugin_id)?;
+    let installed_root = active_plugin_root(&plugin_id);
+    let (plugin_root, installed) = if let Some(root) = installed_root {
+        (root, true)
+    } else {
+        let marketplace_path = marketplace_path
+            .ok_or_else(|| format!("plugin `{}` is not installed", plugin_id.key()))?;
+        let plugin_name = plugin_name.unwrap_or(&plugin_id.name);
+        let marketplace = read_marketplace(marketplace_path)?;
+        let entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == plugin_name)
+            .ok_or_else(|| {
+                format!(
+                    "plugin `{plugin_name}` not found in marketplace `{}`",
+                    marketplace.name
+                )
+            })?;
+        (
+            resolve_marketplace_source_path(marketplace_path, &entry.source)?,
+            false,
+        )
+    };
+
+    let needle = env_ref.trim();
+    if needle.is_empty() {
+        return Err("environment id must not be empty".to_string());
+    }
+    let Some(profile) = discover_environment_manifest_paths(&plugin_root)
+        .into_iter()
+        .filter_map(|manifest_path| {
+            load_environment_manifest(&manifest_path, plugin_id.key(), &plugin_root).ok()
+        })
+        .map(environment_summary)
+        .find(|profile| {
+            profile.id == needle
+                || profile.canonical_id == needle
+                || profile
+                    .canonical_id
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|tail| tail == needle)
+        })
+    else {
+        return Err(format!(
+            "environment `{needle}` was not found in plugin `{}`",
+            plugin_id.key()
+        ));
+    };
+
+    let runtime_type = profile
+        .runtime
+        .kind
+        .as_deref()
+        .unwrap_or("system")
+        .trim()
+        .to_ascii_lowercase();
+    let check = if matches!(runtime_type.as_str(), "conda" | "mamba" | "micromamba") {
+        check_conda_plugin_environment(&profile, project_root)?
+    } else {
+        check_environment_profile(&profile)
+    };
+
+    Ok(PluginEnvironmentCheckResult {
+        plugin_id: plugin_id.key(),
+        environment_id: profile.id,
+        canonical_id: profile.canonical_id,
+        installed,
+        plugin_root: plugin_root.to_string_lossy().into_owned(),
+        check,
+    })
+}
+
+fn check_conda_plugin_environment(
+    profile: &EnvironmentProfileSummary,
+    project_root: Option<&Path>,
+) -> Result<EnvironmentCheckResult, String> {
+    let command = profile.diagnostics.check_command.clone();
+    if command.is_empty() {
+        return Ok(EnvironmentCheckResult {
+            status: "notConfigured".to_string(),
+            command,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some(
+                "environment profile does not declare diagnostics.checkCommand".to_string(),
+            ),
+            duration_ms: 0,
+        });
+    }
+    if !is_allowed_plugin_environment_check_command(&command) {
+        return Ok(EnvironmentCheckResult {
+            status: "blocked".to_string(),
+            command,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some(
+                "diagnostics.checkCommand is not in the safe plugin environment-check allowlist"
+                    .to_string(),
+            ),
+            duration_ms: 0,
+        });
+    }
+
+    let conda_file = plugin_conda_environment_file(profile)?;
+    let bytes = fs::read(&conda_file).map_err(|err| {
+        format!(
+            "Read conda environment file `{}`: {err}",
+            conda_file.display()
+        )
+    })?;
+    let env_hash = sha256_hex(&bytes);
+    let env_key = format!(
+        "{}-{}",
+        safe_environment_component(&profile.canonical_id),
+        &env_hash[..12]
+    );
+    let project_root = project_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| plugin_store_root()));
+    let env_prefix = project_root
+        .join(".omiga/operator-envs/conda")
+        .join(env_key);
+    let started = Instant::now();
+    let script = conda_environment_check_shell_script(
+        &env_prefix,
+        &conda_file,
+        &env_hash,
+        &profile.runtime.env,
+        &shell_join(&command),
+    );
+    match std::process::Command::new("/bin/sh")
+        .arg("-lc")
+        .arg(script)
+        .output()
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout)
+                .chars()
+                .take(4000)
+                .collect::<String>();
+            let stderr = String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(4000)
+                .collect::<String>();
+            let success = output.status.success()
+                || plugin_environment_check_accepts_nonzero_version_output(
+                    &command, &stdout, &stderr,
+                );
+            Ok(EnvironmentCheckResult {
+                status: if success {
+                    "available".to_string()
+                } else {
+                    "unavailable".to_string()
+                },
+                command,
+                exit_code: output.status.code(),
+                stdout,
+                stderr,
+                error: None,
+                duration_ms: started.elapsed().as_millis(),
+            })
+        }
+        Err(err) => Ok(EnvironmentCheckResult {
+            status: "unavailable".to_string(),
+            command,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some(err.to_string()),
+            duration_ms: started.elapsed().as_millis(),
+        }),
+    }
+}
+
+fn plugin_environment_check_accepts_nonzero_version_output(
+    command: &[String],
+    stdout: &str,
+    stderr: &str,
+) -> bool {
+    let Some(executable) = command.first() else {
+        return false;
+    };
+    let basename = Path::new(executable)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(executable)
+        .trim()
+        .to_ascii_lowercase();
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    basename == "bwa" && combined.contains("version")
+}
+
+fn plugin_conda_environment_file(profile: &EnvironmentProfileSummary) -> Result<PathBuf, String> {
+    let manifest = PathBuf::from(&profile.manifest_path);
+    let manifest_dir = manifest.parent().ok_or_else(|| {
+        format!(
+            "Environment profile `{}` has no manifest parent directory.",
+            profile.canonical_id
+        )
+    })?;
+    for key in [
+        "condaEnvFile",
+        "conda_env_file",
+        "condaFile",
+        "conda_file",
+        "environmentFile",
+        "environment_file",
+    ] {
+        if let Some(raw) = profile.runtime.extra.get(key).and_then(JsonValue::as_str) {
+            let path = if Path::new(raw.trim()).is_absolute() {
+                PathBuf::from(raw.trim())
+            } else {
+                manifest_dir.join(raw.trim())
+            };
+            validate_plugin_conda_yaml_path(profile, &path)?;
+            if !path.is_file() {
+                return Err(format!(
+                    "Environment profile `{}` declares conda YAML file `{}` but it does not exist.",
+                    profile.canonical_id,
+                    path.display()
+                ));
+            }
+            return Ok(path);
+        }
+    }
+    for name in ["conda.yaml", "conda.yml"] {
+        let candidate = manifest_dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "Environment profile `{}` does not declare or contain a standard conda YAML file. Use `runtime.condaEnvFile: ./conda.yaml` or `./conda.yml`.",
+        profile.canonical_id
+    ))
+}
+
+fn validate_plugin_conda_yaml_path(
+    profile: &EnvironmentProfileSummary,
+    path: &Path,
+) -> Result<(), String> {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+    if !matches!(extension.as_deref(), Some("yaml" | "yml")) {
+        return Err(format!(
+            "Conda/mamba environment profile `{}` must use a `.yaml` or `.yml` file; got `{}`.",
+            profile.canonical_id,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn conda_environment_check_shell_script(
+    env_prefix: &Path,
+    env_yaml: &Path,
+    env_hash: &str,
+    env_vars: &BTreeMap<String, String>,
+    inner_command: &str,
+) -> String {
+    let exports = shell_export_lines(env_vars);
+    format!(
+        r#"set -e
+OMIGA_CONDA_PREFIX={env_prefix}
+OMIGA_CONDA_YAML={env_yaml}
+OMIGA_CONDA_HASH={env_hash}
+OMIGA_MICROMAMBA="${{OMIGA_MICROMAMBA:-$HOME/.omiga/bin/micromamba}}"
+mkdir -p "$(dirname "$OMIGA_CONDA_PREFIX")"
+omiga_find_conda_manager() {{
+  OMIGA_CONDA_MANAGER_KIND=
+  OMIGA_CONDA_BIN=
+  if [ -n "${{OMIGA_MICROMAMBA:-}}" ] && [ -x "$OMIGA_MICROMAMBA" ]; then
+    OMIGA_CONDA_MANAGER_KIND=micromamba
+    OMIGA_CONDA_BIN=$OMIGA_MICROMAMBA
+    return 0
+  fi
+  if command -v micromamba >/dev/null 2>&1; then
+    OMIGA_CONDA_MANAGER_KIND=micromamba
+    OMIGA_CONDA_BIN=$(command -v micromamba)
+    return 0
+  fi
+  if command -v mamba >/dev/null 2>&1; then
+    OMIGA_CONDA_MANAGER_KIND=mamba
+    OMIGA_CONDA_BIN=$(command -v mamba)
+    return 0
+  fi
+  if command -v conda >/dev/null 2>&1; then
+    OMIGA_CONDA_MANAGER_KIND=conda
+    OMIGA_CONDA_BIN=$(command -v conda)
+    return 0
+  fi
+  return 1
+}}
+omiga_find_conda_manager || {{
+  cat >&2 <<'OMIGA_CONDA_HINT'
+No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment.
+Recommended: install the official micromamba binary at $HOME/.omiga/bin/micromamba, or set OMIGA_MICROMAMBA=/absolute/path/to/micromamba.
+OMIGA_CONDA_HINT
+  exit 127
+}}
+if [ ! -f "$OMIGA_CONDA_PREFIX/.omiga-env-hash" ] || [ "$(cat "$OMIGA_CONDA_PREFIX/.omiga-env-hash" 2>/dev/null || true)" != "$OMIGA_CONDA_HASH" ]; then
+  rm -rf "$OMIGA_CONDA_PREFIX"
+  case "$OMIGA_CONDA_MANAGER_KIND" in
+    micromamba)
+      "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+      ;;
+    mamba)
+      "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+      ;;
+    conda)
+      "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+      ;;
+  esac
+  printf '%s' "$OMIGA_CONDA_HASH" > "$OMIGA_CONDA_PREFIX/.omiga-env-hash"
+fi
+{exports}
+"$OMIGA_CONDA_BIN" run -p "$OMIGA_CONDA_PREFIX" /bin/sh -lc {inner}
+"#,
+        env_prefix = sh_quote(&env_prefix.to_string_lossy()),
+        env_yaml = sh_quote(&env_yaml.to_string_lossy()),
+        env_hash = sh_quote(env_hash),
+        exports = exports,
+        inner = sh_quote(inner_command),
+    )
+}
+
+fn is_allowed_plugin_environment_check_command(command: &[String]) -> bool {
+    let Some(executable) = command.first() else {
+        return false;
+    };
+    let basename = Path::new(executable)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(executable)
+        .trim()
+        .to_ascii_lowercase();
+    let args = command
+        .iter()
+        .skip(1)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let version_arg = match args.as_slice() {
+        [] => true,
+        [arg] => matches!(arg.as_str(), "--version" | "-v" | "version"),
+        _ => false,
+    };
+    matches!(
+        basename.as_str(),
+        "true"
+            | "rscript"
+            | "python"
+            | "python3"
+            | "conda"
+            | "mamba"
+            | "micromamba"
+            | "docker"
+            | "singularity"
+            | "apptainer"
+            | "bwa"
+            | "bowtie2"
+            | "bowtie2-build"
+            | "star"
+            | "hisat2"
+            | "hisat2-build"
+            | "samtools"
+    ) && version_arg
+}
+
+fn shell_export_lines(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .filter(|(key, _)| is_safe_shell_identifier(key))
+        .map(|(key, value)| format!("export {key}={}", sh_quote(value)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_safe_shell_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn shell_join(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|token| sh_quote(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn safe_environment_component(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-').trim_matches('.');
+    if out.is_empty() {
+        "environment".to_string()
+    } else {
+        out.to_string()
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    format!("{digest:x}")
+}
+
+fn find_conda_manager() -> Option<(String, PathBuf)> {
+    if let Ok(raw) = std::env::var("OMIGA_MICROMAMBA") {
+        let path = PathBuf::from(raw.trim());
+        if path.is_file() {
+            return Some(("micromamba".to_string(), path));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let path = PathBuf::from(home).join(".omiga/bin/micromamba");
+        if path.is_file() {
+            return Some(("micromamba".to_string(), path));
+        }
+    }
+    ["micromamba", "mamba", "conda"]
+        .into_iter()
+        .find_map(|name| find_executable_on_path(name).map(|path| (name.to_string(), path)))
+}
+
+fn find_executable_on_path(name: &str) -> Option<PathBuf> {
+    let candidate = PathBuf::from(name);
+    if candidate.is_absolute() && candidate.is_file() {
+        return Some(candidate);
+    }
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var).find_map(|dir| {
+        let path = dir.join(name);
+        path.is_file().then_some(path)
+    })
+}
+
+fn plugin_template_summary(
+    plugin_root: &Path,
+    source_plugin: &str,
+    config: &PluginConfigFile,
+) -> Option<PluginTemplateSummary> {
+    let mut groups: BTreeMap<String, Vec<PluginTemplateItemSummary>> = BTreeMap::new();
+    for manifest_path in crate::domain::templates::discover_template_manifest_paths(plugin_root) {
+        let Ok(template) = crate::domain::templates::load_template_manifest(
+            &manifest_path,
+            source_plugin.to_string(),
+            plugin_root.to_path_buf(),
+        ) else {
+            continue;
+        };
+        let category = template.spec.classification.category.clone();
+        let group_id = category
+            .as_deref()
+            .and_then(|category| category.strip_prefix("visualization/"))
+            .unwrap_or_else(|| category.as_deref().unwrap_or("templates"))
+            .to_string();
+        let mut tags = template.spec.metadata.tags.clone();
+        tags.extend(template.spec.classification.tags.clone());
+        tags.sort();
+        tags.dedup();
+        let canonical_id = crate::domain::templates::canonical_template_unit_id(&template);
+        let execute = crate::domain::templates::template_execute_example(&template, &canonical_id);
+        groups
+            .entry(group_id)
+            .or_default()
+            .push(PluginTemplateItemSummary {
+                id: template.spec.metadata.id.clone(),
+                name: template
+                    .spec
+                    .metadata
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| template.spec.metadata.id.clone()),
+                description: template.spec.metadata.description.clone(),
+                category,
+                tags,
+                exposed: template_expose_to_agent_from_config(
+                    config,
+                    source_plugin,
+                    &template.spec.metadata.id,
+                    template.spec.exposure.expose_to_agent,
+                ),
+                execute,
+            });
+    }
+    if groups.is_empty() {
+        return None;
+    }
+
+    let mut group_summaries = groups
+        .into_iter()
+        .map(|(id, mut templates)| {
+            templates.sort_by(|left, right| {
+                left.name
+                    .cmp(&right.name)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let title = plugin_template_group_title(&id, &templates);
+            PluginTemplateGroupSummary {
+                id,
+                title,
+                count: templates.len(),
+                templates,
+            }
+        })
+        .collect::<Vec<_>>();
+    group_summaries.sort_by(|left, right| {
+        template_group_order(&left.id)
+            .cmp(&template_group_order(&right.id))
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    let count = group_summaries.iter().map(|group| group.count).sum();
+    Some(PluginTemplateSummary {
+        count,
+        groups: group_summaries,
+    })
+}
+
+fn plugin_template_group_title(id: &str, templates: &[PluginTemplateItemSummary]) -> String {
+    match id {
+        "scatter"
+            if templates
+                .iter()
+                .any(|template| template.tags.iter().any(|tag| tag == "omics-preset")) =>
+        {
+            "Scatter & omics presets".to_string()
+        }
+        "bar" => "Bar".to_string(),
+        "distribution" => "Distribution".to_string(),
+        "heatmap" => "Heatmap".to_string(),
+        "line" => "Line".to_string(),
+        "templates" => "Templates".to_string(),
+        other => other
+            .replace(['-', '_'], " ")
+            .split_whitespace()
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn template_group_order(id: &str) -> u8 {
+    match id {
+        "scatter" => 0,
+        "distribution" => 1,
+        "bar" => 2,
+        "heatmap" => 3,
+        "line" => 4,
+        _ => 100,
+    }
 }
 
 fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<PluginCapabilitySummary> {
@@ -1085,6 +2590,7 @@ fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<Plugin
     let mut mcp_servers = plugin.mcp_servers.keys().cloned().collect::<Vec<_>>();
     mcp_servers.sort();
     let retrieval_routes = plugin_retrieval_route_names(plugin.retrieval.as_ref());
+    let (template_count, template_groups) = plugin_template_capability_summary(plugin);
     let summary = PluginCapabilitySummary {
         id: plugin.id.clone(),
         display_name: plugin
@@ -1097,13 +2603,43 @@ fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<Plugin
         mcp_servers,
         apps: plugin.apps.clone(),
         retrieval_routes,
+        template_count,
+        template_groups,
     };
 
     (summary.has_skills
         || !summary.mcp_servers.is_empty()
         || !summary.apps.is_empty()
-        || !summary.retrieval_routes.is_empty())
-    .then_some(summary)
+        || !summary.retrieval_routes.is_empty()
+        || summary.template_count > 0)
+        .then_some(summary)
+}
+
+fn plugin_template_capability_summary(plugin: &LoadedPlugin) -> (usize, Vec<String>) {
+    let mut count = 0usize;
+    let mut groups = BTreeSet::new();
+    for manifest_path in crate::domain::templates::discover_template_manifest_paths(&plugin.root) {
+        let Ok(template) = crate::domain::templates::load_template_manifest(
+            &manifest_path,
+            plugin.id.clone(),
+            plugin.root.clone(),
+        ) else {
+            continue;
+        };
+        count += 1;
+        let Some(category) = template.spec.classification.category.as_deref() else {
+            continue;
+        };
+        let group = category
+            .strip_prefix("visualization/")
+            .or_else(|| category.strip_prefix("omics/"))
+            .unwrap_or(category)
+            .trim();
+        if !group.is_empty() {
+            groups.insert(group.to_string());
+        }
+    }
+    (count, groups.into_iter().take(8).collect())
 }
 
 fn load_configured_plugin(
@@ -1169,13 +2705,54 @@ fn load_configured_plugin(
     loaded.skill_roots = plugin_skill_roots_for_manifest(&loaded.root, &manifest);
     loaded.mcp_servers = plugin_mcp_servers(&loaded.root, &manifest);
     loaded.apps = plugin_app_ids(&loaded.root, &manifest);
-    loaded.retrieval = manifest.retrieval.clone();
+    loaded.retrieval = manifest
+        .retrieval
+        .clone()
+        .and_then(|retrieval| filter_retrieval_manifest_for_config(retrieval, &loaded.id, entry));
     loaded
+}
+
+fn filter_retrieval_manifest_for_config(
+    mut retrieval: PluginRetrievalManifest,
+    source_plugin: &str,
+    entry: &PluginConfigEntry,
+) -> Option<PluginRetrievalManifest> {
+    retrieval.resources.retain_mut(|source| {
+        let key = retrieval_resource_config_key(&source.category, &source.id);
+        let exposed = if source.default_enabled {
+            !entry.disabled_retrieval_resources.contains(&key)
+        } else if entry.enabled_retrieval_resources.contains(&key) {
+            true
+        } else if entry.retrieval_resources_configured {
+            false
+        } else if entry.enabled {
+            !entry.disabled_retrieval_resources.contains(&key)
+        } else {
+            false
+        };
+        if exposed {
+            // The runtime registry receives only plugin-config-exposed resources.
+            // Mark them enabled for this routing view so plugin categories do not
+            // need to be hardcoded into the built-in search settings registry.
+            source.default_enabled = true;
+        }
+        exposed
+    });
+    if retrieval.resources.is_empty() {
+        tracing::debug!(
+            plugin_id = source_plugin,
+            "all plugin retrieval resources are disabled"
+        );
+        None
+    } else {
+        Some(retrieval)
+    }
 }
 
 fn load_plugins_from_config(config: &PluginConfigFile, cache_root: &Path) -> PluginLoadOutcome {
     migrate_legacy_plugin_cache_best_effort(cache_root);
-    repair_configured_builtin_source_runner_assets(config, cache_root);
+    refresh_configured_builtin_plugins_best_effort(config, cache_root);
+    repair_configured_builtin_resource_runner_assets(config, cache_root);
     let mut configured = config.plugins.iter().collect::<Vec<_>>();
     configured.sort_by(|(left, _), (right, _)| left.cmp(right));
     let plugins = configured
@@ -1215,12 +2792,16 @@ fn plugin_summary_from_marketplace_entry(
     config: &PluginConfigFile,
 ) -> Result<PluginSummary, String> {
     let source_path = resolve_marketplace_source_path(marketplace_path, &entry.source)?;
-    let manifest = load_plugin_manifest(&source_path);
+    let plugin_id = PluginId::new(&entry.name, marketplace_name)?;
+    let key = plugin_id.key();
+    let installed_path = active_plugin_root(&plugin_id);
+    let contribution_root = installed_path.as_deref().unwrap_or(&source_path);
+    let source_manifest = load_plugin_manifest(&source_path);
+    let installed_manifest = installed_path.as_deref().and_then(load_plugin_manifest);
+    let manifest = installed_manifest.as_ref().or(source_manifest.as_ref());
     let retrieval = manifest
-        .as_ref()
-        .and_then(|manifest| plugin_retrieval_summary(manifest.retrieval.as_ref()));
+        .and_then(|manifest| plugin_retrieval_summary(manifest.retrieval.as_ref(), &key, config));
     let interface = manifest
-        .as_ref()
         .and_then(|manifest| manifest.interface.clone())
         .map(|mut interface| {
             if interface.category.is_none() {
@@ -1228,9 +2809,12 @@ fn plugin_summary_from_marketplace_entry(
             }
             interface
         });
-    let plugin_id = PluginId::new(&entry.name, marketplace_name)?;
-    let installed_path = active_plugin_root(&plugin_id);
-    let key = plugin_id.key();
+    let templates = plugin_template_summary(contribution_root, &key, config);
+    let operators =
+        crate::domain::operators::list_operator_summaries_for_plugin_root(&key, contribution_root);
+    let environments = plugin_environment_summaries(contribution_root, &key, config);
+    let sync = plugin_sync_summary(&source_path, installed_path.as_deref());
+    let changelog = plugin_changelog_summary(&source_path, source_manifest.as_ref());
     Ok(PluginSummary {
         id: key.clone(),
         name: entry.name.clone(),
@@ -1244,6 +2828,11 @@ fn plugin_summary_from_marketplace_entry(
         auth_policy: entry.policy.authentication.clone(),
         interface,
         retrieval,
+        operators,
+        templates,
+        environments,
+        sync,
+        changelog,
     })
 }
 
@@ -1253,10 +2842,15 @@ fn plugin_summary_from_installed_root(
     config: &PluginConfigFile,
 ) -> PluginSummary {
     let manifest = load_plugin_manifest(plugin_root);
+    let key = plugin_id.key();
     let retrieval = manifest
         .as_ref()
-        .and_then(|manifest| plugin_retrieval_summary(manifest.retrieval.as_ref()));
-    let key = plugin_id.key();
+        .and_then(|manifest| plugin_retrieval_summary(manifest.retrieval.as_ref(), &key, config));
+    let templates = plugin_template_summary(plugin_root, &key, config);
+    let operators =
+        crate::domain::operators::list_operator_summaries_for_plugin_root(&key, plugin_root);
+    let environments = plugin_environment_summaries(plugin_root, &key, config);
+    let changelog = plugin_changelog_summary(plugin_root, manifest.as_ref());
     let marketplace_path = plugin_root
         .parent()
         .unwrap_or(plugin_root)
@@ -1275,6 +2869,11 @@ fn plugin_summary_from_installed_root(
         auth_policy: PluginAuthPolicy::OnUse,
         interface: manifest.and_then(|manifest| manifest.interface),
         retrieval,
+        operators,
+        templates,
+        environments,
+        sync: None,
+        changelog,
     }
 }
 
@@ -1361,6 +2960,57 @@ fn migrate_legacy_plugin_cache_best_effort(cache_root: &Path) {
     }
 }
 
+fn refresh_configured_builtin_plugins(
+    config: &PluginConfigFile,
+    cache_root: &Path,
+) -> Result<usize, String> {
+    let marketplace_path = dev_builtin_marketplace_path();
+    let marketplace = read_marketplace(&marketplace_path)?;
+    let store_root = plugin_store_root_from_cache_root(cache_root);
+    let mut refreshed = 0;
+
+    for entry in &marketplace.plugins {
+        let plugin_id = PluginId::new(&entry.name, &marketplace.name)?;
+        if !config.plugins.contains_key(&plugin_id.key()) {
+            continue;
+        }
+        if entry.policy.installation == PluginInstallPolicy::NotAvailable {
+            continue;
+        }
+        let source_path = resolve_marketplace_source_path(&marketplace_path, &entry.source)?;
+        let Some(manifest) = load_plugin_manifest(&source_path) else {
+            continue;
+        };
+        if manifest.name != entry.name {
+            continue;
+        }
+        let kind = plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest);
+        let target_base = plugin_base_root_for_kind(&store_root, kind, &plugin_id);
+        let has_stale_typed_root = typed_plugin_base_roots(&store_root, &plugin_id)
+            .into_iter()
+            .any(|candidate| candidate != target_base && candidate.exists());
+        if !has_stale_typed_root {
+            continue;
+        }
+        remove_other_typed_plugin_roots(&store_root, &plugin_id, &target_base)?;
+        replace_plugin_root_atomically(&source_path, &target_base)?;
+        refreshed += 1;
+    }
+
+    Ok(refreshed)
+}
+
+fn refresh_configured_builtin_plugins_best_effort(config: &PluginConfigFile, cache_root: &Path) {
+    match refresh_configured_builtin_plugins(config, cache_root) {
+        Ok(refreshed) if refreshed > 0 => tracing::info!(
+            count = refreshed,
+            "refreshed configured bundled plugin installs"
+        ),
+        Ok(_) => {}
+        Err(err) => tracing::warn!("failed to refresh configured bundled plugin installs: {err}"),
+    }
+}
+
 fn unlisted_installed_plugin_summaries(
     config: &PluginConfigFile,
     listed_ids: &HashSet<String>,
@@ -1398,6 +3048,7 @@ pub fn list_plugin_marketplaces(
     let cache_root = plugin_cache_root();
     migrate_legacy_plugin_cache_best_effort(&cache_root);
     let config = read_config();
+    refresh_configured_builtin_plugins_best_effort(&config, &cache_root);
     let mut out = Vec::new();
     let mut listed_ids = HashSet::new();
     for path in marketplace_paths(project_root, resource_dir) {
@@ -1409,12 +3060,12 @@ pub fn list_plugin_marketplaces(
             }
         };
         if let Err(err) =
-            copy_marketplace_source_runner_assets(&path, &marketplace.name, &cache_root)
+            copy_marketplace_shared_resource_assets(&path, &marketplace.name, &cache_root)
         {
             tracing::warn!(
                 path = %path.display(),
                 marketplace = %marketplace.name,
-                "failed to copy plugin source runner assets: {err}"
+                "failed to copy plugin resource runner assets: {err}"
             );
         }
         let mut plugins = Vec::new();
@@ -1431,13 +3082,14 @@ pub fn list_plugin_marketplaces(
                 }
             }
         }
-        if plugins.is_empty() {
+        if plugins.is_empty() && marketplace.remote.is_none() {
             continue;
         }
         out.push(PluginMarketplaceEntry {
             name: marketplace.name,
             path: path.to_string_lossy().into_owned(),
             interface: marketplace.interface,
+            remote: marketplace.remote,
             plugins,
         });
     }
@@ -1451,8 +3103,291 @@ pub fn list_plugin_marketplaces(
             interface: Some(MarketplaceInterface {
                 display_name: Some("Installed plugins".to_string()),
             }),
+            remote: None,
             plugins: installed_plugins,
         });
+    }
+    out
+}
+
+fn marketplace_raw_digest(path: &Path) -> Option<String> {
+    fs::read(path)
+        .ok()
+        .map(|bytes| format!("sha256:{}", sha256_hex(&bytes)))
+}
+
+fn marketplace_entry_versions(
+    marketplace_path: &Path,
+    marketplace: &RawMarketplaceManifest,
+) -> BTreeMap<String, Option<String>> {
+    let mut versions = BTreeMap::new();
+    for entry in &marketplace.plugins {
+        let version = entry.version.clone().or_else(|| {
+            resolve_marketplace_source_path(marketplace_path, &entry.source)
+                .ok()
+                .and_then(|source_path| load_plugin_manifest(&source_path))
+                .and_then(|manifest| manifest.version)
+        });
+        versions.insert(entry.name.clone(), version);
+    }
+    versions
+}
+
+fn remote_marketplace_versions(
+    marketplace: &RawMarketplaceManifest,
+) -> BTreeMap<String, Option<String>> {
+    marketplace
+        .plugins
+        .iter()
+        .map(|entry| (entry.name.clone(), entry.version.clone()))
+        .collect()
+}
+
+fn changed_marketplace_plugins(
+    local_versions: &BTreeMap<String, Option<String>>,
+    remote_versions: &BTreeMap<String, Option<String>>,
+) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    names.extend(local_versions.keys().cloned());
+    names.extend(remote_versions.keys().cloned());
+    names
+        .into_iter()
+        .filter(
+            |name| match (local_versions.get(name), remote_versions.get(name)) {
+                (None, Some(_)) | (Some(_), None) => true,
+                (Some(local), Some(remote)) => match (local, remote) {
+                    (Some(local), Some(remote)) => local != remote,
+                    (None, Some(_)) => true,
+                    // A remote marketplace without per-plugin versions can still
+                    // signal manifest-level changes via digest; do not mark every
+                    // existing plugin as changed just because the remote omitted
+                    // optional version metadata.
+                    _ => false,
+                },
+                (None, None) => false,
+            },
+        )
+        .collect()
+}
+
+fn marketplace_check_error(
+    path: &Path,
+    marketplace: RawMarketplaceManifest,
+    remote: MarketplaceRemote,
+    local_digest: Option<String>,
+    message: String,
+) -> MarketplaceRemoteCheckResult {
+    MarketplaceRemoteCheckResult {
+        name: marketplace.name,
+        path: path.to_string_lossy().into_owned(),
+        remote,
+        state: "error".to_string(),
+        label: "Remote check failed".to_string(),
+        message,
+        local_digest,
+        remote_digest: None,
+        remote_plugin_count: None,
+        changed_plugins: Vec::new(),
+        checked_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+async fn check_one_remote_marketplace(
+    path: &Path,
+    marketplace: RawMarketplaceManifest,
+    project_root: &Path,
+    client: &reqwest::Client,
+) -> MarketplaceRemoteCheckResult {
+    let Some(remote) = marketplace.remote.clone() else {
+        unreachable!("caller filters marketplaces without remote metadata");
+    };
+    let local_digest = marketplace_raw_digest(path);
+    if let Err(err) =
+        crate::domain::tools::web_safety::validate_public_http_url(project_root, &remote.url, true)
+    {
+        return marketplace_check_error(
+            path,
+            marketplace,
+            remote,
+            local_digest,
+            format!("Remote marketplace URL is not allowed: {err}"),
+        );
+    }
+
+    let response = match client
+        .get(&remote.url)
+        .header(reqwest::header::USER_AGENT, "Omiga")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json,text/plain;q=0.9,*/*;q=0.1",
+        )
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            return marketplace_check_error(
+                path,
+                marketplace,
+                remote,
+                local_digest,
+                format!("Remote marketplace request failed: {err}"),
+            );
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        return marketplace_check_error(
+            path,
+            marketplace,
+            remote,
+            local_digest,
+            format!("Remote marketplace returned HTTP {status}."),
+        );
+    }
+    if let Some(length) = response.content_length() {
+        if length as usize > MAX_REMOTE_MARKETPLACE_BYTES {
+            return marketplace_check_error(
+                path,
+                marketplace,
+                remote,
+                local_digest,
+                format!("Remote marketplace is too large: {length} bytes."),
+            );
+        }
+    }
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return marketplace_check_error(
+                path,
+                marketplace,
+                remote,
+                local_digest,
+                format!("Read remote marketplace body failed: {err}"),
+            );
+        }
+    };
+    if bytes.len() > MAX_REMOTE_MARKETPLACE_BYTES {
+        return marketplace_check_error(
+            path,
+            marketplace,
+            remote,
+            local_digest,
+            format!("Remote marketplace is too large: {} bytes.", bytes.len()),
+        );
+    }
+    let remote_digest = format!("sha256:{}", sha256_hex(&bytes));
+    let remote_marketplace = match serde_json::from_slice::<RawMarketplaceManifest>(&bytes) {
+        Ok(remote_marketplace) => remote_marketplace,
+        Err(err) => {
+            return marketplace_check_error(
+                path,
+                marketplace,
+                remote,
+                local_digest,
+                format!("Parse remote marketplace failed: {err}"),
+            );
+        }
+    };
+    if remote_marketplace.name != marketplace.name {
+        let local_name = marketplace.name.clone();
+        return MarketplaceRemoteCheckResult {
+            name: local_name.clone(),
+            path: path.to_string_lossy().into_owned(),
+            remote,
+            state: "error".to_string(),
+            label: "Remote mismatch".to_string(),
+            message: format!(
+                "Remote marketplace name `{}` does not match local `{}`.",
+                remote_marketplace.name, local_name
+            ),
+            local_digest,
+            remote_digest: Some(remote_digest),
+            remote_plugin_count: Some(remote_marketplace.plugins.len()),
+            changed_plugins: Vec::new(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        };
+    }
+
+    let changed_plugins = changed_marketplace_plugins(
+        &marketplace_entry_versions(path, &marketplace),
+        &remote_marketplace_versions(&remote_marketplace),
+    );
+    let digest_changed = local_digest
+        .as_ref()
+        .map(|digest| digest != &remote_digest)
+        .unwrap_or(true);
+    let update_available = digest_changed || !changed_plugins.is_empty();
+    let (state, label, message) = if update_available {
+        (
+            "updateAvailable",
+            "Remote update available",
+            if changed_plugins.is_empty() {
+                "Remote marketplace manifest differs from the local copy.".to_string()
+            } else {
+                format!(
+                    "Remote marketplace differs for {} plugin{}.",
+                    changed_plugins.len(),
+                    if changed_plugins.len() == 1 { "" } else { "s" }
+                )
+            },
+        )
+    } else {
+        (
+            "upToDate",
+            "Remote up to date",
+            "Remote marketplace manifest matches the local copy.".to_string(),
+        )
+    };
+
+    MarketplaceRemoteCheckResult {
+        name: marketplace.name,
+        path: path.to_string_lossy().into_owned(),
+        remote,
+        state: state.to_string(),
+        label: label.to_string(),
+        message,
+        local_digest,
+        remote_digest: Some(remote_digest),
+        remote_plugin_count: Some(remote_marketplace.plugins.len()),
+        changed_plugins,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+pub async fn check_remote_plugin_marketplaces(
+    project_root: Option<&Path>,
+    resource_dir: Option<&Path>,
+) -> Vec<MarketplaceRemoteCheckResult> {
+    let policy_root = project_root
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!("failed to create remote marketplace client: {err}");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for path in marketplace_paths(project_root, resource_dir) {
+        let marketplace = match read_marketplace(&path) {
+            Ok(marketplace) => marketplace,
+            Err(err) => {
+                tracing::warn!(path = %path.display(), "skipping remote marketplace check: {err}");
+                continue;
+            }
+        };
+        if marketplace.remote.is_none() {
+            continue;
+        }
+        out.push(check_one_remote_marketplace(&path, marketplace, &policy_root, &client).await);
     }
     out
 }
@@ -1474,6 +3409,7 @@ pub fn read_plugin(marketplace_path: &Path, plugin_name: &str) -> Result<PluginD
     Ok(PluginDetail {
         summary,
         description: manifest.description.clone(),
+        changelog: plugin_changelog_summary(&source_path, Some(&manifest)),
         skills: plugin_skill_summaries(&source_path, &manifest),
         mcp_servers: plugin_mcp_server_names(&source_path, &manifest),
         apps: plugin_app_ids(&source_path, &manifest),
@@ -1606,6 +3542,51 @@ fn plugin_mcp_servers(
         return HashMap::new();
     };
     servers_from_mcp_json(&raw)
+        .into_iter()
+        .map(|(name, config)| (name, rebase_plugin_mcp_server(plugin_root, config)))
+        .collect()
+}
+
+fn rebase_plugin_mcp_server(plugin_root: &Path, config: McpServerConfig) -> McpServerConfig {
+    match config {
+        McpServerConfig::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
+            let cwd = Some(resolve_plugin_stdio_cwd(plugin_root, cwd.as_deref()));
+            McpServerConfig::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            }
+        }
+        other => other,
+    }
+}
+
+fn resolve_plugin_stdio_cwd(plugin_root: &Path, cwd: Option<&str>) -> String {
+    let Some(raw) = cwd.map(str::trim).filter(|value| !value.is_empty()) else {
+        return plugin_root.to_string_lossy().into_owned();
+    };
+
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path.to_string_lossy().into_owned()
+    } else if raw == "." {
+        plugin_root.to_string_lossy().into_owned()
+    } else {
+        let relative = raw.strip_prefix("./").unwrap_or(raw);
+        plugin_root.join(relative).to_string_lossy().into_owned()
+    }
 }
 
 pub fn enabled_plugin_mcp_servers() -> HashMap<String, McpServerConfig> {
@@ -1631,7 +3612,7 @@ fn plugin_retrieval_statuses_for_registrations(
 ) -> Vec<PluginLifecycleRouteStatus> {
     lifecycle.route_statuses(
         registrations.iter().flat_map(|registration| {
-            registration.retrieval.sources.iter().map(|source| {
+            registration.retrieval.resources.iter().map(|source| {
                 PluginLifecycleKey::new(
                     registration.plugin_id.clone(),
                     source.category.clone(),
@@ -1699,23 +3680,352 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn copy_marketplace_source_runner_assets(
+fn plugin_install_state_path(plugin_root: &Path) -> PathBuf {
+    plugin_root.join(PLUGIN_INSTALL_STATE_RELATIVE_PATH)
+}
+
+fn plugin_relative_path(root: &Path, path: &Path) -> Result<String, String> {
+    let rel = path
+        .strip_prefix(root)
+        .map_err(|err| format!("derive plugin relative path: {err}"))?;
+    Ok(rel
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn plugin_sync_internal_path(relative: &str) -> bool {
+    relative == PLUGIN_INSTALL_STATE_RELATIVE_PATH
+        || relative.starts_with(&format!("{PLUGIN_SYNC_CONFLICTS_RELATIVE_DIR}/"))
+}
+
+fn plugin_file_hashes(plugin_root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut files = BTreeMap::new();
+    if !plugin_root.is_dir() {
+        return Ok(files);
+    }
+    for entry in walkdir::WalkDir::new(plugin_root)
+        .follow_links(false)
+        .into_iter()
+    {
+        let entry = entry.map_err(|err| format!("walk plugin files: {err}"))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = plugin_relative_path(plugin_root, entry.path())?;
+        if relative.is_empty() || plugin_sync_internal_path(&relative) {
+            continue;
+        }
+        let bytes = fs::read(entry.path()).map_err(|err| {
+            format!(
+                "read plugin file `{}` for digest: {err}",
+                entry.path().display()
+            )
+        })?;
+        files.insert(relative, format!("sha256:{}", sha256_hex(&bytes)));
+    }
+    Ok(files)
+}
+
+fn plugin_tree_digest(files: &BTreeMap<String, String>) -> String {
+    let mut hasher = Sha256::new();
+    for (relative, hash) in files {
+        hasher.update(relative.as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+        hasher.update([0]);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn read_plugin_install_state(plugin_root: &Path) -> Option<PluginInstallState> {
+    fs::read_to_string(plugin_install_state_path(plugin_root))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<PluginInstallState>(&raw).ok())
+}
+
+fn write_plugin_install_state(
+    plugin_root: &Path,
+    state: &PluginInstallState,
+) -> Result<(), String> {
+    let path = plugin_install_state_path(plugin_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("create plugin state dir: {err}"))?;
+    }
+    let raw = serde_json::to_string_pretty(state)
+        .map_err(|err| format!("serialize plugin install state: {err}"))?;
+    fs::write(&path, format!("{raw}\n")).map_err(|err| format!("write plugin state: {err}"))
+}
+
+fn record_plugin_install_state(
+    plugin_root: &Path,
+    plugin_id: &PluginId,
+    version: Option<String>,
+    installed_at: Option<String>,
+) -> Result<PluginInstallState, String> {
+    let files = plugin_file_hashes(plugin_root)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let installed_at = installed_at.unwrap_or_else(|| now.clone());
+    let state = PluginInstallState {
+        schema_version: plugin_install_state_schema_version(),
+        plugin_id: plugin_id.key(),
+        installed_from_version: version,
+        installed_from_digest: plugin_tree_digest(&files),
+        installed_at,
+        last_synced_at: now,
+        files,
+    };
+    write_plugin_install_state(plugin_root, &state)?;
+    Ok(state)
+}
+
+#[derive(Debug, Clone, Default)]
+struct PluginSyncPlan {
+    updated: Vec<String>,
+    added: Vec<String>,
+    removed: Vec<String>,
+    kept_local: Vec<String>,
+    conflicts: Vec<String>,
+}
+
+impl PluginSyncPlan {
+    fn changed_count(&self) -> usize {
+        self.updated.len() + self.added.len() + self.removed.len()
+    }
+
+    fn local_modified_count(&self) -> usize {
+        self.kept_local.len() + self.conflicts.len()
+    }
+}
+
+fn plugin_sync_plan(
+    base_files: Option<&BTreeMap<String, String>>,
+    current_files: &BTreeMap<String, String>,
+    source_files: &BTreeMap<String, String>,
+) -> PluginSyncPlan {
+    let mut plan = PluginSyncPlan::default();
+    let mut paths = BTreeSet::new();
+    paths.extend(current_files.keys().cloned());
+    paths.extend(source_files.keys().cloned());
+    if let Some(base_files) = base_files {
+        paths.extend(base_files.keys().cloned());
+    }
+
+    for path in paths {
+        let base = base_files.and_then(|files| files.get(&path));
+        let current = current_files.get(&path);
+        let source = source_files.get(&path);
+
+        if current == source {
+            continue;
+        }
+
+        match base {
+            Some(base_hash) => {
+                if current == Some(base_hash) {
+                    match source {
+                        Some(_) => plan.updated.push(path),
+                        None => plan.removed.push(path),
+                    }
+                } else if source == Some(base_hash) {
+                    plan.kept_local.push(path);
+                } else {
+                    plan.conflicts.push(path);
+                }
+            }
+            None => match (current, source) {
+                (None, Some(_)) => plan.added.push(path),
+                (Some(_), None) => plan.kept_local.push(path),
+                (Some(_), Some(_)) => plan.conflicts.push(path),
+                (None, None) => {}
+            },
+        }
+    }
+
+    plan
+}
+
+fn plugin_force_sync_plan(
+    current_files: &BTreeMap<String, String>,
+    source_files: &BTreeMap<String, String>,
+) -> PluginSyncPlan {
+    let mut plan = PluginSyncPlan::default();
+    let mut paths = BTreeSet::new();
+    paths.extend(current_files.keys().cloned());
+    paths.extend(source_files.keys().cloned());
+    for path in paths {
+        match (current_files.get(&path), source_files.get(&path)) {
+            (Some(current), Some(source)) if current != source => plan.updated.push(path),
+            (None, Some(_)) => plan.added.push(path),
+            (Some(_), None) => plan.removed.push(path),
+            _ => {}
+        }
+    }
+    plan
+}
+
+fn plugin_sync_summary(
+    source_path: &Path,
+    installed_path: Option<&Path>,
+) -> Option<PluginSyncSummary> {
+    let installed_path = installed_path?;
+    let source_files = plugin_file_hashes(source_path).ok()?;
+    let current_files = plugin_file_hashes(installed_path).ok()?;
+    let source_digest = plugin_tree_digest(&source_files);
+    let installed_digest = plugin_tree_digest(&current_files);
+    let state = read_plugin_install_state(installed_path);
+    let base_files = state.as_ref().map(|state| &state.files);
+    let plan = plugin_sync_plan(base_files, &current_files, &source_files);
+    let installed_from_digest = state
+        .as_ref()
+        .map(|state| state.installed_from_digest.clone());
+    let upstream_changed = installed_from_digest
+        .as_ref()
+        .map(|digest| digest != &source_digest)
+        .unwrap_or(installed_digest != source_digest);
+    let local_modified = state
+        .as_ref()
+        .map(|state| state.files != current_files)
+        .unwrap_or(installed_digest != source_digest);
+    let (state_name, label, message) = if plan.conflicts.is_empty()
+        && plan.changed_count() == 0
+        && !local_modified
+    {
+        (
+            "upToDate",
+            "Up to date",
+            "Installed plugin files match the marketplace source.",
+        )
+    } else if state.is_none() && !upstream_changed && !local_modified {
+        (
+            "unknown",
+            "Track sync",
+            "Installed plugin matches the marketplace source but has no install-state snapshot yet.",
+        )
+    } else if plan.conflicts.is_empty() && upstream_changed && !local_modified {
+        (
+            "updateAvailable",
+            "Update available",
+            "Marketplace source changed; safe sync can update the user copy.",
+        )
+    } else if plan.conflicts.is_empty() && !upstream_changed && local_modified {
+        (
+            "localModified",
+            "Local edits",
+            "User plugin files differ from the last installed snapshot.",
+        )
+    } else if plan.conflicts.is_empty() {
+        (
+            "updateAvailable",
+            "Sync available",
+            "Safe sync can apply non-conflicting marketplace changes.",
+        )
+    } else {
+        (
+            "conflictRisk",
+            "Review sync",
+            "Marketplace and user plugin files changed in overlapping paths; safe sync will keep local files.",
+        )
+    };
+
+    Some(PluginSyncSummary {
+        state: state_name.to_string(),
+        label: label.to_string(),
+        message: message.to_string(),
+        source_digest: Some(source_digest),
+        installed_digest: Some(installed_digest),
+        installed_from_digest,
+        changed_count: plan.changed_count(),
+        local_modified_count: plan.local_modified_count(),
+        conflict_count: plan.conflicts.len(),
+    })
+}
+
+fn copy_plugin_relative_file(
+    source_root: &Path,
+    target_root: &Path,
+    relative: &str,
+) -> Result<(), String> {
+    let source = source_root.join(relative);
+    let target = target_root.join(relative);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("create plugin sync dir: {err}"))?;
+    }
+    fs::copy(&source, &target)
+        .map(|_| ())
+        .map_err(|err| format!("copy synced plugin file `{relative}`: {err}"))
+}
+
+fn remove_plugin_relative_file(target_root: &Path, relative: &str) -> Result<(), String> {
+    let target = target_root.join(relative);
+    if !target.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&target).map_err(|err| format!("remove synced plugin file `{relative}`: {err}"))
+}
+
+fn copy_marketplace_resource_runner_assets(
     marketplace_path: &Path,
     _marketplace_name: &str,
     cache_root: &Path,
 ) -> Result<bool, String> {
-    let source = marketplace_root_dir(marketplace_path).join(SOURCE_RUNNERS_DIR);
+    let marketplace_root = marketplace_root_dir(marketplace_path);
+    let canonical_source = marketplace_root.join(RESOURCE_RUNNERS_DIR);
+    let legacy_source = marketplace_root.join(LEGACY_SOURCE_RUNNERS_DIR);
+    let source = if canonical_source.is_dir() {
+        canonical_source
+    } else {
+        legacy_source
+    };
     if !source.is_dir() {
         return Ok(false);
     }
     let target = plugin_store_root_from_cache_root(cache_root)
-        .join(PluginKind::Source.dir_name())
-        .join(SOURCE_RUNNERS_DIR);
+        .join(PluginKind::Resource.dir_name())
+        .join(RESOURCE_RUNNERS_DIR);
+    copy_dir_recursive(&source, &target)?;
+    let legacy_target = plugin_store_root_from_cache_root(cache_root)
+        .join(PluginKind::Resource.dir_name())
+        .join(LEGACY_SOURCE_RUNNERS_DIR);
+    copy_dir_recursive(&source, &legacy_target)?;
+    Ok(true)
+}
+
+fn copy_marketplace_nested_resource_utils(
+    marketplace_path: &Path,
+    cache_root: &Path,
+) -> Result<bool, String> {
+    let marketplace_root = marketplace_root_dir(marketplace_path);
+    let source = marketplace_root
+        .join("plugins")
+        .join(PluginKind::Resource.dir_name())
+        .join(RESOURCE_UTILS_DIR);
+    if !source.is_dir() {
+        return Ok(false);
+    }
+    let target = plugin_store_root_from_cache_root(cache_root)
+        .join(PluginKind::Resource.dir_name())
+        .join(RESOURCE_UTILS_DIR);
     copy_dir_recursive(&source, &target)?;
     Ok(true)
 }
 
-fn repair_configured_builtin_source_runner_assets(config: &PluginConfigFile, cache_root: &Path) {
+fn copy_marketplace_shared_resource_assets(
+    marketplace_path: &Path,
+    marketplace_name: &str,
+    cache_root: &Path,
+) -> Result<bool, String> {
+    let copied_legacy =
+        copy_marketplace_resource_runner_assets(marketplace_path, marketplace_name, cache_root)?;
+    let copied_utils = copy_marketplace_nested_resource_utils(marketplace_path, cache_root)?;
+    Ok(copied_legacy || copied_utils)
+}
+
+fn repair_configured_builtin_resource_runner_assets(config: &PluginConfigFile, cache_root: &Path) {
     let marketplace_path = dev_builtin_marketplace_path();
     let Ok(marketplace) = read_marketplace(&marketplace_path) else {
         return;
@@ -1729,12 +4039,12 @@ fn repair_configured_builtin_source_runner_assets(config: &PluginConfigFile, cac
         return;
     }
     if let Err(err) =
-        copy_marketplace_source_runner_assets(&marketplace_path, &marketplace.name, cache_root)
+        copy_marketplace_shared_resource_assets(&marketplace_path, &marketplace.name, cache_root)
     {
         tracing::warn!(
             marketplace = %marketplace.name,
             path = %marketplace_path.display(),
-            "failed to repair plugin source runner assets: {err}"
+            "failed to repair plugin resource runner assets: {err}"
         );
     }
 }
@@ -1769,6 +4079,20 @@ fn replace_plugin_root_atomically(source: &Path, target_base: &Path) -> Result<P
     Ok(target_base.to_path_buf())
 }
 
+fn remove_other_typed_plugin_roots(
+    store_root: &Path,
+    plugin_id: &PluginId,
+    keep_base: &Path,
+) -> Result<(), String> {
+    for candidate in typed_plugin_base_roots(store_root, plugin_id) {
+        if candidate == keep_base {
+            continue;
+        }
+        remove_path_if_exists(&candidate)?;
+    }
+    Ok(())
+}
+
 pub fn install_plugin(
     marketplace_path: &Path,
     plugin_name: &str,
@@ -1801,20 +4125,185 @@ pub fn install_plugin(
     }
     let plugin_id = PluginId::new(&entry.name, &marketplace.name)?;
     let kind = plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest);
-    copy_marketplace_source_runner_assets(
+    let store_root = plugin_store_root();
+    let target_base = plugin_base_root_for_kind(&store_root, kind, &plugin_id);
+    remove_other_typed_plugin_roots(&store_root, &plugin_id, &target_base)?;
+    copy_marketplace_shared_resource_assets(
         marketplace_path,
         &marketplace.name,
         &plugin_cache_root(),
     )?;
-    let installed_path = replace_plugin_root_atomically(
-        &source_path,
-        &plugin_base_root_for_kind(&plugin_store_root(), kind, &plugin_id),
-    )?;
+    let installed_path = replace_plugin_root_atomically(&source_path, &target_base)?;
+    record_plugin_install_state(&installed_path, &plugin_id, manifest.version.clone(), None)?;
     set_plugin_enabled(&plugin_id.key(), true)?;
     Ok(PluginInstallResult {
         plugin_id: plugin_id.key(),
         installed_path: installed_path.to_string_lossy().into_owned(),
         auth_policy: entry.policy.authentication.clone(),
+    })
+}
+
+pub fn sync_plugin(
+    plugin_id: &str,
+    marketplace_path: &Path,
+    plugin_name: Option<&str>,
+    force: bool,
+) -> Result<PluginSyncResult, String> {
+    let plugin_id = PluginId::parse(plugin_id)?;
+    let marketplace = read_marketplace(marketplace_path)?;
+    if marketplace.name != plugin_id.marketplace {
+        return Err(format!(
+            "plugin `{}` belongs to marketplace `{}`, not `{}`",
+            plugin_id.key(),
+            plugin_id.marketplace,
+            marketplace.name
+        ));
+    }
+    let plugin_name = plugin_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&plugin_id.name);
+    let entry = marketplace
+        .plugins
+        .iter()
+        .find(|entry| entry.name == plugin_name)
+        .ok_or_else(|| format!("plugin `{plugin_name}` not found in `{}`", marketplace.name))?;
+    if entry.name != plugin_id.name {
+        return Err(format!(
+            "plugin id `{}` does not match marketplace entry `{}`",
+            plugin_id.name, entry.name
+        ));
+    }
+    let source_path = resolve_marketplace_source_path(marketplace_path, &entry.source)?;
+    if !source_path.is_dir() {
+        return Err(format!(
+            "plugin source path is not a directory: {}",
+            source_path.display()
+        ));
+    }
+    let manifest = load_plugin_manifest(&source_path)
+        .ok_or_else(|| "missing or invalid plugin manifest".to_string())?;
+    if manifest.name != entry.name {
+        return Err(format!(
+            "plugin manifest name `{}` does not match marketplace plugin name `{}`",
+            manifest.name, entry.name
+        ));
+    }
+    let installed_path = active_plugin_root(&plugin_id)
+        .ok_or_else(|| format!("plugin `{}` is not installed", plugin_id.key()))?;
+
+    let source_files = plugin_file_hashes(&source_path)?;
+    let current_files = plugin_file_hashes(&installed_path)?;
+    let install_state = read_plugin_install_state(&installed_path);
+    let base_files = install_state.as_ref().map(|state| &state.files);
+    let plan = plugin_sync_plan(base_files, &current_files, &source_files);
+
+    if force {
+        let force_plan = plugin_force_sync_plan(&current_files, &source_files);
+        let kind = plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest);
+        let store_root = plugin_store_root();
+        let target_base = plugin_base_root_for_kind(&store_root, kind, &plugin_id);
+        remove_other_typed_plugin_roots(&store_root, &plugin_id, &target_base)?;
+        copy_marketplace_shared_resource_assets(
+            marketplace_path,
+            &marketplace.name,
+            &plugin_cache_root(),
+        )?;
+        let installed_path = replace_plugin_root_atomically(&source_path, &target_base)?;
+        let installed_at = install_state
+            .as_ref()
+            .map(|state| state.installed_at.clone());
+        record_plugin_install_state(
+            &installed_path,
+            &plugin_id,
+            manifest.version.clone(),
+            installed_at,
+        )?;
+        return Ok(PluginSyncResult {
+            plugin_id: plugin_id.key(),
+            status: "forceSynced".to_string(),
+            installed_path: installed_path.to_string_lossy().into_owned(),
+            updated: force_plan.updated,
+            added: force_plan.added,
+            removed: force_plan.removed,
+            kept_local: Vec::new(),
+            conflicts: Vec::new(),
+            message: "Force synced plugin from marketplace source; local edits were overwritten."
+                .to_string(),
+        });
+    }
+
+    for relative in plan.updated.iter().chain(plan.added.iter()) {
+        copy_plugin_relative_file(&source_path, &installed_path, relative)?;
+    }
+    for relative in &plan.removed {
+        remove_plugin_relative_file(&installed_path, relative)?;
+    }
+    copy_marketplace_shared_resource_assets(
+        marketplace_path,
+        &marketplace.name,
+        &plugin_cache_root(),
+    )?;
+
+    let conflicts = plan.conflicts.clone();
+    let kept_local = plan.kept_local.clone();
+    let updated = plan.updated.clone();
+    let added = plan.added.clone();
+    let removed = plan.removed.clone();
+    let status = if conflicts.is_empty() {
+        let installed_at = install_state
+            .as_ref()
+            .map(|state| state.installed_at.clone());
+        record_plugin_install_state(
+            &installed_path,
+            &plugin_id,
+            manifest.version.clone(),
+            installed_at,
+        )?;
+        if updated.is_empty() && added.is_empty() && removed.is_empty() {
+            "upToDate"
+        } else {
+            "synced"
+        }
+    } else if updated.is_empty() && added.is_empty() && removed.is_empty() {
+        "conflicts"
+    } else {
+        "partial"
+    }
+    .to_string();
+    let message = if status == "upToDate" {
+        "Plugin is already up to date.".to_string()
+    } else if status == "synced" {
+        format!(
+            "Synced plugin: {} updated, {} added, {} removed.",
+            updated.len(),
+            added.len(),
+            removed.len()
+        )
+    } else if status == "partial" {
+        format!(
+            "Partially synced plugin; {} conflict{} kept local.",
+            conflicts.len(),
+            if conflicts.len() == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "No files were changed because {} conflict{} need review.",
+            conflicts.len(),
+            if conflicts.len() == 1 { "" } else { "s" }
+        )
+    };
+
+    Ok(PluginSyncResult {
+        plugin_id: plugin_id.key(),
+        status,
+        installed_path: installed_path.to_string_lossy().into_owned(),
+        updated,
+        added,
+        removed,
+        kept_local,
+        conflicts,
+        message,
     })
 }
 
@@ -1832,6 +4321,118 @@ pub fn uninstall_plugin(plugin_id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_plugin_fixture_root(plugin_name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/plugins/legacy")
+            .join(plugin_name)
+    }
+
+    fn repo_project_marketplace_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join(".omiga/plugins/marketplace.json")
+    }
+
+    fn curated_marketplace_path() -> PathBuf {
+        dev_builtin_marketplace_path()
+    }
+
+    fn curated_plugin_root(plugin_name: &str) -> PathBuf {
+        let marketplace_path = curated_marketplace_path();
+        let marketplace = read_marketplace(&marketplace_path).expect("curated marketplace");
+        let entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == plugin_name)
+            .unwrap_or_else(|| panic!("{plugin_name} curated marketplace entry"));
+        resolve_marketplace_source_path(&marketplace_path, &entry.source)
+            .unwrap_or_else(|_| panic!("{plugin_name} curated source path"))
+    }
+
+    #[test]
+    fn dev_curated_marketplace_is_checked_in_not_sibling_checkout() {
+        let marketplace_path = dev_builtin_marketplace_path();
+        let expected_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("omiga-plugins");
+
+        assert_eq!(
+            marketplace_path,
+            expected_root.join(MARKETPLACE_FILE_NAME),
+            "dev curated marketplace must be repo-local so clean clones and CI do not depend on ../omiga-plugins"
+        );
+        assert!(marketplace_path.is_file());
+    }
+
+    #[test]
+    fn default_marketplace_paths_include_project_omiga_plugins() {
+        let paths = marketplace_paths(None, None);
+        assert!(
+            paths.contains(&repo_project_marketplace_path()),
+            "the repository-local .omiga/plugins marketplace should be visible without requiring an active project root"
+        );
+        assert!(
+            paths.contains(&dev_bundled_marketplace_path()),
+            "the app-bundled internal marketplace should remain visible without becoming the curated marketplace source"
+        );
+    }
+
+    #[test]
+    fn packaged_resource_paths_include_curated_marketplace_and_internal_bundles() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let resource_dir = tmp.path();
+        let curated = resource_dir
+            .join("omiga-plugins")
+            .join(MARKETPLACE_FILE_NAME);
+        let internal = resource_dir
+            .join("bundled_plugins")
+            .join(MARKETPLACE_FILE_NAME);
+        fs::create_dir_all(curated.parent().unwrap()).unwrap();
+        fs::create_dir_all(internal.parent().unwrap()).unwrap();
+        fs::write(
+            &curated,
+            r#"{"name":"omiga-curated","plugins":[],"remote":{"url":"https://example.com/marketplace.json"}}"#,
+        )
+        .unwrap();
+        fs::write(&internal, r#"{"name":"omiga-internal","plugins":[]}"#).unwrap();
+
+        let paths = marketplace_paths(None, Some(resource_dir));
+        let curated_index = paths
+            .iter()
+            .position(|path| path == &curated)
+            .expect("packaged curated marketplace path");
+        let internal_index = paths
+            .iter()
+            .position(|path| path == &internal)
+            .expect("packaged internal marketplace path");
+
+        assert!(
+            curated_index < internal_index,
+            "packaged curated marketplace should be considered before app-internal bundled plugins"
+        );
+    }
+
+    #[test]
+    fn marketplace_listing_keeps_local_plugins_and_remote_metadata() {
+        let entries = list_plugin_marketplaces(None, None);
+        let builtin = dev_builtin_marketplace_path();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == builtin.to_string_lossy())
+            .expect("bundled marketplace entry");
+        assert!(
+            entry
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.url.strip_prefix("https://"))
+                .is_some(),
+            "remote metadata should be preserved so the UI can enable update checks"
+        );
+        assert!(
+            entry.plugins.iter().any(|plugin| plugin.name == "visualization-r"),
+            "packaged marketplace must keep local curated plugins available for production installs"
+        );
+    }
 
     fn write_cached_plugin(
         cache_root: &Path,
@@ -1902,9 +4503,9 @@ mod tests {
         with_skill: bool,
     ) -> PathBuf {
         let plugin_root = store_root.join(kind.dir_name()).join(name);
-        fs::create_dir_all(plugin_root.join(".omiga-plugin")).unwrap();
+        fs::create_dir_all(&plugin_root).unwrap();
         fs::write(
-            plugin_root.join(".omiga-plugin/plugin.json"),
+            plugin_root.join(PLUGIN_MANIFEST_FILE),
             format!(
                 r#"{{
                   "name": "{name}",
@@ -1931,16 +4532,30 @@ mod tests {
     fn resolves_manifest_paths_safely() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let plugin = tmp.path().join("sample");
-        fs::create_dir_all(plugin.join(".omiga-plugin")).unwrap();
+        fs::create_dir_all(&plugin).unwrap();
         fs::write(
-            plugin.join(".omiga-plugin/plugin.json"),
-            r#"{"name":"sample","skills":"./skills","mcpServers":"../bad"}"#,
+            plugin.join(PLUGIN_MANIFEST_FILE),
+            r#"{
+              "name":"sample",
+              "operators":"./ops",
+              "templates":"./templates",
+              "skills":"./skills",
+              "agents":"./agents",
+              "environments":"./envs",
+              "mcpServers":"../bad",
+              "hooks":"./hooks/hooks.json"
+            }"#,
         )
         .unwrap();
         let manifest = load_plugin_manifest(&plugin).expect("manifest");
         assert_eq!(manifest.name, "sample");
+        assert_eq!(manifest.operators, Some(plugin.join("ops")));
+        assert_eq!(manifest.templates, Some(plugin.join("templates")));
         assert_eq!(manifest.skills, Some(plugin.join("skills")));
+        assert_eq!(manifest.agents, Some(plugin.join("agents")));
+        assert_eq!(manifest.environments, Some(plugin.join("envs")));
         assert_eq!(manifest.mcp_servers, None);
+        assert_eq!(manifest.hooks, Some(plugin.join("hooks/hooks.json")));
     }
 
     #[test]
@@ -1957,15 +4572,24 @@ mod tests {
         let mut config = PluginConfigFile::default();
         config.plugins.insert(
             "zeta@market".to_string(),
-            PluginConfigEntry { enabled: true },
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
         );
         config.plugins.insert(
             "alpha@market".to_string(),
-            PluginConfigEntry { enabled: true },
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
         );
         config.plugins.insert(
             "disabled@market".to_string(),
-            PluginConfigEntry { enabled: false },
+            PluginConfigEntry {
+                enabled: false,
+                ..Default::default()
+            },
         );
 
         let ids = enabled_plugin_ids(&config)
@@ -1973,6 +4597,90 @@ mod tests {
             .map(|id| id.key())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["alpha@market", "zeta@market"]);
+    }
+
+    #[test]
+    fn superseded_bundled_plugin_config_migrates_to_aggregate_plugins() {
+        let mut config = PluginConfigFile::default();
+        for key in [
+            "operator-pca-r@omiga-curated",
+            "operator-differential-expression-r@omiga-curated",
+            "retrieval-dataset-geo@omiga-curated",
+            "retrieval-literature-pubmed@omiga-curated",
+            "retrieval-dataset-ena@omiga-curated",
+            "retrieval-knowledge-ensembl@omiga-curated",
+            "operator-uniprot-search@omiga-curated",
+            "operator-smoke@omiga-curated",
+            "notebook-helper@omiga-curated",
+        ] {
+            config.plugins.insert(
+                key.to_string(),
+                PluginConfigEntry {
+                    enabled: true,
+                    ..Default::default()
+                },
+            );
+        }
+        config.plugins.insert(
+            "third-party-old@custom-market".to_string(),
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        config.plugins.insert(
+            "retrieval-dataset-biosample@omiga-curated".to_string(),
+            PluginConfigEntry {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+
+        assert!(migrate_superseded_builtin_plugin_config(&mut config));
+
+        assert!(
+            config
+                .plugins
+                .get("transcriptomics@omiga-curated")
+                .unwrap()
+                .enabled
+        );
+        let resource_ncbi = config.plugins.get("resource-ncbi@omiga-curated").unwrap();
+        assert!(!resource_ncbi.retrieval_resources_configured);
+        assert!(resource_ncbi
+            .disabled_retrieval_resources
+            .contains("dataset.biosample"));
+        assert!(
+            config
+                .plugins
+                .get("resource-ncbi@omiga-curated")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            config
+                .plugins
+                .get("resource-embl-ebi@omiga-curated")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            config
+                .plugins
+                .get("retrieval-knowledge-uniprot@omiga-curated")
+                .unwrap()
+                .enabled
+        );
+        assert!(config.plugins.contains_key("third-party-old@custom-market"));
+        assert!(!config.plugins.contains_key("operator-pca-r@omiga-curated"));
+        assert!(!config
+            .plugins
+            .contains_key("retrieval-literature-pubmed@omiga-curated"));
+        assert!(!config
+            .plugins
+            .contains_key("retrieval-dataset-biosample@omiga-curated"));
+        assert!(!config.plugins.contains_key("operator-smoke@omiga-curated"));
+        assert!(!config.plugins.contains_key("notebook-helper@omiga-curated"));
     }
 
     #[test]
@@ -1990,7 +4698,10 @@ mod tests {
         let mut config = PluginConfigFile::default();
         config.plugins.insert(
             "sample-operator@market".to_string(),
-            PluginConfigEntry { enabled: true },
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
         );
 
         let outcome = load_plugins_from_config(&config, &cache_root);
@@ -2040,7 +4751,10 @@ mod tests {
         let mut config = PluginConfigFile::default();
         config.plugins.insert(
             "sample@market".to_string(),
-            PluginConfigEntry { enabled: true },
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
         );
         let typed_root = store_root.join("operators").join("sample");
 
@@ -2057,37 +4771,269 @@ mod tests {
 
     #[test]
     fn plugin_kind_classification_matches_install_sections() {
-        let builtin = Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins");
-        let operator_root = builtin.join("operator-pca-r");
-        let source_root = builtin.join("retrieval-dataset-geo");
-        let workflow_root = builtin.join("notebook-helper");
+        let operator_root = legacy_plugin_fixture_root("operator-pca-r");
+        let analysis_root = curated_plugin_root("transcriptomics");
+        let source_root = legacy_plugin_fixture_root("retrieval-dataset-geo");
+        let workflow_root = legacy_plugin_fixture_root("notebook-helper");
+        let visualization_root = curated_plugin_root("visualization-r");
 
         let operator_manifest = load_plugin_manifest(&operator_root).expect("operator manifest");
+        let analysis_manifest = load_plugin_manifest(&analysis_root).expect("analysis manifest");
         let source_manifest = load_plugin_manifest(&source_root).expect("source manifest");
         let workflow_manifest = load_plugin_manifest(&workflow_root).expect("workflow manifest");
+        let visualization_manifest =
+            load_plugin_manifest(&visualization_root).expect("visualization manifest");
 
         assert_eq!(
             plugin_kind_for_manifest(&operator_root, Some("Operator"), &operator_manifest),
             PluginKind::Operator
         );
         assert_eq!(
+            plugin_kind_for_manifest(&analysis_root, Some("Analysis"), &analysis_manifest),
+            PluginKind::Workflow
+        );
+        assert_eq!(
             plugin_kind_for_manifest(&source_root, Some("Retrieval"), &source_manifest),
-            PluginKind::Source
+            PluginKind::Resource
         );
         assert_eq!(
             plugin_kind_for_manifest(&workflow_root, Some("Notebook"), &workflow_manifest),
             PluginKind::Workflow
         );
+        assert_eq!(
+            plugin_kind_for_manifest(
+                &visualization_root,
+                Some("Visualization"),
+                &visualization_manifest
+            ),
+            PluginKind::Workflow
+        );
     }
 
     #[test]
-    fn marketplace_source_runners_are_copied_to_source_root() {
+    fn remove_other_typed_plugin_roots_keeps_only_current_install_kind() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store_root = tmp.path().join("plugins");
+        let plugin_id = PluginId::new("visualization-r", "omiga-curated").unwrap();
+        let old_operator_root = write_typed_plugin(
+            &store_root,
+            PluginKind::Operator,
+            "visualization-r",
+            r#"{"displayName":"Old Operator","category":"Operator"}"#,
+            false,
+        );
+        let workflow_root = write_typed_plugin(
+            &store_root,
+            PluginKind::Workflow,
+            "visualization-r",
+            r#"{"displayName":"R Visualization","category":"Visualization"}"#,
+            true,
+        );
+        let unrelated_root = write_typed_plugin(
+            &store_root,
+            PluginKind::Operator,
+            "other-plugin",
+            r#"{"displayName":"Other","category":"Operator"}"#,
+            false,
+        );
+
+        remove_other_typed_plugin_roots(&store_root, &plugin_id, &workflow_root)
+            .expect("cleanup stale typed roots");
+
+        assert!(!old_operator_root.exists());
+        assert!(workflow_root.exists());
+        assert!(unrelated_root.exists());
+    }
+
+    #[test]
+    fn configured_bundled_plugins_refresh_updates_stale_typed_roots() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store_root = tmp.path().join("plugins");
+        let cache_root = store_root.join("cache");
+        let old_operator_root = write_typed_plugin(
+            &store_root,
+            PluginKind::Operator,
+            "visualization-r",
+            r#"{"displayName":"R Visualization Templates","category":"Operator"}"#,
+            false,
+        );
+        let mut config = PluginConfigFile::default();
+        config.plugins.insert(
+            "visualization-r@omiga-curated".to_string(),
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+
+        let refreshed = refresh_configured_builtin_plugins(&config, &cache_root)
+            .expect("refresh bundled plugin");
+
+        let workflow_root = store_root.join("workflow").join("visualization-r");
+        assert_eq!(refreshed, 1);
+        assert!(!old_operator_root.exists());
+        assert!(workflow_root.exists());
+    }
+
+    #[test]
+    fn plugin_sync_plan_updates_safe_paths_and_keeps_conflicts() {
+        let base = BTreeMap::from([
+            ("same.txt".to_string(), "sha256:base".to_string()),
+            ("update.txt".to_string(), "sha256:old".to_string()),
+            ("local.txt".to_string(), "sha256:old".to_string()),
+            ("conflict.txt".to_string(), "sha256:old".to_string()),
+            ("remove.txt".to_string(), "sha256:old".to_string()),
+        ]);
+        let current = BTreeMap::from([
+            ("same.txt".to_string(), "sha256:base".to_string()),
+            ("update.txt".to_string(), "sha256:old".to_string()),
+            ("local.txt".to_string(), "sha256:user".to_string()),
+            ("conflict.txt".to_string(), "sha256:user".to_string()),
+            ("remove.txt".to_string(), "sha256:old".to_string()),
+        ]);
+        let source = BTreeMap::from([
+            ("same.txt".to_string(), "sha256:base".to_string()),
+            ("update.txt".to_string(), "sha256:new".to_string()),
+            ("local.txt".to_string(), "sha256:old".to_string()),
+            ("conflict.txt".to_string(), "sha256:new".to_string()),
+            ("added.txt".to_string(), "sha256:new".to_string()),
+        ]);
+
+        let plan = plugin_sync_plan(Some(&base), &current, &source);
+
+        assert_eq!(plan.updated, vec!["update.txt"]);
+        assert_eq!(plan.added, vec!["added.txt"]);
+        assert_eq!(plan.removed, vec!["remove.txt"]);
+        assert_eq!(plan.kept_local, vec!["local.txt"]);
+        assert_eq!(plan.conflicts, vec!["conflict.txt"]);
+    }
+
+    #[test]
+    fn plugin_sync_summary_detects_marketplace_update_without_local_edits() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("source");
+        let installed = tmp.path().join("installed");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join(PLUGIN_MANIFEST_FILE),
+            r#"{"name":"demo","version":"0.1.0"}"#,
+        )
+        .unwrap();
+        fs::write(source.join("tool.txt"), "v1").unwrap();
+        copy_dir_recursive(&source, &installed).unwrap();
+        let plugin_id = PluginId::new("demo", "local").unwrap();
+        record_plugin_install_state(&installed, &plugin_id, Some("0.1.0".to_string()), None)
+            .unwrap();
+
+        fs::write(source.join("tool.txt"), "v2").unwrap();
+        fs::write(source.join("new.txt"), "added").unwrap();
+
+        let summary = plugin_sync_summary(&source, Some(&installed)).expect("sync summary");
+
+        assert_eq!(summary.state, "updateAvailable");
+        assert_eq!(summary.changed_count, 2);
+        assert_eq!(summary.local_modified_count, 0);
+        assert_eq!(summary.conflict_count, 0);
+    }
+
+    #[test]
+    fn plugin_force_sync_plan_marks_overwritten_and_removed_paths() {
+        let current = BTreeMap::from([
+            ("same.txt".to_string(), "sha256:base".to_string()),
+            ("local-only.txt".to_string(), "sha256:user".to_string()),
+            ("changed.txt".to_string(), "sha256:user".to_string()),
+        ]);
+        let source = BTreeMap::from([
+            ("same.txt".to_string(), "sha256:base".to_string()),
+            ("changed.txt".to_string(), "sha256:source".to_string()),
+            ("source-only.txt".to_string(), "sha256:source".to_string()),
+        ]);
+
+        let plan = plugin_force_sync_plan(&current, &source);
+
+        assert_eq!(plan.updated, vec!["changed.txt"]);
+        assert_eq!(plan.added, vec!["source-only.txt"]);
+        assert_eq!(plan.removed, vec!["local-only.txt"]);
+        assert!(plan.kept_local.is_empty());
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn plugin_changelog_summary_reads_manifest_declared_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin = tmp.path().join("plugin");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join(PLUGIN_MANIFEST_FILE),
+            r#"{"name":"demo","version":"0.2.0","changelog":"./docs/CHANGES.md"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(plugin.join("docs")).unwrap();
+        fs::write(
+            plugin.join("docs/CHANGES.md"),
+            "# Changelog\n\n## 0.2.0 - 2026-05-12\n\n- Added remote sync.\n\n## 0.1.0\n\n- Initial release.\n",
+        )
+        .unwrap();
+        let manifest = load_plugin_manifest(&plugin).expect("manifest");
+
+        let summary = plugin_changelog_summary(&plugin, Some(&manifest)).expect("changelog");
+
+        assert_eq!(summary.latest_version, Some("0.2.0".to_string()));
+        assert_eq!(summary.entries.len(), 2);
+        assert_eq!(summary.entries[0].date, Some("2026-05-12".to_string()));
+        assert!(summary.entries[0].body.contains("remote sync"));
+    }
+
+    #[test]
+    fn remote_marketplace_diff_ignores_missing_remote_versions_for_existing_plugins() {
+        let local = BTreeMap::from([
+            ("alignment".to_string(), Some("0.1.0".to_string())),
+            ("transcriptomics".to_string(), Some("0.1.0".to_string())),
+        ]);
+        let remote_without_versions = BTreeMap::from([
+            ("alignment".to_string(), None),
+            ("transcriptomics".to_string(), None),
+        ]);
+        assert!(changed_marketplace_plugins(&local, &remote_without_versions).is_empty());
+
+        let remote_with_change = BTreeMap::from([
+            ("alignment".to_string(), Some("0.2.0".to_string())),
+            ("transcriptomics".to_string(), None),
+            ("new-plugin".to_string(), Some("0.1.0".to_string())),
+        ]);
+        assert_eq!(
+            changed_marketplace_plugins(&local, &remote_with_change),
+            vec!["alignment".to_string(), "new-plugin".to_string()]
+        );
+    }
+
+    #[test]
+    fn curated_marketplace_uses_nested_resource_utils_not_global_resource_runners() {
+        let marketplace_path = curated_marketplace_path();
+        let marketplace_root = marketplace_path.parent().expect("marketplace root");
+        assert!(
+            !marketplace_root.join(RESOURCE_RUNNERS_DIR).exists(),
+            "latest omiga-plugins marketplace should not use top-level resource_runners"
+        );
+        assert!(
+            marketplace_root
+                .join("plugins")
+                .join("resources")
+                .join("utils")
+                .join("retrieval_http.py")
+                .is_file(),
+            "latest omiga-plugins marketplace should share retrieval utilities under plugins/resources/utils"
+        );
+    }
+
+    #[test]
+    fn legacy_marketplace_resource_runners_are_still_copied_to_resource_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let marketplace_root = tmp.path().join("marketplace");
-        let source_runners = marketplace_root.join(SOURCE_RUNNERS_DIR);
-        fs::create_dir_all(&source_runners).unwrap();
+        let resource_runners = marketplace_root.join(RESOURCE_RUNNERS_DIR);
+        fs::create_dir_all(&resource_runners).unwrap();
         fs::write(
-            source_runners.join("public_knowledge_sources.py"),
+            resource_runners.join("public_knowledge_sources.py"),
             "print('runner')\n",
         )
         .unwrap();
@@ -2098,7 +5044,7 @@ mod tests {
         .unwrap();
         let cache_root = tmp.path().join("plugins").join("cache");
 
-        let copied = copy_marketplace_source_runner_assets(
+        let copied = copy_marketplace_resource_runner_assets(
             &marketplace_root.join(MARKETPLACE_FILE_NAME),
             "omiga-curated",
             &cache_root,
@@ -2110,12 +5056,65 @@ mod tests {
             fs::read_to_string(
                 tmp.path()
                     .join("plugins")
-                    .join("source")
-                    .join(SOURCE_RUNNERS_DIR)
+                    .join("resources")
+                    .join(RESOURCE_RUNNERS_DIR)
                     .join("public_knowledge_sources.py")
             )
             .unwrap(),
             "print('runner')\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                tmp.path()
+                    .join("plugins")
+                    .join("resources")
+                    .join(LEGACY_SOURCE_RUNNERS_DIR)
+                    .join("public_knowledge_sources.py")
+            )
+            .unwrap(),
+            "print('runner')\n"
+        );
+    }
+
+    #[test]
+    fn marketplace_nested_resource_utils_are_copied_to_installed_resource_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let marketplace_root = tmp.path().join("marketplace");
+        let resource_utils = marketplace_root
+            .join("plugins")
+            .join("resources")
+            .join(RESOURCE_UTILS_DIR);
+        fs::create_dir_all(&resource_utils).unwrap();
+        fs::write(
+            resource_utils.join("retrieval_http.py"),
+            "# shared helper\n",
+        )
+        .unwrap();
+        fs::write(
+            marketplace_root.join(MARKETPLACE_FILE_NAME),
+            r#"{"name":"omiga-curated","plugins":[]}"#,
+        )
+        .unwrap();
+        let cache_root = tmp.path().join("plugins").join("cache");
+
+        let copied = copy_marketplace_shared_resource_assets(
+            &marketplace_root.join(MARKETPLACE_FILE_NAME),
+            "omiga-curated",
+            &cache_root,
+        )
+        .unwrap();
+
+        assert!(copied);
+        assert_eq!(
+            fs::read_to_string(
+                tmp.path()
+                    .join("plugins")
+                    .join("resources")
+                    .join(RESOURCE_UTILS_DIR)
+                    .join("retrieval_http.py")
+            )
+            .unwrap(),
+            "# shared helper\n"
         );
     }
 
@@ -2135,7 +5134,10 @@ mod tests {
         let mut config = PluginConfigFile::default();
         config.plugins.insert(
             "sample@market".to_string(),
-            PluginConfigEntry { enabled: true },
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
         );
 
         let outcome = load_plugins_from_config(&config, &cache_root);
@@ -2162,6 +5164,62 @@ mod tests {
         assert!(summary.has_skills);
         assert_eq!(summary.mcp_servers, vec!["sample".to_string()]);
         assert_eq!(summary.apps, vec!["calendar".to_string()]);
+    }
+
+    #[test]
+    fn plugin_stdio_mcp_servers_resolve_relative_cwd_from_plugin_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("computer-use");
+        fs::create_dir_all(&plugin_root).unwrap();
+        fs::write(
+            plugin_root.join(PLUGIN_MANIFEST_FILE),
+            r#"{
+              "name": "computer-use",
+              "version": "0.1.0",
+              "mcpServers": "./.mcp.json",
+              "interface": {
+                "displayName": "Computer Use",
+                "category": "Automation"
+              }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join(".mcp.json"),
+            r#"{
+              "mcpServers": {
+                "computer": {
+                  "command": "./bin/darwin-arm64/computer-use",
+                  "args": ["--stdio"]
+                },
+                "computer-subdir": {
+                  "command": "../bin/darwin-arm64/computer-use",
+                  "cwd": "./mcp"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let manifest = load_plugin_manifest(&plugin_root).expect("manifest");
+        let servers = plugin_mcp_servers(&plugin_root, &manifest);
+
+        match servers.get("computer") {
+            Some(McpServerConfig::Stdio { command, cwd, .. }) => {
+                assert_eq!(command, "./bin/darwin-arm64/computer-use");
+                let expected = plugin_root.to_string_lossy().into_owned();
+                assert_eq!(cwd.as_deref(), Some(expected.as_str()));
+            }
+            other => panic!("expected computer stdio server, got {other:?}"),
+        }
+        match servers.get("computer-subdir") {
+            Some(McpServerConfig::Stdio { command, cwd, .. }) => {
+                assert_eq!(command, "../bin/darwin-arm64/computer-use");
+                let expected = plugin_root.join("mcp").to_string_lossy().into_owned();
+                assert_eq!(cwd.as_deref(), Some(expected.as_str()));
+            }
+            other => panic!("expected computer-subdir stdio server, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2199,9 +5257,65 @@ mod tests {
     }
 
     #[test]
+    fn template_plugins_are_visible_as_template_execute_capabilities() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("template-plugin");
+        let template_dir = plugin_root.join("templates").join("scatter");
+        fs::create_dir_all(&template_dir).expect("template dir");
+        fs::write(
+            plugin_root.join("plugin.json"),
+            r#"{
+              "name": "template-plugin",
+              "version": "0.1.0",
+              "description": "Template-only visualization plugin",
+              "templates": "./templates"
+            }"#,
+        )
+        .expect("plugin manifest");
+        fs::write(template_dir.join("run.sh"), "#!/bin/sh\n").expect("script");
+        fs::write(
+            template_dir.join("template.yaml"),
+            r#"apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_demo
+  version: 0.1.0
+  name: Demo Plot
+classification:
+  category: visualization/scatter
+template:
+  engine: static
+  entry: ./run.sh
+"#,
+        )
+        .expect("template manifest");
+        let manifest = load_plugin_manifest(&plugin_root).expect("plugin manifest");
+        let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
+            id: "template-plugin@market".to_string(),
+            manifest_name: Some(manifest.name.clone()),
+            display_name: Some("Template Plugin".to_string()),
+            description: manifest.description.clone(),
+            root: plugin_root,
+            enabled: true,
+            skill_roots: vec![],
+            mcp_servers: HashMap::new(),
+            apps: vec![],
+            retrieval: None,
+            error: None,
+        }]);
+
+        let section = format_plugins_system_section(&outcome).expect("plugins section");
+
+        assert!(section.contains("- `Template Plugin`: Template-only visualization plugin"));
+        assert!(section
+            .contains("templates: 1 via `unit_search` / `unit_describe` / `template_execute`"));
+        assert!(section.contains("groups: `scatter`"));
+        assert!(section.contains("Template plugins expose Template units"));
+    }
+
+    #[test]
     fn retrieval_only_plugins_are_visible_in_system_section() {
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins/retrieval-dataset-biosample");
+        let plugin_root = legacy_plugin_fixture_root("retrieval-dataset-biosample");
         let manifest = load_plugin_manifest(&plugin_root).expect("biosample plugin manifest");
         let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
             id: "retrieval-dataset-biosample@omiga-curated".to_string(),
@@ -2222,7 +5336,7 @@ mod tests {
 
         let section = format_plugins_system_section(&outcome).expect("plugins section");
 
-        assert!(section.contains("BioSample Retrieval Source"));
+        assert!(section.contains("BioSample Retrieval Resource"));
         assert!(section.contains("retrieval routes"));
         assert!(section.contains("`dataset.biosample`"));
         assert!(!section.contains("`dataset.arrayexpress`"));
@@ -2295,11 +5409,17 @@ mod tests {
         let mut config = PluginConfigFile::default();
         config.plugins.insert(
             "zeta@market".to_string(),
-            PluginConfigEntry { enabled: true },
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
         );
         config.plugins.insert(
             "alpha@market".to_string(),
-            PluginConfigEntry { enabled: true },
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
         );
 
         let servers = load_plugins_from_config(&config, &cache_root).effective_mcp_servers();
@@ -2328,7 +5448,10 @@ mod tests {
         let mut config = PluginConfigFile::default();
         config.plugins.insert(
             "sample@market".to_string(),
-            PluginConfigEntry { enabled: false },
+            PluginConfigEntry {
+                enabled: false,
+                ..Default::default()
+            },
         );
 
         let outcome = load_plugins_from_config(&config, &cache_root);
@@ -2363,7 +5486,10 @@ mod tests {
         let mut config = PluginConfigFile::default();
         config.plugins.insert(
             "orphan@removed-market".to_string(),
-            PluginConfigEntry { enabled: true },
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
         );
 
         let summaries = unlisted_installed_plugin_summaries(&config, &HashSet::new(), &cache_root);
@@ -2410,89 +5536,254 @@ mod tests {
     }
 
     #[test]
-    fn bundled_marketplace_exposes_individual_retrieval_source_plugins() {
+    fn bundled_marketplace_hides_internal_smoke_and_notebook_helper_plugins() {
         let marketplace = read_marketplace(&dev_builtin_marketplace_path()).unwrap();
+        for removed in ["operator-smoke", "notebook-helper"] {
+            assert!(
+                !marketplace
+                    .plugins
+                    .iter()
+                    .any(|entry| entry.name == removed),
+                "internal helper plugin `{removed}` should not be marketplace-visible"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_internal_marketplace_is_not_public_marketplace_mirror() {
+        let marketplace = read_marketplace(&dev_bundled_marketplace_path()).unwrap();
+        let plugin_names = marketplace
+            .plugins
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(plugin_names, vec!["computer-use"]);
+        assert!(
+            marketplace.remote.is_none(),
+            "bundled internal plugins should not masquerade as the remote curated marketplace"
+        );
+    }
+
+    #[test]
+    fn project_marketplace_exposes_omiga_plugin_creator_skill() {
+        let marketplace_path = repo_project_marketplace_path();
+        let marketplace = read_marketplace(&marketplace_path).unwrap();
+        let entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "omiga-developer-tools")
+            .expect("omiga developer tools marketplace entry");
+        assert_eq!(entry.category.as_deref(), Some("Tools"));
+        assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
+
+        let source_path = resolve_marketplace_source_path(&marketplace_path, &entry.source)
+            .expect("developer tools source path");
+        let manifest = load_plugin_manifest(&source_path).expect("developer tools manifest");
+        assert_eq!(
+            plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest),
+            PluginKind::Tool
+        );
+
+        let skills = plugin_skill_summaries(&source_path, &manifest);
+        assert!(
+            skills.iter().any(|skill| skill.name == "plugin-creator"),
+            "developer tools should contribute plugin-creator"
+        );
+    }
+
+    #[test]
+    fn project_marketplace_exposes_ngs_alignment_operator_bundle() {
+        let marketplace_path = repo_project_marketplace_path();
+        let marketplace = read_marketplace(&marketplace_path).unwrap();
+        let entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "ngs-alignment")
+            .expect("ngs alignment marketplace entry");
+        assert_eq!(entry.category.as_deref(), Some("Bioinformatics"));
+
+        let source_path = resolve_marketplace_source_path(&marketplace_path, &entry.source)
+            .expect("ngs alignment source path");
+        let manifest = load_plugin_manifest(&source_path).expect("ngs alignment manifest");
+        assert_eq!(
+            manifest
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.display_name.as_deref()),
+            Some("Alignment")
+        );
+        assert_eq!(
+            plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest),
+            PluginKind::Operator
+        );
+
+        let operators_root = manifest.operators.as_ref().expect("operators root");
+        let mut ids = fs::read_dir(operators_root)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| {
+                let manifest_path = entry.path().join("operator.yaml");
+                manifest_path.is_file().then(|| {
+                    crate::domain::operators::load_operator_manifest(
+                        &manifest_path,
+                        "ngs-alignment@omiga-curated",
+                        &source_path,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .into_iter()
+            .map(|operator| operator.metadata.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "bowtie2_align_reads",
+                "bowtie2_build_reference",
+                "bwa_index_reference",
+                "bwa_mem_align_reads",
+                "hisat2_align_reads",
+                "hisat2_build_reference",
+                "samtools_alignment_utility",
+                "star_align_reads",
+                "star_generate_genome_index",
+            ]
+        );
+
+        let summary = plugin_summary_from_marketplace_entry(
+            &marketplace_path,
+            "omiga-curated",
+            entry,
+            &PluginConfigFile::default(),
+        )
+        .expect("ngs alignment summary");
+        assert_eq!(summary.operators.len(), 9);
+        let star = summary
+            .operators
+            .iter()
+            .find(|operator| operator.id == "star_align_reads")
+            .expect("STAR align operator summary");
+        assert_eq!(
+            star.runtime
+                .as_ref()
+                .and_then(|runtime| runtime.get("resourceProfile"))
+                .and_then(|profile| profile.get("tier"))
+                .and_then(JsonValue::as_str),
+            Some("hpc-recommended")
+        );
+
+        let envs = plugin_environment_summaries(
+            &source_path,
+            "ngs-alignment@omiga-curated",
+            &PluginConfigFile::default(),
+        );
+        assert_eq!(envs.len(), 5);
+        assert_eq!(
+            envs.iter().map(|env| env.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                "ngs-bowtie2",
+                "ngs-bwa",
+                "ngs-hisat2",
+                "ngs-samtools",
+                "ngs-star"
+            ]
+        );
+        assert!(envs.iter().all(|env| env.runtime_type == "conda"));
+        assert!(envs
+            .iter()
+            .all(|env| env.runtime_file_kind.as_deref() == Some("conda.yaml|conda.yml")));
+        assert!(envs.iter().all(|env| !env.availability_message.is_empty()));
+    }
+
+    #[test]
+    fn project_marketplace_exposes_provider_level_retrieval_resource_plugins() {
+        let marketplace_path = curated_marketplace_path();
+        let marketplace = read_marketplace(&marketplace_path).unwrap();
         for removed in [
             "public-dataset-sources",
             "public-literature-sources",
             "public-knowledge-sources",
+            "operator-pubmed-search",
+            "operator-geo-search",
+            "operator-uniprot-search",
+            "retrieval-dataset-geo",
+            "retrieval-dataset-ena",
+            "retrieval-dataset-biosample",
+            "retrieval-dataset-arrayexpress",
+            "retrieval-dataset-ncbi-datasets",
+            "retrieval-literature-pubmed",
+            "retrieval-knowledge-ncbi-gene",
+            "retrieval-knowledge-ensembl",
         ] {
             assert!(
                 !marketplace
                     .plugins
                     .iter()
                     .any(|entry| entry.name == removed),
-                "grouped retrieval plugin `{removed}` should not be marketplace-visible"
+                "database-level retrieval plugin `{removed}` should not be marketplace-visible"
             );
         }
 
         let cases = [
             (
-                "retrieval-dataset-geo",
-                "GEO Retrieval Source",
-                vec!["dataset.geo"],
-            ),
-            (
-                "retrieval-dataset-ena",
-                "ENA Retrieval Source",
+                "resource-ncbi",
+                "NCBI",
                 vec![
-                    "dataset.ena",
-                    "dataset.ena_analysis",
-                    "dataset.ena_assembly",
-                    "dataset.ena_experiment",
-                    "dataset.ena_run",
-                    "dataset.ena_sample",
-                    "dataset.ena_sequence",
+                    "literature.pubmed",
+                    "dataset.geo",
+                    "dataset.biosample",
+                    "dataset.ncbi_datasets",
+                    "knowledge.ncbi_gene",
                 ],
             ),
             (
-                "retrieval-dataset-biosample",
-                "BioSample Retrieval Source",
-                vec!["dataset.biosample"],
+                "resource-embl-ebi",
+                "EMBL-EBI",
+                vec![
+                    "dataset.ena",
+                    "dataset.ena_run",
+                    "dataset.ena_experiment",
+                    "dataset.ena_sample",
+                    "dataset.ena_analysis",
+                    "dataset.ena_assembly",
+                    "dataset.ena_sequence",
+                    "dataset.arrayexpress",
+                    "knowledge.ensembl",
+                ],
             ),
             (
-                "retrieval-dataset-arrayexpress",
-                "ArrayExpress Retrieval Source",
-                vec!["dataset.arrayexpress"],
-            ),
-            (
-                "retrieval-dataset-ncbi-datasets",
-                "NCBI Datasets Retrieval Source",
-                vec!["dataset.ncbi_datasets"],
+                "resource-drugs",
+                "Drug Databases",
+                vec![
+                    "drug.chembl",
+                    "drug.pubchem",
+                    "drug.broad_repurposing_hub",
+                    "drug.openfda",
+                    "drug.clinicaltrials",
+                    "drug.dailymed",
+                ],
             ),
             (
                 "retrieval-dataset-gtex",
-                "GTEx Retrieval Source",
+                "GTEx Retrieval Resource",
                 vec!["dataset.gtex"],
             ),
             (
                 "retrieval-dataset-cbioportal",
-                "cBioPortal Retrieval Source",
+                "cBioPortal Retrieval Resource",
                 vec!["dataset.cbioportal"],
             ),
             (
-                "retrieval-literature-pubmed",
-                "PubMed Retrieval Source",
-                vec!["literature.pubmed"],
-            ),
-            (
                 "retrieval-literature-semantic-scholar",
-                "Semantic Scholar Retrieval Source",
+                "Semantic Scholar Retrieval Resource",
                 vec!["literature.semantic_scholar"],
             ),
             (
-                "retrieval-knowledge-ncbi-gene",
-                "NCBI Gene Retrieval Source",
-                vec!["knowledge.ncbi_gene"],
-            ),
-            (
-                "retrieval-knowledge-ensembl",
-                "Ensembl Retrieval Source",
-                vec!["knowledge.ensembl"],
-            ),
-            (
                 "retrieval-knowledge-uniprot",
-                "UniProt Retrieval Source",
+                "UniProt Retrieval Resource",
                 vec!["knowledge.uniprot"],
             ),
         ];
@@ -2507,10 +5798,9 @@ mod tests {
             assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
 
             let source_path =
-                resolve_marketplace_source_path(&dev_builtin_marketplace_path(), &entry.source)
-                    .unwrap();
+                resolve_marketplace_source_path(&marketplace_path, &entry.source).unwrap();
             let summary = plugin_summary_from_marketplace_entry(
-                &dev_builtin_marketplace_path(),
+                &marketplace_path,
                 &marketplace.name,
                 entry,
                 &PluginConfigFile::default(),
@@ -2523,39 +5813,301 @@ mod tests {
                     .and_then(|interface| interface.display_name.as_deref()),
                 Some(display_name)
             );
+            let mut expected_routes = expected_routes
+                .iter()
+                .map(|route| (*route).to_string())
+                .collect::<Vec<_>>();
+            expected_routes.sort();
             assert_eq!(
                 summary
                     .retrieval
                     .as_ref()
                     .map(|retrieval| {
                         retrieval
-                            .sources
+                            .resources
                             .iter()
                             .map(|source| format!("{}.{}", source.category, source.id))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default(),
                 expected_routes
-                    .iter()
-                    .map(|route| (*route).to_string())
-                    .collect::<Vec<_>>()
             );
 
             let manifest = load_plugin_manifest(&source_path).unwrap();
             let retrieval = manifest.retrieval.expect("retrieval manifest");
             assert!(
-                retrieval
-                    .sources
-                    .iter()
-                    .all(|source| source.replaces_builtin
-                        && source.capabilities
-                            == vec![
-                                "search".to_string(),
-                                "query".to_string(),
-                                "fetch".to_string(),
-                            ]),
-                "{plugin_name} should replace builtins and support search/query/fetch"
+                source_path.join("scripts").is_dir(),
+                "{plugin_name} should package executable retrieval scripts inside the plugin"
+            );
+            assert!(
+                source_path
+                    .parent()
+                    .is_some_and(|parent| parent.join("utils").join("retrieval_http.py").is_file()),
+                "{plugin_name} should share resource utilities from the resources/utils package"
+            );
+            assert!(
+                retrieval.resources.iter().all(|source| source.capabilities
+                    == vec![
+                        "search".to_string(),
+                        "query".to_string(),
+                        "fetch".to_string(),
+                    ]),
+                "{plugin_name} should support search/query/fetch"
             );
         }
+    }
+
+    #[test]
+    fn retrieval_resource_config_exposes_only_explicit_provider_routes() {
+        let source_path = curated_plugin_root("resource-ncbi");
+        let manifest = load_plugin_manifest(&source_path).expect("resource-ncbi manifest");
+        let retrieval = manifest.retrieval.expect("retrieval manifest");
+        let mut config = PluginConfigFile::default();
+        config.plugins.insert(
+            "resource-ncbi@omiga-curated".to_string(),
+            PluginConfigEntry {
+                enabled: true,
+                enabled_retrieval_resources: HashSet::from(["literature.pubmed".to_string()]),
+                disabled_retrieval_resources: HashSet::from(["dataset.geo".to_string()]),
+                ..Default::default()
+            },
+        );
+
+        let summary =
+            plugin_retrieval_summary(Some(&retrieval), "resource-ncbi@omiga-curated", &config)
+                .expect("retrieval summary");
+        let geo = summary
+            .resources
+            .iter()
+            .find(|source| source.category == "dataset" && source.id == "geo")
+            .expect("geo route summary");
+        let pubmed = summary
+            .resources
+            .iter()
+            .find(|source| source.category == "literature" && source.id == "pubmed")
+            .expect("pubmed route summary");
+        assert!(!geo.exposed);
+        assert!(pubmed.exposed);
+
+        let entry = config
+            .plugins
+            .get("resource-ncbi@omiga-curated")
+            .expect("plugin config");
+        let filtered =
+            filter_retrieval_manifest_for_config(retrieval, "resource-ncbi@omiga-curated", entry)
+                .expect("filtered retrieval");
+        assert!(!filtered
+            .resources
+            .iter()
+            .any(|source| source.category == "dataset" && source.id == "geo"));
+        assert!(filtered
+            .resources
+            .iter()
+            .any(|source| source.category == "literature" && source.id == "pubmed"));
+        assert!(filtered
+            .resources
+            .iter()
+            .all(|source| source.default_enabled));
+    }
+
+    #[test]
+    fn legacy_enabled_retrieval_plugin_exposes_all_non_disabled_routes() {
+        let source_path = curated_plugin_root("resource-ncbi");
+        let manifest = load_plugin_manifest(&source_path).expect("resource-ncbi manifest");
+        let retrieval = manifest.retrieval.expect("retrieval manifest");
+        assert!(retrieval
+            .resources
+            .iter()
+            .all(|source| !source.default_enabled));
+
+        let mut config = PluginConfigFile::default();
+        config.plugins.insert(
+            "resource-ncbi@omiga-curated".to_string(),
+            PluginConfigEntry {
+                enabled: true,
+                disabled_retrieval_resources: HashSet::from(["dataset.geo".to_string()]),
+                ..Default::default()
+            },
+        );
+
+        let summary =
+            plugin_retrieval_summary(Some(&retrieval), "resource-ncbi@omiga-curated", &config)
+                .expect("retrieval summary");
+        let enabled_routes = summary
+            .resources
+            .iter()
+            .filter(|source| source.exposed)
+            .map(|source| format!("{}.{}", source.category, source.id))
+            .collect::<HashSet<_>>();
+        assert!(!enabled_routes.contains("dataset.geo"));
+        assert!(enabled_routes.contains("literature.pubmed"));
+        assert!(enabled_routes.contains("dataset.biosample"));
+
+        let entry = config
+            .plugins
+            .get("resource-ncbi@omiga-curated")
+            .expect("plugin config");
+        let filtered =
+            filter_retrieval_manifest_for_config(retrieval, "resource-ncbi@omiga-curated", entry)
+                .expect("filtered retrieval");
+        assert!(!filtered
+            .resources
+            .iter()
+            .any(|source| source.category == "dataset" && source.id == "geo"));
+        assert!(filtered
+            .resources
+            .iter()
+            .any(|source| source.category == "literature" && source.id == "pubmed"));
+        assert!(filtered
+            .resources
+            .iter()
+            .all(|source| source.default_enabled));
+    }
+
+    #[test]
+    fn legacy_retrieval_config_materializes_explicit_resources_before_toggle() {
+        let source_path = curated_plugin_root("resource-ncbi");
+        let manifest = load_plugin_manifest(&source_path).expect("resource-ncbi manifest");
+        let retrieval = manifest.retrieval.expect("retrieval manifest");
+        let mut entry = PluginConfigEntry {
+            enabled: true,
+            disabled_retrieval_resources: HashSet::from(["dataset.geo".to_string()]),
+            ..Default::default()
+        };
+
+        materialize_retrieval_resource_config(&mut entry, &retrieval);
+
+        assert!(entry.retrieval_resources_configured);
+        assert!(!entry.enabled_retrieval_resources.contains("dataset.geo"));
+        assert!(entry
+            .enabled_retrieval_resources
+            .contains("literature.pubmed"));
+        assert!(entry
+            .enabled_retrieval_resources
+            .contains("dataset.biosample"));
+    }
+
+    #[test]
+    fn explicitly_configured_empty_retrieval_resource_set_stays_disabled() {
+        let source_path = curated_plugin_root("resource-ncbi");
+        let manifest = load_plugin_manifest(&source_path).expect("resource-ncbi manifest");
+        let retrieval = manifest.retrieval.expect("retrieval manifest");
+        let entry = PluginConfigEntry {
+            enabled: true,
+            retrieval_resources_configured: true,
+            ..Default::default()
+        };
+
+        assert!(filter_retrieval_manifest_for_config(
+            retrieval,
+            "resource-ncbi@omiga-curated",
+            &entry
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn project_marketplace_exposes_visualization_r_omiga_plugin_and_skill() {
+        let marketplace_path = repo_project_marketplace_path();
+        let marketplace = read_marketplace(&marketplace_path).unwrap();
+        for (plugin_name, category) in [
+            ("visualization-r", "Visualization"),
+            ("transcriptomics", "Analysis"),
+            ("operator-seqtk", "Operator"),
+            ("computer-use", "Automation"),
+            ("omiga-developer-tools", "Tools"),
+            ("ngs-alignment", "Bioinformatics"),
+            ("resource-ncbi", "Retrieval"),
+            ("resource-embl-ebi", "Retrieval"),
+            ("retrieval-dataset-gtex", "Retrieval"),
+            ("retrieval-dataset-cbioportal", "Retrieval"),
+            ("retrieval-literature-semantic-scholar", "Retrieval"),
+            ("retrieval-knowledge-uniprot", "Retrieval"),
+        ] {
+            let entry = marketplace
+                .plugins
+                .iter()
+                .find(|entry| entry.name == plugin_name)
+                .unwrap_or_else(|| panic!("{plugin_name} marketplace entry"));
+            assert_eq!(entry.category.as_deref(), Some(category));
+            assert_eq!(entry.policy.installation, PluginInstallPolicy::Available);
+            assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
+            let source_path = resolve_marketplace_source_path(&marketplace_path, &entry.source)
+                .unwrap_or_else(|_| panic!("{plugin_name} source path"));
+            assert!(
+                source_path.join(".omiga-plugin/plugin.json").is_file(),
+                "{plugin_name} should use an omiga-plugin manifest"
+            );
+        }
+        let entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "visualization-r")
+            .expect("visualization-r marketplace entry");
+        assert_eq!(entry.category.as_deref(), Some("Visualization"));
+        assert_eq!(entry.policy.installation, PluginInstallPolicy::Available);
+        assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
+
+        let detail = read_plugin(&marketplace_path, "visualization-r").expect("plugin detail");
+        assert_eq!(detail.summary.id, "visualization-r@omiga-curated");
+        assert_eq!(
+            detail
+                .summary
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.display_name.as_deref()),
+            Some("R Visualization")
+        );
+        let template_summary = detail
+            .summary
+            .templates
+            .as_ref()
+            .expect("visualization-r template summary");
+        assert_eq!(
+            template_summary.count,
+            template_summary
+                .groups
+                .iter()
+                .map(|group| group.count)
+                .sum::<usize>()
+        );
+        for expected_group in ["scatter", "distribution", "bar", "heatmap", "line"] {
+            assert!(
+                template_summary
+                    .groups
+                    .iter()
+                    .any(|group| group.id == expected_group && group.count > 0),
+                "visualization-r should expose non-empty `{expected_group}` templates"
+            );
+        }
+        let scatter_basic = template_summary
+            .groups
+            .iter()
+            .flat_map(|group| group.templates.iter())
+            .find(|template| template.id == "viz_scatter_basic")
+            .expect("basic scatter template");
+        assert_eq!(scatter_basic.execute["tool"], "template_execute");
+        assert_eq!(
+            scatter_basic.execute["arguments"]["id"],
+            "visualization-r@omiga-curated/template/viz_scatter_basic"
+        );
+        assert!(
+            scatter_basic.execute["arguments"]["inputs"]["table"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("templates/scatter/basic/example.tsv")),
+            "{}",
+            scatter_basic.execute
+        );
+        assert_eq!(
+            scatter_basic.execute["arguments"]["params"]["x_column"],
+            "x_value"
+        );
+        assert!(
+            detail
+                .skills
+                .iter()
+                .any(|skill| skill.name == "visualize-r"),
+            "visualization-r should expose $visualize-r"
+        );
     }
 }

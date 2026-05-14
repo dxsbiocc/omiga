@@ -26,12 +26,16 @@ export {
   type ExecutionStep,
   type ToolUseStepDetail,
   type ToolResultStepDetail,
+  activeTodoStatusKind,
+  mergeActiveTodosWithTiming,
 } from "./activityStore";
 export { useWorkspaceStore } from "./workspaceStore";
 export { useUiStore, type UiState } from "./uiStore";
 export { useLocaleStore, type AppLocale } from "./localeStore";
 export {
+  APP_SKIN_IDS,
   useColorModeStore,
+  type AppSkinId,
   type ColorModePreference,
 } from "./themeStore";
 export type { AccentPresetId } from "../theme/accentPresets";
@@ -45,6 +49,7 @@ export {
 export {
   useChatComposerStore,
   type PermissionMode,
+  type ComputerUseMode,
   type SandboxBackend,
   type ExecutionEnvironment,
   type LocalVenvType,

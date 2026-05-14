@@ -1,0 +1,74 @@
+#!/usr/bin/env Rscript
+# Template: line/survival
+# Purpose: Precomputed Kaplan-Meier style survival curve plot with optional confidence bands and censor marks.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template line/survival
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(time = arg_or(3, "time"), survival = arg_or(4, "survival"), group = arg_or(5, "group"), lower = arg_or(6, "lower"), upper = arg_or(7, "upper"), censor = arg_or(8, "censor")),
+  labels = list(title = arg_or(9, "Survival curve plot")),
+  style = list(base_size = 12)
+)
+delimiter <- arg_or(10, "auto"); width <- as.numeric(arg_or(11, "7")); height <- as.numeric(arg_or(12, "5")); dpi <- as.integer(arg_or(13, "300"))
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$time, config$columns$survival, config$columns$group), "line/survival input")
+  optional_numeric <- c(resolve_optional_column(df, config$columns$lower), resolve_optional_column(df, config$columns$upper), resolve_optional_column(df, config$columns$censor))
+  df <- ensure_numeric_columns(df, c(config$columns$time, config$columns$survival, optional_numeric), "line/survival input")
+  df <- df[order(df[[config$columns$group]], df[[config$columns$time]]), , drop = FALSE]
+  df
+}
+
+make_plot <- function(df, config) {
+  lower_col <- resolve_optional_column(df, config$columns$lower)
+  upper_col <- resolve_optional_column(df, config$columns$upper)
+  censor_col <- resolve_optional_column(df, config$columns$censor)
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[[config$columns$time]], y = .data[[config$columns$survival]], color = .data[[config$columns$group]], group = .data[[config$columns$group]]))
+  if (!is.null(lower_col) && !is.null(upper_col)) {
+    p <- p + ggplot2::geom_ribbon(ggplot2::aes(ymin = .data[[lower_col]], ymax = .data[[upper_col]], fill = .data[[config$columns$group]]), alpha = 0.14, color = NA, show.legend = FALSE)
+  }
+  p <- p +
+    ggplot2::geom_step(linewidth = 0.9) +
+    ggplot2::scale_colour_manual(values = visualization_palette(length(unique(df[[config$columns$group]])))) +
+    ggplot2::scale_fill_manual(values = visualization_palette(length(unique(df[[config$columns$group]])))) +
+    ggplot2::scale_y_continuous(labels = function(x) paste0(round(100 * x), "%"), limits = c(0, 1), expand = ggplot2::expansion(mult = c(0.02, 0.04))) +
+    ggplot2::labs(title = config$labels$title, x = config$columns$time, y = "Survival probability", color = config$columns$group) +
+    theme_visualization(base_size = config$style$base_size)
+  if (!is.null(censor_col)) {
+    censor_df <- df[!is.na(df[[censor_col]]) & df[[censor_col]] > 0, , drop = FALSE]
+    if (nrow(censor_df) > 0) p <- p + ggplot2::geom_point(data = censor_df, shape = 3, size = 2.2, stroke = 0.8, show.legend = FALSE)
+  }
+  p
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows", "groups"), value = c("line/survival", nrow(plot_df), length(unique(plot_df[[config$columns$group]])))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "line/survival", rows = nrow(plot_df), groups = length(unique(plot_df[[config$columns$group]]))))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

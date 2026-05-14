@@ -1,0 +1,176 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_distribution_vertical_raincloud
+  version: 0.1.0
+  name: Vertical Raincloud Plot
+  description: Vertical raincloud distribution plot with half-density clouds, compact boxplots, and jittered samples, migrated from OmicsAgent boxplot/raincloud_vertical.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - distribution
+    - raincloud
+    - vertical
+    - jitter
+    - table
+classification:
+  category: visualization/distribution
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - distribution
+    - raincloud
+    - vertical
+    - jitter
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with group and numeric value columns. See example.tsv converted from OmicsAgent data.json.
+  params:
+    group_column:
+      kind: string
+      default: gene
+    value_column:
+      kind: string
+      default: expression
+    title:
+      kind: string
+      default: ""
+    x_label:
+      kind: string
+      default: ""
+    y_label:
+      kind: string
+      default: Gene expression level
+    group_order:
+      kind: string
+      default: auto
+      description: Comma-separated group order, or auto.
+    palette:
+      kind: string
+      default: "#009392,#39b185,#9ccb86,#e9e29c,#eeb479,#e88471,#cf597e"
+      description: Comma-separated group colors; interpolated when there are more groups.
+    point_shapes:
+      kind: string
+      default: "21,22,23,24"
+      description: Comma-separated ggplot2 point shape integers, recycled when needed.
+    density_width:
+      kind: number
+      default: 0.42
+      description: Maximum horizontal width of the half-density cloud.
+    density_nudge:
+      kind: number
+      default: 0.18
+      description: Positive x-offset for the half-density cloud.
+    box_width:
+      kind: number
+      default: 0.18
+    box_nudge:
+      kind: number
+      default: -0.12
+    jitter_width:
+      kind: number
+      default: 0.08
+    jitter_nudge:
+      kind: number
+      default: -0.16
+    point_size:
+      kind: number
+      default: 2
+    point_alpha:
+      kind: number
+      default: 0.82
+    base_size:
+      kind: number
+      default: 12
+    random_seed:
+      kind: integer
+      default: 7
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 6
+    height:
+      kind: number
+      default: 5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - raincloud_vertical
+  - vertical_raincloud
+  - upright_raincloud
+  - raincloud_boxplot
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.group_column}
+    - ${params.value_column}
+    - ${params.title}
+    - ${params.x_label}
+    - ${params.y_label}
+    - ${params.group_order}
+    - ${params.palette}
+    - ${params.point_shapes}
+    - ${params.density_width}
+    - ${params.density_nudge}
+    - ${params.box_width}
+    - ${params.box_nudge}
+    - ${params.jitter_width}
+    - ${params.jitter_nudge}
+    - ${params.point_size}
+    - ${params.point_alpha}
+    - ${params.base_size}
+    - ${params.random_seed}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

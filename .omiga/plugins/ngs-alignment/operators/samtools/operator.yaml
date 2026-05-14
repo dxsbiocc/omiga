@@ -1,0 +1,99 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: samtools_alignment_utility
+  version: 0.1.0
+  name: Samtools Utility
+  description: Run common standalone samtools SAM/BAM/CRAM utilities such as view, sort, index, flagstat, stats, idxstats, and quickcheck.
+  tags: [bioinformatics, ngs, samtools, sam, bam, cram, post-alignment, qc]
+interface:
+  inputs:
+    input:
+      kind: file
+      required: true
+      description: Input SAM/BAM/CRAM file for view/sort/index/QC operations.
+    reference:
+      kind: file
+      required: false
+      description: Optional reference FASTA for CRAM view/sort operations.
+  params:
+    operation:
+      kind: enum
+      enum: [view, sort, index, flagstat, stats, idxstats, quickcheck]
+      default: flagstat
+      description: Samtools subcommand to run. Use alignment operators for fused align-sort-index pipelines.
+    threads:
+      kind: integer
+      default: 4
+      minimum: 1
+      maximum: 128
+    output_prefix:
+      kind: string
+      default: samtools
+      non_empty: true
+      description: Prefix for files written under the run output directory.
+    output_format:
+      kind: enum
+      enum: [auto, sam, bam, cram]
+      default: auto
+      description: Output format for view/sort. auto defaults to BAM for view and sort.
+    sort_order:
+      kind: enum
+      enum: [coordinate, queryname]
+      default: coordinate
+      description: Sort order for operation=sort.
+    region:
+      kind: string
+      default: ""
+      description: Optional region passed to samtools view.
+    extra:
+      kind: string
+      default: ""
+      description: Additional samtools arguments for the selected operation, shell-split with shlex.
+  outputs:
+    result:
+      kind: file
+      glob: samtools-*
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  envRef: ngs-samtools
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+  resourceProfile:
+    tier: heavy
+    localPolicy: warn
+    minCpu: 2
+    recommendedCpu: 8
+    minMemoryGb: 8
+    recommendedMemoryGb: 32
+    diskGb: 100
+    notes:
+      - Large BAM/CRAM sort/view/index operations can consume significant disk and RAM.
+      - Use SSH/server/HPC for production BAMs.
+resources:
+  cpu:
+    default: 4
+    exposed: true
+  walltime:
+    default: 3600s
+    exposed: true
+execution:
+  argv:
+    - python3
+    - ./scripts/ngs_alignment.py
+    - samtools
+    - ${params.operation}
+    - ${inputs.input}
+    - ${outdir}
+    - ${params.output_prefix}
+    - ${params.threads}
+    - ${params.output_format}
+    - ${params.sort_order}
+    - ${params.region}
+    - ${inputs.reference}
+    - ${params.extra}

@@ -1,0 +1,228 @@
+#!/usr/bin/env Rscript
+# Template: bar/radial-groups
+# Purpose: Grouped radial/polar bar chart with outer labels and inner group bands.
+#
+# Migration note:
+#   Migrates OmicsAgent backend/scripts/visual/bar/radial_groups from JSON
+#   ggplot DSL to direct, editable R/ggplot2. Source data.json is bundled as
+#   example.tsv.
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+parse_auto_number <- function(raw, values, multiplier = 1.05) {
+  if (is.null(raw) || !nzchar(raw) || tolower(raw) == "auto") return(max(values, na.rm = TRUE) * multiplier)
+  parsed <- suppressWarnings(as.numeric(raw))
+  if (is.na(parsed)) max(values, na.rm = TRUE) * multiplier else parsed
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    label = arg_or(3, "gene"),
+    group = arg_or(4, "group"),
+    value = arg_or(5, "count")
+  ),
+  labels = list(
+    title = arg_or(6, ""),
+    x = "",
+    y = ""
+  ),
+  group_order = parse_csv_arg(7, "auto"),
+  style = list(
+    palette = parse_csv_arg(8, "#009392,#39b185,#9ccb86,#e9e29c,#eeb479,#e88471,#cf597e"),
+    inner_radius = parse_number_arg(9, -100),
+    max_value_raw = arg_or(10, "120"),
+    label_offset = parse_number_arg(11, 18),
+    group_label_radius = parse_number_arg(12, -45),
+    group_band_min = parse_number_arg(13, -7),
+    group_band_max = parse_number_arg(14, -3),
+    spacer_rows = parse_integer_arg(15, 1),
+    bar_width = parse_number_arg(16, 0.82),
+    label_size = parse_number_arg(17, 3.2),
+    group_label_size = parse_number_arg(18, 4.2),
+    base_size = parse_number_arg(19, 12)
+  )
+)
+delimiter <- arg_or(20, "auto")
+width <- parse_number_arg(21, 10)
+height <- parse_number_arg(22, 9)
+dpi <- parse_integer_arg(23, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- c("#009392", "#39b185", "#9ccb86", "#e9e29c", "#eeb479", "#e88471", "#cf597e")
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+ordered_values <- function(values, preferred_order) {
+  values <- unique(as.character(values))
+  if (length(preferred_order) == 0) return(values)
+  ordered <- preferred_order[preferred_order %in% values]
+  c(ordered, setdiff(values, ordered))
+}
+
+prepare_data <- function(df, config) {
+  required <- c(config$columns$label, config$columns$group, config$columns$value)
+  validate_columns(df, required, "bar/radial-groups input")
+  df <- ensure_numeric_columns(df, config$columns$value, "bar/radial-groups input")
+  df$.label_raw <- as.character(df[[config$columns$label]])
+  df$.group_raw <- as.character(df[[config$columns$group]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.label_raw) & nzchar(df$.group_raw), , drop = FALSE]
+  if (!nrow(df)) stop("bar/radial-groups input has no plottable rows.", call. = FALSE)
+
+  groups <- ordered_values(df$.group_raw, config$group_order)
+  df <- df[, c(".label_raw", ".group_raw", ".value"), drop = FALSE]
+  rows <- list()
+  for (group_name in groups) {
+    part <- df[df$.group_raw == group_name, , drop = FALSE]
+    if (!nrow(part)) next
+    part <- part[order(part$.label_raw), , drop = FALSE]
+    rows[[length(rows) + 1L]] <- part
+    spacer_n <- max(0L, config$style$spacer_rows)
+    if (spacer_n > 0L) {
+      rows[[length(rows) + 1L]] <- data.frame(
+        .label_raw = paste0(".space_", group_name, "_", seq_len(spacer_n)),
+        .group_raw = group_name,
+        .value = NA_real_,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  plot_df <- do.call(rbind, rows)
+  plot_df$.group <- factor(plot_df$.group_raw, levels = groups)
+  plot_df$.index <- seq_len(nrow(plot_df))
+  plot_df$.is_spacer <- !is.finite(plot_df$.value)
+  n <- nrow(plot_df)
+  plot_df$.angle <- 90 - 360 * (plot_df$.index - 0.5) / n
+  plot_df$.label_angle <- ifelse(plot_df$.angle < -90, plot_df$.angle + 180, plot_df$.angle)
+  plot_df$.label_hjust <- ifelse(plot_df$.angle < -90, 1, 0)
+  plot_df
+}
+
+group_blocks <- function(df, config) {
+  out <- do.call(rbind, lapply(levels(df$.group), function(group_name) {
+    part <- df[df$.group_raw == group_name & !df$.is_spacer, , drop = FALSE]
+    if (!nrow(part)) return(NULL)
+    data.frame(
+      .group_raw = group_name,
+      .group = factor(group_name, levels = levels(df$.group)),
+      .start = min(part$.index) - 0.45,
+      .end = max(part$.index) + 0.45,
+      .mid = mean(range(part$.index)),
+      stringsAsFactors = FALSE
+    )
+  }))
+  out$.angle <- 90 - 360 * (out$.mid - 0.5) / nrow(df)
+  out$.label_angle <- ifelse(out$.angle < -90, out$.angle + 180, out$.angle)
+  out
+}
+
+radial_groups_theme <- function(config) {
+  ggplot2::theme_minimal(base_size = config$style$base_size) +
+    ggplot2::theme(
+      axis.text = ggplot2::element_blank(),
+      axis.ticks = ggplot2::element_blank(),
+      axis.title = ggplot2::element_blank(),
+      axis.line = ggplot2::element_blank(),
+      panel.grid = ggplot2::element_blank(),
+      legend.position = "none",
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold")
+    )
+}
+
+make_plot <- function(df, config) {
+  label_df <- df[!df$.is_spacer, , drop = FALSE]
+  blocks <- group_blocks(df, config)
+  axis_max <- parse_auto_number(config$style$max_value_raw, label_df$.value, multiplier = 1.05)
+  axis_min <- min(config$style$inner_radius, config$style$group_label_radius, config$style$group_band_min, -1)
+  palette <- extend_palette(levels(df$.group), config$style$palette)
+
+  ggplot2::ggplot(df, ggplot2::aes(x = .index, y = .value, fill = .group)) +
+    ggplot2::geom_rect(
+      data = blocks,
+      ggplot2::aes(xmin = .start, xmax = .end, ymin = config$style$group_band_min, ymax = config$style$group_band_max, fill = .group),
+      inherit.aes = FALSE,
+      color = "grey45",
+      linewidth = 0.25,
+      alpha = 0.7
+    ) +
+    ggplot2::geom_col(width = config$style$bar_width, color = "white", linewidth = 0.2, show.legend = FALSE, na.rm = TRUE) +
+    ggplot2::geom_text(
+      data = label_df,
+      ggplot2::aes(x = .index, y = .value + config$style$label_offset, label = .label_raw, angle = .label_angle, hjust = .label_hjust),
+      inherit.aes = FALSE,
+      size = config$style$label_size,
+      alpha = 0.72,
+      color = "#111827"
+    ) +
+    ggplot2::geom_text(
+      data = blocks,
+      ggplot2::aes(x = .mid, y = config$style$group_label_radius, label = .group_raw, angle = .label_angle),
+      inherit.aes = FALSE,
+      size = config$style$group_label_size,
+      fontface = "bold",
+      color = "grey35"
+    ) +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_y_continuous(limits = c(axis_min, axis_max), expand = c(0, 0)) +
+    ggplot2::coord_polar(clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    radial_groups_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  label_df <- plot_df[!plot_df$.is_spacer, , drop = FALSE]
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "groups", "max_value"),
+      value = c("bar/radial-groups", nrow(label_df), paste(levels(plot_df$.group), collapse = ","), max(label_df$.value, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/radial-groups", rows = nrow(label_df), groups = paste(levels(plot_df$.group), collapse = ","), max_value = max(label_df$.value, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

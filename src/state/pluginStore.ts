@@ -22,7 +22,7 @@ export interface PluginInterface {
   screenshots: string[];
 }
 
-export interface PluginRetrievalSourceSummary {
+export interface PluginRetrievalResourceSummary {
   id: string;
   category: string;
   label: string;
@@ -33,11 +33,129 @@ export interface PluginRetrievalSourceSummary {
   optionalCredentialRefs: string[];
   defaultEnabled: boolean;
   replacesBuiltin: boolean;
+  exposed?: boolean;
 }
 
 export interface PluginRetrievalSummary {
   protocolVersion: number;
-  sources: PluginRetrievalSourceSummary[];
+  resources: PluginRetrievalResourceSummary[];
+}
+
+export interface PluginTemplateItemSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  tags: string[];
+  exposed?: boolean;
+  execute?: unknown;
+}
+
+export interface PluginTemplateGroupSummary {
+  id: string;
+  title: string;
+  count: number;
+  templates: PluginTemplateItemSummary[];
+}
+
+export interface PluginTemplateSummary {
+  count: number;
+  groups: PluginTemplateGroupSummary[];
+}
+
+export interface PluginEnvironmentSummary {
+  id: string;
+  version: string;
+  canonicalId: string;
+  name?: string | null;
+  description?: string | null;
+  manifestPath: string;
+  runtimeType: string;
+  runtimeFile?: string | null;
+  runtimeFileKind?: string | null;
+  installHint?: string | null;
+  checkCommand: string[];
+  availabilityStatus: string;
+  availabilityManager?: string | null;
+  availabilityMessage: string;
+  exposed?: boolean;
+}
+
+export interface EnvironmentCheckResult {
+  status: string;
+  command: string[];
+  exitCode?: number | null;
+  stdout: string;
+  stderr: string;
+  error?: string | null;
+  durationMs: number;
+}
+
+export interface PluginEnvironmentCheckResult {
+  pluginId: string;
+  environmentId: string;
+  canonicalId: string;
+  installed: boolean;
+  pluginRoot: string;
+  check: EnvironmentCheckResult;
+}
+
+export interface PluginSyncSummary {
+  state: "upToDate" | "updateAvailable" | "localModified" | "conflictRisk" | "unknown" | string;
+  label: string;
+  message: string;
+  sourceDigest?: string | null;
+  installedDigest?: string | null;
+  installedFromDigest?: string | null;
+  changedCount: number;
+  localModifiedCount: number;
+  conflictCount: number;
+}
+
+export interface PluginSyncResult {
+  pluginId: string;
+  status: string;
+  installedPath: string;
+  updated: string[];
+  added: string[];
+  removed: string[];
+  keptLocal: string[];
+  conflicts: string[];
+  message: string;
+}
+
+export interface PluginChangelogEntry {
+  version?: string | null;
+  date?: string | null;
+  title: string;
+  body: string;
+}
+
+export interface PluginChangelogSummary {
+  path: string;
+  latestVersion?: string | null;
+  entries: PluginChangelogEntry[];
+}
+
+export interface MarketplaceRemote {
+  url: string;
+  provider?: string | null;
+  repositoryUrl?: string | null;
+  changelogUrl?: string | null;
+}
+
+export interface MarketplaceRemoteCheckResult {
+  name: string;
+  path: string;
+  remote: MarketplaceRemote;
+  state: "upToDate" | "updateAvailable" | "error" | string;
+  label: string;
+  message: string;
+  localDigest?: string | null;
+  remoteDigest?: string | null;
+  remotePluginCount?: number | null;
+  changedPlugins: string[];
+  checkedAt: string;
 }
 
 export interface PluginSummary {
@@ -53,12 +171,18 @@ export interface PluginSummary {
   authPolicy: PluginAuthPolicy;
   interface?: PluginInterface | null;
   retrieval?: PluginRetrievalSummary | null;
+  operators?: OperatorSummary[];
+  templates?: PluginTemplateSummary | null;
+  environments?: PluginEnvironmentSummary[];
+  sync?: PluginSyncSummary | null;
+  changelog?: PluginChangelogSummary | null;
 }
 
 export interface PluginMarketplaceEntry {
   name: string;
   path: string;
   interface?: { displayName?: string | null } | null;
+  remote?: MarketplaceRemote | null;
   plugins: PluginSummary[];
 }
 
@@ -73,7 +197,7 @@ export type PluginRetrievalLifecycleState = "healthy" | "degraded" | "quarantine
 export interface PluginRetrievalRouteStatus {
   pluginId: string;
   category: string;
-  sourceId: string;
+  resourceId: string;
   route: string;
   state: PluginRetrievalLifecycleState;
   quarantined: boolean;
@@ -85,7 +209,7 @@ export interface PluginRetrievalRouteStatus {
 export interface PluginProcessPoolRouteStatus {
   pluginId: string;
   category: string;
-  sourceId: string;
+  resourceId: string;
   route: string;
   pluginRoot: string;
   remainingMs: number;
@@ -107,6 +231,17 @@ export interface OperatorSummary {
   enabledAliases: string[];
   exposed: boolean;
   unavailableReason?: string | null;
+}
+
+export interface OperatorRuntimeResourceProfile {
+  tier?: string | null;
+  localPolicy?: string | null;
+  minCpu?: number | null;
+  recommendedCpu?: number | null;
+  minMemoryGb?: number | null;
+  recommendedMemoryGb?: number | null;
+  diskGb?: number | null;
+  notes?: string[];
 }
 
 export interface OperatorFieldSpec {
@@ -199,6 +334,7 @@ export interface OperatorRunSummary {
   runDir: string;
   updatedAt?: string | null;
   provenancePath?: string | null;
+  exportDir?: string | null;
   outputCount: number;
   structuredOutputCount?: number;
   errorMessage?: string | null;
@@ -307,6 +443,7 @@ export interface PluginDiagnosticsPayload {
     installed: boolean;
     enabled: boolean;
     retrieval?: PluginRetrievalSummary | null;
+    environments?: PluginEnvironmentSummary[];
   };
   retrievalRoutes: PluginRetrievalRouteStatus[];
   pooledProcesses: PluginProcessPoolRouteStatus[];
@@ -349,6 +486,7 @@ interface PluginState {
   operatorRuns: OperatorRunSummary[];
   retrievalStatuses: PluginRetrievalRouteStatus[];
   processPoolStatuses: PluginProcessPoolRouteStatus[];
+  remoteMarketplaceChecks: MarketplaceRemoteCheckResult[];
   isLoading: boolean;
   isMutating: boolean;
   error: string | null;
@@ -380,6 +518,12 @@ interface PluginState {
   loadProcessPoolStatuses: (projectRoot?: string) => Promise<void>;
   clearProcessPool: (projectRoot?: string) => Promise<number>;
   installPlugin: (plugin: PluginSummary, projectRoot?: string) => Promise<PluginInstallResult>;
+  syncPlugin: (
+    plugin: PluginSummary,
+    projectRoot?: string,
+    options?: { force?: boolean },
+  ) => Promise<PluginSyncResult>;
+  checkRemoteMarketplaces: (projectRoot?: string) => Promise<MarketplaceRemoteCheckResult[]>;
   uninstallPlugin: (pluginId: string, projectRoot?: string) => Promise<void>;
   setPluginEnabled: (pluginId: string, enabled: boolean, projectRoot?: string) => Promise<void>;
   setOperatorEnabled: (
@@ -387,6 +531,30 @@ interface PluginState {
     projectRoot?: string,
     surface?: OperatorExecutionSurfaceArgs,
   ) => Promise<void>;
+  setTemplateEnabled: (
+    pluginId: string,
+    templateId: string,
+    enabled: boolean,
+    projectRoot?: string,
+  ) => Promise<void>;
+  setRetrievalResourceEnabled: (
+    pluginId: string,
+    category: string,
+    resourceId: string,
+    enabled: boolean,
+    projectRoot?: string,
+  ) => Promise<void>;
+  setEnvironmentEnabled: (
+    pluginId: string,
+    environmentId: string,
+    enabled: boolean,
+    projectRoot?: string,
+  ) => Promise<void>;
+  checkPluginEnvironment: (
+    plugin: PluginSummary,
+    envRef: string,
+    projectRoot?: string,
+  ) => Promise<PluginEnvironmentCheckResult>;
   runOperator: (
     alias: string,
     invocation: OperatorInvocationArguments,
@@ -511,6 +679,105 @@ export function updateOperatorEnabledInCatalog(
   return changed ? next : operators;
 }
 
+export function updateTemplateEnabledInMarketplaces(
+  marketplaces: PluginMarketplaceEntry[],
+  pluginId: string,
+  templateId: string,
+  exposed: boolean,
+): PluginMarketplaceEntry[] {
+  let changed = false;
+  const next = marketplaces.map((marketplace) => {
+    let marketplaceChanged = false;
+    const plugins = marketplace.plugins.map((plugin) => {
+      if (plugin.id !== pluginId || !plugin.templates?.groups.length) return plugin;
+      const groups = plugin.templates.groups.map((group) => {
+        let groupChanged = false;
+        const templates = group.templates.map((template) => {
+          if (template.id !== templateId || template.exposed === exposed) return template;
+          changed = true;
+          groupChanged = true;
+          marketplaceChanged = true;
+          return { ...template, exposed };
+        });
+        return groupChanged ? { ...group, templates } : group;
+      });
+      return marketplaceChanged
+        ? { ...plugin, templates: { ...plugin.templates, groups } }
+        : plugin;
+    });
+    return marketplaceChanged ? { ...marketplace, plugins } : marketplace;
+  });
+  return changed ? next : marketplaces;
+}
+
+export function updateRetrievalResourceEnabledInMarketplaces(
+  marketplaces: PluginMarketplaceEntry[],
+  pluginId: string,
+  category: string,
+  resourceId: string,
+  exposed: boolean,
+): PluginMarketplaceEntry[] {
+  let changed = false;
+  const normalizedCategory = category.trim().toLowerCase();
+  const normalizedResourceId = resourceId.trim().toLowerCase().replace(/-/g, "_");
+  const next = marketplaces.map((marketplace) => {
+    let marketplaceChanged = false;
+    const plugins = marketplace.plugins.map((plugin) => {
+      if (plugin.id !== pluginId || !plugin.retrieval?.resources.length) return plugin;
+      const resources = plugin.retrieval.resources.map((resource) => {
+        if (
+          resource.category.trim().toLowerCase() !== normalizedCategory ||
+          resource.id.trim().toLowerCase().replace(/-/g, "_") !== normalizedResourceId ||
+          resource.exposed === exposed
+        ) {
+          return resource;
+        }
+        changed = true;
+        marketplaceChanged = true;
+        return { ...resource, exposed };
+      });
+      return marketplaceChanged
+        ? { ...plugin, retrieval: { ...plugin.retrieval, resources } }
+        : plugin;
+    });
+    return marketplaceChanged ? { ...marketplace, plugins } : marketplace;
+  });
+  return changed ? next : marketplaces;
+}
+
+export function updateEnvironmentEnabledInMarketplaces(
+  marketplaces: PluginMarketplaceEntry[],
+  pluginId: string,
+  environmentId: string,
+  exposed: boolean,
+): PluginMarketplaceEntry[] {
+  let changed = false;
+  const normalizedEnvironmentId = environmentId.trim().toLowerCase().replace(/-/g, "_");
+  const next = marketplaces.map((marketplace) => {
+    let marketplaceChanged = false;
+    const plugins = marketplace.plugins.map((plugin) => {
+      if (plugin.id !== pluginId || !plugin.environments?.length) return plugin;
+      let pluginChanged = false;
+      const environments = plugin.environments.map((environment) => {
+        if (
+          environment.id.trim().toLowerCase().replace(/-/g, "_") !== normalizedEnvironmentId ||
+          environment.exposed === exposed
+        ) {
+          return environment;
+        }
+        changed = true;
+        pluginChanged = true;
+        return { ...environment, exposed };
+      });
+      if (!pluginChanged) return plugin;
+      marketplaceChanged = true;
+      return { ...plugin, environments };
+    });
+    return marketplaceChanged ? { ...marketplace, plugins } : marketplace;
+  });
+  return changed ? next : marketplaces;
+}
+
 export function buildPluginDiagnostics(
   plugin: PluginSummary,
   retrievalRoutes: PluginRetrievalRouteStatus[] = [],
@@ -527,6 +794,7 @@ export function buildPluginDiagnostics(
       installed: plugin.installed,
       enabled: plugin.enabled,
       retrieval: plugin.retrieval,
+      environments: plugin.environments ?? [],
     },
     retrievalRoutes,
     pooledProcesses,
@@ -547,7 +815,7 @@ export function buildRetrievalRuntimeDiagnostics(
 ): string {
   const retrievalPluginIds = new Set(
     plugins
-      .filter((plugin) => Boolean(plugin.retrieval?.sources.length))
+      .filter((plugin) => Boolean(plugin.retrieval?.resources.length))
       .map((plugin) => plugin.id),
   );
   for (const route of retrievalRoutes) retrievalPluginIds.add(route.pluginId);
@@ -577,7 +845,7 @@ export function buildRetrievalRuntimeDiagnostics(
       installedPath: plugin.installedPath,
       installed: plugin.installed,
       enabled: plugin.enabled,
-      declaredRouteCount: plugin.retrieval?.sources.length ?? 0,
+      declaredRouteCount: plugin.retrieval?.resources.length ?? 0,
     }));
 
   const payload: RetrievalRuntimeDiagnosticsPayload = {
@@ -677,6 +945,7 @@ export function summarizeOperatorRunResult(result: Record<string, unknown>): Ope
     smokeTestName: stringField(runContext.smokeTestName),
     runDir,
     provenancePath: stringField(result.provenancePath),
+    exportDir: stringField(result.exportDir),
     outputCount: outputArtifactCount(result.outputs),
     structuredOutputCount: structuredOutputCount(result.structuredOutputs),
     errorMessage: stringField(error.message),
@@ -700,6 +969,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   operatorRuns: [],
   retrievalStatuses: [],
   processPoolStatuses: [],
+  remoteMarketplaceChecks: [],
   isLoading: false,
   isMutating: false,
   error: null,
@@ -913,7 +1183,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         ),
       });
       const refreshes: Array<Promise<void>> = [];
-      if (plugin.retrieval?.sources.length) {
+      if (plugin.retrieval?.resources.length) {
         refreshes.push(get().loadRetrievalStatuses(projectRoot));
         refreshes.push(get().loadProcessPoolStatuses(projectRoot));
       }
@@ -923,6 +1193,51 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     } catch (e) {
       const error = extractErrorMessage(e);
       set({ marketplaces: previousMarketplaces, error });
+      throw new Error(error);
+    }
+  },
+
+  syncPlugin: async (
+    plugin: PluginSummary,
+    projectRoot?: string,
+    options?: { force?: boolean },
+  ) => {
+    set({ isMutating: true, error: null });
+    try {
+      const result = await invoke<PluginSyncResult>("sync_omiga_plugin", {
+        pluginId: plugin.id,
+        marketplacePath: plugin.marketplacePath,
+        pluginName: plugin.name,
+        force: options?.force ?? false,
+        projectRoot,
+      });
+      await get().loadPlugins(projectRoot);
+      await get().loadOperators();
+      if (plugin.retrieval?.resources.length) {
+        await get().loadRetrievalStatuses(projectRoot);
+        await get().loadProcessPoolStatuses(projectRoot);
+      }
+      set({ isMutating: false });
+      return result;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
+
+  checkRemoteMarketplaces: async (projectRoot?: string) => {
+    set({ isMutating: true, error: null });
+    try {
+      const result = await invoke<MarketplaceRemoteCheckResult[]>(
+        "check_omiga_remote_plugin_marketplaces",
+        { projectRoot },
+      );
+      set({ remoteMarketplaceChecks: result, isMutating: false });
+      return result;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
       throw new Error(error);
     }
   },
@@ -975,6 +1290,122 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     } catch (e) {
       const error = extractErrorMessage(e);
       set({ operators: previousOperators, error });
+      throw new Error(error);
+    }
+  },
+
+  setTemplateEnabled: async (
+    pluginId: string,
+    templateId: string,
+    enabled: boolean,
+    projectRoot?: string,
+  ) => {
+    const previousMarketplaces = get().marketplaces;
+    set({
+      marketplaces: updateTemplateEnabledInMarketplaces(
+        previousMarketplaces,
+        pluginId,
+        templateId,
+        enabled,
+      ),
+      error: null,
+    });
+    try {
+      await invoke("set_omiga_template_enabled", {
+        pluginId,
+        templateId,
+        enabled,
+        projectRoot,
+      });
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ marketplaces: previousMarketplaces, error });
+      throw new Error(error);
+    }
+  },
+
+  setRetrievalResourceEnabled: async (
+    pluginId: string,
+    category: string,
+    resourceId: string,
+    enabled: boolean,
+    projectRoot?: string,
+  ) => {
+    const previousMarketplaces = get().marketplaces;
+    set({
+      marketplaces: updateRetrievalResourceEnabledInMarketplaces(
+        previousMarketplaces,
+        pluginId,
+        category,
+        resourceId,
+        enabled,
+      ),
+      error: null,
+    });
+    try {
+      await invoke("set_omiga_retrieval_resource_enabled", {
+        pluginId,
+        category,
+        resourceId,
+        enabled,
+        projectRoot,
+      });
+      await get().loadRetrievalStatuses(projectRoot);
+      await get().loadProcessPoolStatuses(projectRoot);
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ marketplaces: previousMarketplaces, error });
+      throw new Error(error);
+    }
+  },
+
+  setEnvironmentEnabled: async (
+    pluginId: string,
+    environmentId: string,
+    enabled: boolean,
+    projectRoot?: string,
+  ) => {
+    const previousMarketplaces = get().marketplaces;
+    set({
+      marketplaces: updateEnvironmentEnabledInMarketplaces(
+        previousMarketplaces,
+        pluginId,
+        environmentId,
+        enabled,
+      ),
+      error: null,
+    });
+    try {
+      await invoke("set_omiga_environment_enabled", {
+        pluginId,
+        environmentId,
+        enabled,
+        projectRoot,
+      });
+      await get().loadPlugins(projectRoot);
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ marketplaces: previousMarketplaces, error });
+      throw new Error(error);
+    }
+  },
+
+  checkPluginEnvironment: async (
+    plugin: PluginSummary,
+    envRef: string,
+    projectRoot?: string,
+  ) => {
+    try {
+      return await invoke<PluginEnvironmentCheckResult>("check_omiga_plugin_environment", {
+        pluginId: plugin.id,
+        marketplacePath: plugin.marketplacePath,
+        pluginName: plugin.name,
+        envRef,
+        projectRoot,
+      });
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ error });
       throw new Error(error);
     }
   },

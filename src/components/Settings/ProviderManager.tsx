@@ -53,7 +53,11 @@ type ProviderInfo = {
   placeholder: string;
   docsUrl: string;
   modelHelper?: string;
+  defaultContextWindowTokens?: number;
+  modelContextWindowTokens?: Record<string, number>;
 };
+
+const FALLBACK_CONTEXT_WINDOW_TOKENS = 131_072;
 
 const PROVIDER_INFO: Record<string, ProviderInfo> = {
   anthropic: {
@@ -69,6 +73,7 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     ],
     placeholder: "sk-ant-api03-...",
     docsUrl: "https://console.anthropic.com/settings/keys",
+    defaultContextWindowTokens: 200_000,
   },
   openai: {
     name: "OpenAI (GPT)",
@@ -76,6 +81,7 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1", "o1-mini", "o3", "o3-mini", "o4-mini"],
     placeholder: "sk-...",
     docsUrl: "https://platform.openai.com/api-keys",
+    defaultContextWindowTokens: 131_072,
   },
   azure: {
     name: "Azure OpenAI",
@@ -83,6 +89,7 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     models: ["gpt-4", "gpt-4o", "gpt-4-turbo", "gpt-35-turbo"],
     placeholder: "https://{resource}.openai.azure.com/",
     docsUrl: "https://portal.azure.com/",
+    defaultContextWindowTokens: 131_072,
   },
   google: {
     name: "Google (Gemini)",
@@ -96,6 +103,7 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     ],
     placeholder: "AIzaSy...",
     docsUrl: "https://aistudio.google.com/app/apikey",
+    defaultContextWindowTokens: 128_000,
   },
   minimax: {
     name: "MiniMax",
@@ -103,6 +111,7 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     models: ["abab6.5-chat", "abab6.5s-chat", "abab5.5-chat"],
     placeholder: "Enter MiniMax API Key",
     docsUrl: "https://www.minimaxi.com/user-center/basic-information/interface-key",
+    defaultContextWindowTokens: 128_000,
   },
   alibaba: {
     name: "Alibaba (通义千问/Qwen)",
@@ -110,6 +119,7 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     models: ["qwen-max", "qwen-plus", "qwen-turbo", "qwen-long", "qwen3-235b-a22b"],
     placeholder: "sk-...",
     docsUrl: "https://dashscope.console.aliyun.com/apiKey",
+    defaultContextWindowTokens: 128_000,
   },
   deepseek: {
     name: "DeepSeek",
@@ -117,6 +127,11 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     models: ["deepseek-v4-flash", "deepseek-v4-pro"],
     placeholder: "sk-...",
     docsUrl: "https://platform.deepseek.com/api_keys",
+    defaultContextWindowTokens: 1_000_000,
+    modelContextWindowTokens: {
+      "deepseek-v4-flash": 1_000_000,
+      "deepseek-v4-pro": 1_000_000,
+    },
     modelHelper:
       "推荐模型：deepseek-v4-flash（快速，支持思考模式）或 deepseek-v4-pro（高性能，支持思考模式）。" +
       "旧模型 deepseek-chat / deepseek-reasoner 已于 2026/07/24 弃用。",
@@ -127,6 +142,7 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     models: ["glm-4", "glm-4-flash", "glm-4-air", "glm-4-airx", "glm-z1"],
     placeholder: "Enter API Key",
     docsUrl: "https://open.bigmodel.cn/usercenter/apikey",
+    defaultContextWindowTokens: 128_000,
   },
   moonshot: {
     name: "Moonshot (Kimi/月之暗面)",
@@ -134,6 +150,12 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     models: ["kimi-k2-0905-preview", "kimi-k2.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
     placeholder: "sk-...",
     docsUrl: "https://platform.moonshot.ai/docs/overview",
+    defaultContextWindowTokens: 128_000,
+    modelContextWindowTokens: {
+      "moonshot-v1-8k": 8_192,
+      "moonshot-v1-32k": 32_768,
+      "moonshot-v1-128k": 131_072,
+    },
     modelHelper:
       "Do not use 'Kimi For Coding' / coding-only model ids or the coding API base — they only work in Kimi CLI, Claude Code, Roo Code, etc. Use general models: kimi-k2-0905-preview, kimi-k2.5, or moonshot-v1-8k.",
   },
@@ -143,8 +165,31 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     models: [],
     placeholder: "Enter API Key",
     docsUrl: "",
+    defaultContextWindowTokens: 131_072,
   },
 };
+
+function defaultContextWindowTokens(providerType: string, model: string): number {
+  const info = PROVIDER_INFO[providerType];
+  const exact = info?.modelContextWindowTokens?.[model.trim()];
+  if (exact) return exact;
+  if (providerType === "deepseek" && model.toLowerCase().includes("v4")) {
+    return 1_000_000;
+  }
+  return info?.defaultContextWindowTokens ?? FALLBACK_CONTEXT_WINDOW_TOKENS;
+}
+
+function formatTokenCount(tokens?: number | null): string {
+  if (!tokens || !Number.isFinite(tokens)) return "auto";
+  if (tokens >= 1_000_000) {
+    const millions = tokens / 1_000_000;
+    return `${Number.isInteger(millions) ? millions.toFixed(0) : millions.toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) {
+    return `${Math.round(tokens / 1_000)}K`;
+  }
+  return tokens.toLocaleString();
+}
 
 interface ProviderConfigEntry {
   name: string;
@@ -152,6 +197,8 @@ interface ProviderConfigEntry {
   model: string;
   apiKeyPreview: string;
   baseUrl: string | null;
+  /** Model context window capacity in tokens, used by auto-compaction. */
+  contextWindowTokens?: number | null;
   /** Moonshot / Custom / DeepSeek：是否启用 `thinking` + `reasoning_content` */
   thinking?: boolean | null;
   /** DeepSeek only: "high" or "max" */
@@ -198,6 +245,8 @@ export function ProviderManager({
   const [formApiKey, setFormApiKey] = useState("");
   const [formModel, setFormModel] = useState("");
   const [formBaseUrl, setFormBaseUrl] = useState("");
+  const [formContextWindowTokens, setFormContextWindowTokens] = useState("");
+  const [formContextWindowTouched, setFormContextWindowTouched] = useState(false);
   const [formThinking, setFormThinking] = useState(true);
   const [formReasoningEffort, setFormReasoningEffort] = useState<"high" | "max">("high");
   const [showApiKey, setShowApiKey] = useState(false);
@@ -288,6 +337,10 @@ export function ProviderManager({
     setFormApiKey("");
     setFormModel(PROVIDER_INFO["deepseek"].defaultModel);
     setFormBaseUrl("");
+    setFormContextWindowTokens(
+      String(defaultContextWindowTokens("deepseek", PROVIDER_INFO["deepseek"].defaultModel)),
+    );
+    setFormContextWindowTouched(false);
     setFormThinking(true);
     setFormReasoningEffort("high");
     setFormSetAsDefault(true);
@@ -304,6 +357,13 @@ export function ProviderManager({
     setFormApiKey("");
     setFormModel(provider.model);
     setFormBaseUrl(provider.baseUrl || "");
+    setFormContextWindowTokens(
+      String(
+        provider.contextWindowTokens ??
+          defaultContextWindowTokens(provider.providerType, provider.model),
+      ),
+    );
+    setFormContextWindowTouched(false);
     setFormThinking(provider.thinking === true);
     setFormReasoningEffort(
       provider.reasoningEffort === "max" ? "max" : "high",
@@ -344,6 +404,11 @@ export function ProviderManager({
       setDialogError("Please enter a model name");
       return;
     }
+    const contextWindowTokens = Number.parseInt(formContextWindowTokens, 10);
+    if (!Number.isFinite(contextWindowTokens) || contextWindowTokens < 8192) {
+      setDialogError("最大上下文容量至少需要 8192 tokens");
+      return;
+    }
 
     try {
       setLoading(true);
@@ -361,6 +426,7 @@ export function ProviderManager({
           apiKey: apiKeyToSave,
           model: formModel.trim(),
           baseUrl: formBaseUrl.trim() || undefined,
+          contextWindowTokens,
           setAsDefault: formSetAsDefault,
           thinking: providerSupportsThinking(formProviderType) ? formThinking : null,
           reasoningEffort:
@@ -494,6 +560,14 @@ export function ProviderManager({
                     <Box sx={{ mt: 0.5 }}>
                       <Typography variant="body2" color="text.secondary">
                         {info.name} · {provider.model}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary" display="block">
+                        Context window:{" "}
+                        {formatTokenCount(
+                          provider.contextWindowTokens ??
+                            defaultContextWindowTokens(provider.providerType, provider.model),
+                        )}{" "}
+                        tokens
                       </Typography>
                       <Typography variant="caption" color="text.secondary" display="block">
                         API Key: {provider.apiKeyPreview || "***"}
@@ -726,7 +800,12 @@ export function ProviderManager({
                 onChange={(e) => {
                   const v = e.target.value;
                   setFormProviderType(v);
-                  setFormModel(PROVIDER_INFO[v]?.defaultModel || "");
+                  const nextModel = PROVIDER_INFO[v]?.defaultModel || "";
+                  setFormModel(nextModel);
+                  setFormContextWindowTokens(
+                    String(defaultContextWindowTokens(v, nextModel)),
+                  );
+                  setFormContextWindowTouched(false);
                   if (!providerSupportsThinking(v)) {
                     setFormThinking(false);
                   } else {
@@ -783,9 +862,23 @@ export function ProviderManager({
               options={PROVIDER_INFO[formProviderType]?.models ?? []}
               value={formModel}
               inputValue={formModel}
-              onInputChange={(_, value) => setFormModel(value)}
+              onInputChange={(_, value) => {
+                setFormModel(value);
+                if (!formContextWindowTouched) {
+                  setFormContextWindowTokens(
+                    String(defaultContextWindowTokens(formProviderType, value)),
+                  );
+                }
+              }}
               onChange={(_, value) => {
-                if (typeof value === "string") setFormModel(value);
+                if (typeof value === "string") {
+                  setFormModel(value);
+                  if (!formContextWindowTouched) {
+                    setFormContextWindowTokens(
+                      String(defaultContextWindowTokens(formProviderType, value)),
+                    );
+                  }
+                }
               }}
               renderInput={(params) => (
                 <TextField
@@ -801,6 +894,22 @@ export function ProviderManager({
                   fullWidth
                 />
               )}
+            />
+
+            <TextField
+              label="最大上下文容量（tokens）"
+              type="number"
+              value={formContextWindowTokens}
+              onChange={(e) => {
+                setFormContextWindowTokens(e.target.value);
+                setFormContextWindowTouched(true);
+              }}
+              helperText={
+                `用于自动压缩预算，不是输出 max_tokens。` +
+                `当前模型建议值：${formatTokenCount(defaultContextWindowTokens(formProviderType, formModel))} tokens。`
+              }
+              inputProps={{ min: 8192, step: 1024 }}
+              fullWidth
             />
 
             {/* Base URL (optional) */}

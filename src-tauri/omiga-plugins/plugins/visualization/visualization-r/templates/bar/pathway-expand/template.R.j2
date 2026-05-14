@@ -1,0 +1,235 @@
+#!/usr/bin/env Rscript
+# Template: bar/pathway-expand
+# Purpose: Category-expanded enrichment bar chart.
+#
+# Migration note:
+#   Migrates OmicsAgent backend/scripts/visual/bar/enrichment_expand from
+#   JSON ggplot DSL to direct, editable R/ggplot2. Source data.json is bundled
+#   as example.tsv.
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "category"),
+    term = arg_or(4, "Description"),
+    pvalue = arg_or(5, "p.adjust"),
+    count = arg_or(6, "Count")
+  ),
+  labels = list(
+    title = arg_or(7, "KEGG enrichment"),
+    x = arg_or(8, "-log10(p.adjust)"),
+    y = ""
+  ),
+  category_order = parse_csv_arg(9, "auto"),
+  style = list(
+    palette = parse_csv_arg(10, "#3BE8B0,#1AAFD0,#6A67CE,#FFB900,#FC636B"),
+    pvalue_floor = parse_number_arg(11, 1e-8),
+    max_log10_pvalue = parse_number_arg(12, 8),
+    x_breaks = parse_csv_arg(13, "auto"),
+    label_x = parse_number_arg(14, 0.06),
+    term_size = parse_number_arg(15, 4.2),
+    header_size = parse_number_arg(16, 5.2),
+    count_size = parse_number_arg(17, 3.4),
+    bar_width = parse_number_arg(18, 0.72),
+    bar_alpha = parse_number_arg(19, 0.62),
+    base_size = parse_number_arg(20, 12)
+  )
+)
+delimiter <- arg_or(21, "auto")
+width <- parse_number_arg(22, 10)
+height <- parse_number_arg(23, 9)
+dpi <- parse_integer_arg(24, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- c("#3BE8B0", "#1AAFD0", "#6A67CE", "#FFB900", "#FC636B")
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+ordered_values <- function(values, preferred_order) {
+  values <- unique(as.character(values))
+  if (length(preferred_order) == 0) return(values)
+  ordered <- preferred_order[preferred_order %in% values]
+  c(ordered, setdiff(values, ordered))
+}
+
+prepare_data <- function(df, config) {
+  required <- c(config$columns$category, config$columns$term, config$columns$pvalue, config$columns$count)
+  validate_columns(df, required, "bar/pathway-expand input")
+  df <- ensure_numeric_columns(df, c(config$columns$pvalue, config$columns$count), "bar/pathway-expand input")
+  df$.category_raw <- as.character(df[[config$columns$category]])
+  df$.term_raw <- as.character(df[[config$columns$term]])
+  df$.pvalue <- df[[config$columns$pvalue]]
+  df$.count <- df[[config$columns$count]]
+  df <- df[is.finite(df$.pvalue) & is.finite(df$.count) & nzchar(df$.category_raw) & nzchar(df$.term_raw), , drop = FALSE]
+  if (!nrow(df)) stop("bar/pathway-expand input has no plottable rows.", call. = FALSE)
+
+  categories <- ordered_values(df$.category_raw, config$category_order)
+  df$.category <- factor(df$.category_raw, levels = categories)
+  df$.log10_pvalue <- -log10(pmax(df$.pvalue, config$style$pvalue_floor))
+  df$.log10_pvalue <- pmin(df$.log10_pvalue, config$style$max_log10_pvalue)
+  df <- df[order(df$.category, -df$.log10_pvalue, df$.term_raw), , drop = FALSE]
+
+  rows <- list()
+  i <- 0L
+  for (category in categories) {
+    part <- df[df$.category_raw == category, , drop = FALSE]
+    if (!nrow(part)) next
+    i <- i + 1L
+    rows[[length(rows) + 1L]] <- data.frame(
+      .kind = "header",
+      .category_raw = category,
+      .term_raw = category,
+      .pvalue = NA_real_,
+      .count = NA_real_,
+      .log10_pvalue = NA_real_,
+      .order = i,
+      stringsAsFactors = FALSE
+    )
+    for (j in seq_len(nrow(part))) {
+      i <- i + 1L
+      rows[[length(rows) + 1L]] <- data.frame(
+        .kind = "term",
+        .category_raw = part$.category_raw[[j]],
+        .term_raw = part$.term_raw[[j]],
+        .pvalue = part$.pvalue[[j]],
+        .count = part$.count[[j]],
+        .log10_pvalue = part$.log10_pvalue[[j]],
+        .order = i,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  plot_df <- do.call(rbind, rows)
+  plot_df$.category <- factor(plot_df$.category_raw, levels = categories)
+  plot_df$.row <- max(plot_df$.order) - plot_df$.order + 1
+  plot_df
+}
+
+expand_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    axis.text.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    axis.line.y = ggplot2::element_blank(),
+    axis.title.y = ggplot2::element_blank(),
+    legend.position = "none",
+    plot.title = ggplot2::element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank()
+  )
+}
+
+make_plot <- function(df, config) {
+  categories <- levels(df$.category)
+  palette <- extend_palette(categories, config$style$palette)
+  term_df <- df[df$.kind == "term", , drop = FALSE]
+  header_df <- df[df$.kind == "header", , drop = FALSE]
+  x_breaks <- suppressWarnings(as.numeric(config$style$x_breaks))
+  x_breaks <- x_breaks[is.finite(x_breaks)]
+  if (!length(x_breaks)) x_breaks <- pretty(c(0, max(term_df$.log10_pvalue, na.rm = TRUE)), n = 5)
+  x_max <- max(max(x_breaks, na.rm = TRUE), max(term_df$.log10_pvalue, na.rm = TRUE)) * 1.08
+
+  ggplot2::ggplot(df, ggplot2::aes(y = .row)) +
+    ggplot2::geom_col(
+      data = term_df,
+      ggplot2::aes(x = .log10_pvalue, fill = .category),
+      orientation = "y",
+      width = config$style$bar_width,
+      alpha = config$style$bar_alpha,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      data = header_df,
+      ggplot2::aes(x = config$style$label_x, label = .term_raw, colour = .category),
+      hjust = 0,
+      fontface = "bold",
+      size = config$style$header_size,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      data = term_df,
+      ggplot2::aes(x = config$style$label_x, label = .term_raw),
+      hjust = 0,
+      size = config$style$term_size,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      data = term_df,
+      ggplot2::aes(x = pmin(.log10_pvalue + 0.18, x_max), label = .count),
+      hjust = 0,
+      size = config$style$count_size,
+      color = "#263238",
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_colour_manual(values = palette, guide = "none") +
+    ggplot2::scale_x_continuous(limits = c(0, x_max), breaks = x_breaks, expand = ggplot2::expansion(mult = c(0, 0.08))) +
+    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.02, 0.05))) +
+    ggplot2::coord_cartesian(clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    expand_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  term_df <- plot_df[plot_df$.kind == "term", , drop = FALSE]
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "categories", "max_log10_pvalue", "max_count"),
+      value = c("bar/pathway-expand", nrow(term_df), paste(levels(plot_df$.category), collapse = ","), max(term_df$.log10_pvalue, na.rm = TRUE), max(term_df$.count, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/pathway-expand", rows = nrow(term_df), categories = paste(levels(plot_df$.category), collapse = ","), max_log10_pvalue = max(term_df$.log10_pvalue, na.rm = TRUE), max_count = max(term_df$.count, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

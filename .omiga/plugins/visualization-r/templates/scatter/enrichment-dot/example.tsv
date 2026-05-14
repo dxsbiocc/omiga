@@ -1,0 +1,11 @@
+term	category	gene_count	ratio	p_adjust
+Oxidative phosphorylation	Pathway	18	0.32	0.0004
+Interferon response	Pathway	12	0.25	0.002
+Cell cycle	Process	22	0.29	0.006
+Apoptotic signaling	Process	9	0.18	0.021
+Chromatin organization	Process	15	0.22	0.014
+MAPK cascade	Pathway	11	0.16	0.036
+Ribosome biogenesis	Process	20	0.27	0.009
+Lipid metabolism	Pathway	8	0.12	0.048
+DNA repair	Process	13	0.19	0.019
+Cytokine signaling	Pathway	10	0.21	0.011

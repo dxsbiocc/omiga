@@ -1,0 +1,133 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_distribution_differential_raincloud
+  version: 0.1.0
+  name: Differential Raincloud Plot
+  description: Two-group differential raincloud plot migrated from OmicsAgent raincloud_differential with half-density clouds, jittered samples, quantile bridges, and statistical annotations.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - distribution
+    - raincloud
+    - differential-expression
+    - statistical-annotation
+classification:
+  category: visualization/distribution
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - distribution
+    - raincloud
+    - differential-expression
+    - statistical-annotation
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Input CSV/TSV table with exactly two groups. See this template's example.tsv for the expected shape.
+  params:
+    group_column:
+      kind: string
+      default: gender
+    value_column:
+      kind: string
+      default: TP53
+    title:
+      kind: string
+      default: ""
+    y_label:
+      kind: string
+      default: Gene expression level (TP53)
+    density_width:
+      kind: number
+      default: 0.42
+    half_violin_nudge:
+      kind: number
+      default: 0.05
+    jitter_width:
+      kind: number
+      default: 0.03
+    quantile_point_size:
+      kind: number
+      default: 4
+    random_seed:
+      kind: integer
+      default: 7
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - differential_raincloud
+  - raincloud_differential
+  - differential_expression_raincloud
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.group_column}
+    - ${params.value_column}
+    - ${params.title}
+    - ${params.y_label}
+    - ${params.density_width}
+    - ${params.half_violin_nudge}
+    - ${params.jitter_width}
+    - ${params.quantile_point_size}
+    - ${params.random_seed}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

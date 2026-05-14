@@ -1,0 +1,19 @@
+apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: ngs-hisat2
+  version: 0.1.0
+  name: HISAT2
+  description: Conda environment for HISAT2 indexing/alignment; includes samtools for SAM/BAM conversion, sorting, and indexing.
+  tags: [bioinformatics, ngs, alignment, hisat2]
+runtime:
+  type: conda
+  condaEnvFile: ./conda.yaml
+requirements:
+  system:
+    - micromamba or mamba or conda
+  notes:
+    - Environment is created under .omiga/operator-envs/conda and reused by hash.
+diagnostics:
+  checkCommand: [hisat2, --version]
+  installHint: Install the official micromamba binary at $HOME/.omiga/bin/micromamba or set OMIGA_MICROMAMBA; Omiga can create this env from conda.yaml/conda.yml.

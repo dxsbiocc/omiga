@@ -1,0 +1,26 @@
+{
+  "name": "visualization-r",
+  "version": "0.1.0",
+  "description": "Editable R/ggplot2 visualization support for static publication-style figures.",
+  "templates": "./templates",
+  "skills": "./skills",
+  "interface": {
+    "displayName": "R Visualization",
+    "shortDescription": "56 editable R/ggplot2 figure templates for scatter, bar, distribution, heatmap, and line plots",
+    "longDescription": "Provides table-driven R/ggplot2 visualization templates that export PNG, PDF, and editable R scripts. The current bundle supports scatter-style figures (basic scatter, beeswarm, bezier pair, Cleveland, group beeswarm, embedding, quadrant, bubble, dumbbell, rect dumbbell, diagonal, correlation, PCA score, volcano, MA, enrichment dot), distribution plots (band boxplot, bezier point boxplot, boxplot, DE boxplot, facet boxplot, two-group boxplot, paired boxplot, polar heatmap, polar violin, violin, raincloud-style, vertical raincloud, differential raincloud), bar charts (basic, butterfly, diverging, enrich groups, enrich points, gene terms, grouped, pathway expand, radial, radial groups, ranked lollipop, stacked percent, waffle, waterfall), heatmaps (basic, clustered, correlation, shape-overlay, significance, split, split shape, Mantel heatmap, Mantel size), and line plots (grouped, time series, GSEA curve, survival curve).",
+    "developerName": "Omiga",
+    "category": "Visualization",
+    "capabilities": [
+      "Rscript",
+      "ggplot2",
+      "Static Figures",
+      "Publication Figures",
+      "Human Editable"
+    ],
+    "brandColor": "#7C3AED",
+    "defaultPrompt": [
+      "Use visualization-r by selecting a Template unit with unit_search/unit_describe and running it with template_execute. Keep inputs and outputs inside the current session/project workspace; do not build ad-hoc shell/base64/JSON visualization wrappers unless explicitly requested."
+    ]
+  },
+  "environments": "./environments"
+}

@@ -1,0 +1,180 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_one_to_many
+  version: 0.1.0
+  name: One-to-Many
+  description: One-to-many correlation scatter with curved links from a central target to many labeled features.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - correlation
+classification:
+  category: visualization/scatter
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - correlation
+    - one-to-many
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with label, category, and numeric correlation columns. See example.tsv converted from OmicsAgent scatter/one2many data.json.
+  params:
+    label_column:
+      kind: string
+      default: label
+    category_column:
+      kind: string
+      default: category
+    correlation_column:
+      kind: string
+      default: correlation
+    category_order:
+      kind: string
+      default: ''
+      description: Optional comma-separated category order. Empty keeps first-seen order.
+    title:
+      kind: string
+      default: One-to-Many Scatter Plot
+    center_label:
+      kind: string
+      default: ethyl glucuronide
+    category_palette:
+      kind: string
+      default: '#d7689d,#f3d337,#a0c443,#66b5ae,#5da4dc,#40769e'
+    negative_curve_color:
+      kind: string
+      default: '#84afa2'
+    positive_curve_color:
+      kind: string
+      default: '#f29556'
+    center_color:
+      kind: string
+      default: '#2B393B'
+    point_size_min:
+      kind: number
+      default: 2
+    point_size_max:
+      kind: number
+      default: 7
+    curve_width:
+      kind: number
+      default: 0.4
+    label_size:
+      kind: number
+      default: 4
+    label_nudge:
+      kind: number
+      default: 0.2
+    center_label_size:
+      kind: number
+      default: 6
+    center_label_x:
+      kind: number
+      default: 1.5
+    bezier_adjust:
+      kind: number
+      default: 0.5
+    x_limit:
+      kind: number
+      default: 3
+    show_direction_labels:
+      kind: boolean
+      default: true
+    base_size:
+      kind: number
+      default: 12
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 7
+    height:
+      kind: number
+      default: 7
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - scatter_one2many
+  - one2many
+  - one_to_many
+  - one_to_many_scatter
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.label_column}
+    - ${params.category_column}
+    - ${params.correlation_column}
+    - ${params.category_order}
+    - ${params.title}
+    - ${params.center_label}
+    - ${params.category_palette}
+    - ${params.negative_curve_color}
+    - ${params.positive_curve_color}
+    - ${params.center_color}
+    - ${params.point_size_min}
+    - ${params.point_size_max}
+    - ${params.curve_width}
+    - ${params.label_size}
+    - ${params.label_nudge}
+    - ${params.center_label_size}
+    - ${params.center_label_x}
+    - ${params.bezier_adjust}
+    - ${params.x_limit}
+    - ${params.show_direction_labels}
+    - ${params.base_size}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

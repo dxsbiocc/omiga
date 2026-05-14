@@ -1,0 +1,254 @@
+{
+  "name": "resource-ncbi",
+  "version": "0.1.0",
+  "description": "Aggregates NCBI public literature, dataset, and gene retrieval routes behind one Resource plugin while each route remains independently addressable.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/retrieval_provider_router.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "pubmed,geo,biosample,ncbi_datasets,ncbi_gene",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "resource-ncbi",
+        "OMIGA_RETRIEVAL_RUNNERS": "public_literature_sources.py,public_dataset_sources.py,public_knowledge_sources.py"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "resources": [
+      {
+        "id": "pubmed",
+        "category": "literature",
+        "label": "PubMed",
+        "description": "Biomedical article metadata via NCBI E-utilities PubMed APIs.",
+        "aliases": [
+          "pmid",
+          "ncbi_pubmed"
+        ],
+        "subcategories": [
+          "biomedical_literature"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key",
+          "pubmed_email",
+          "pubmed_tool_name"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public NCBI E-utilities APIs; optional NCBI credentials are projected only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "retmax",
+            "type": "number",
+            "description": "Maximum PubMed records to request from ESearch."
+          }
+        ]
+      },
+      {
+        "id": "geo",
+        "category": "dataset",
+        "label": "NCBI GEO",
+        "description": "Gene Expression Omnibus dataset metadata via NCBI GEO DataSets E-utilities.",
+        "aliases": [
+          "gds",
+          "ncbi_geo",
+          "ncbi_gds",
+          "gene_expression_omnibus"
+        ],
+        "subcategories": [
+          "expression",
+          "sample_metadata"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key",
+          "pubmed_email",
+          "pubmed_tool_name"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public NCBI GEO DataSets APIs; optional NCBI credentials are projected only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "retmax",
+            "type": "number",
+            "description": "Maximum GEO records to request from ESearch."
+          }
+        ]
+      },
+      {
+        "id": "biosample",
+        "category": "dataset",
+        "label": "NCBI BioSample",
+        "description": "Sample metadata via NCBI E-utilities and Datasets BioSample report APIs.",
+        "aliases": [
+          "bio_sample",
+          "biosamples",
+          "ncbi_biosample",
+          "sample_metadata"
+        ],
+        "subcategories": [
+          "sample_metadata"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key",
+          "pubmed_email",
+          "pubmed_tool_name"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public NCBI APIs; optional NCBI credentials are projected only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "retmax",
+            "type": "number",
+            "description": "Maximum BioSample records to request from ESearch."
+          }
+        ]
+      },
+      {
+        "id": "ncbi_datasets",
+        "category": "dataset",
+        "label": "NCBI Datasets",
+        "description": "Genome assembly reports and download summaries via NCBI Datasets v2.",
+        "aliases": [
+          "ncbi_dataset",
+          "ncbi_genome",
+          "ncbi_genomes",
+          "ncbi_assembly",
+          "genome_datasets"
+        ],
+        "subcategories": [
+          "genome"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only NCBI Datasets API; optional My NCBI API key is projected as an API header only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "mode",
+            "type": "string",
+            "description": "Lookup mode: accession, taxon, bioproject, biosample, wgs, or assembly_name."
+          },
+          {
+            "name": "page_size",
+            "type": "number",
+            "description": "Maximum genome assembly reports to request."
+          }
+        ]
+      },
+      {
+        "id": "ncbi_gene",
+        "category": "knowledge",
+        "label": "NCBI Gene",
+        "description": "Gene ID, symbol, organism, and genomic location metadata via NCBI E-utilities.",
+        "aliases": [
+          "gene",
+          "ncbi_gene_id",
+          "gene_id"
+        ],
+        "subcategories": [
+          "gene"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key",
+          "pubmed_email",
+          "pubmed_tool_name"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public NCBI E-utilities db=gene calls; optional NCBI credentials are projected only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "organism",
+            "type": "string",
+            "description": "Optional organism filter."
+          },
+          {
+            "name": "taxon_id",
+            "type": "string",
+            "description": "Optional NCBI taxonomy ID filter."
+          },
+          {
+            "name": "retmax",
+            "type": "number",
+            "description": "Maximum NCBI Gene records to request."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "NCBI",
+    "shortDescription": "PubMed, GEO, BioSample, Datasets, and Gene retrieval",
+    "longDescription": "Aggregates NCBI public literature, dataset, and gene retrieval routes behind one Resource plugin while each route remains independently addressable.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Provider",
+      "NCBI",
+      "Literature",
+      "Dataset",
+      "Knowledge",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Search PubMed, GEO, BioSample, NCBI Datasets, or NCBI Gene through the NCBI resource plugin."
+    ]
+  }
+}

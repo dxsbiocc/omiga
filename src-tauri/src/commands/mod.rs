@@ -5,17 +5,21 @@
 //! - Delegates to domain layer
 //! - Returns structured errors for frontend handling
 
+pub mod app_skin;
 pub mod blackboard;
 pub mod chat;
 pub mod citation;
 pub mod claude_import;
+pub mod computer_use;
 pub mod connectors;
 pub mod context_snapshot;
 pub mod execution_envs;
+pub mod execution_records;
 pub mod extensions;
 pub mod fs;
 pub mod git_workspace;
 pub mod integrations_settings;
+pub mod learning_proposals;
 pub mod local_envs;
 pub mod memory;
 pub mod notebook;
@@ -25,6 +29,7 @@ pub mod plugins;
 pub mod ralph;
 pub mod sandbox_fs;
 pub mod search;
+pub mod self_evolution_drafts;
 pub mod session;
 pub mod shell;
 pub mod ssh_fs;

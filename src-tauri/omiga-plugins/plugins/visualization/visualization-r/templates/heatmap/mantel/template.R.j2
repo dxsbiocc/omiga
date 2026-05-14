@@ -1,0 +1,278 @@
+#!/usr/bin/env Rscript
+# Template: heatmap/mantel
+# Purpose: Mantel-style linked correlation heatmap with anchor-variable curves.
+#
+# Migration note:
+#   This template directly implements the high-quality OmicsAgent heatmap/mantel
+#   visual without carrying forward linkET-specific JSON ggplot2 DSL runtime.
+#   The heatmap shows target-target correlations; the curved links summarize
+#   anchor-target Spearman/Pearson/Kendall associations with binned line width.
+#
+# Input example:
+#   See example.tsv, converted from OmicsAgent data.json.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template heatmap/mantel
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, as.character(default)))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+parse_breaks_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  values <- suppressWarnings(as.numeric(trimws(strsplit(raw, ",", fixed = TRUE)[[1]])))
+  values <- sort(values[is.finite(values)])
+  if (length(values) == 0) c(0.5, 0.6, 0.7) else values
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    anchors = parse_csv_arg(3, "YAP1,WWTR1"),
+    feature = arg_or(4, "")
+  ),
+  method = arg_or(5, "spearman"),
+  triangle = arg_or(6, "upper"),
+  alpha = parse_number_arg(7, 0.05),
+  breaks = parse_breaks_arg(8, "0.5,0.6,0.7"),
+  labels = list(title = arg_or(9, "")),
+  style = list(
+    marker = arg_or(10, "heart"),
+    low = arg_or(11, "#2dde98"),
+    mid = arg_or(12, "#ffffffff"),
+    high = arg_or(13, "#ffc168"),
+    ns_link = arg_or(14, "grey78"),
+    base_size = parse_number_arg(15, 10),
+    marker_size = parse_number_arg(16, 3.1),
+    min_link_width = parse_number_arg(17, 0.6),
+    max_link_width = parse_number_arg(18, 1.5),
+    curve = parse_number_arg(19, 0.22),
+    show_values = parse_logical_arg(20, FALSE)
+  )
+)
+delimiter <- arg_or(21, "auto")
+width <- parse_number_arg(22, 6)
+height <- parse_number_arg(23, 5)
+dpi <- parse_integer_arg(24, 300)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+prepare_data <- function(df, config) {
+  feature_col <- resolve_optional_column(df, config$columns$feature)
+  numeric_cols <- setdiff(colnames(df), feature_col %||% character())
+  converted <- lapply(df[numeric_cols], function(x) suppressWarnings(as.numeric(x)))
+  numeric_ok <- vapply(converted, function(x) !all(is.na(x)), logical(1))
+  numeric_cols <- numeric_cols[numeric_ok]
+  matrix_df <- as.data.frame(converted[numeric_ok], check.names = FALSE)
+  names(matrix_df) <- numeric_cols
+  missing_anchors <- setdiff(config$columns$anchors, colnames(matrix_df))
+  if (length(missing_anchors) > 0) {
+    stop(sprintf("heatmap/mantel missing anchor column(s): %s", paste(missing_anchors, collapse = ", ")), call. = FALSE)
+  }
+  target_cols <- setdiff(colnames(matrix_df), config$columns$anchors)
+  if (length(target_cols) < 2) {
+    stop("heatmap/mantel input requires at least two target numeric columns after excluding anchors.", call. = FALSE)
+  }
+  list(matrix = matrix_df, anchors = config$columns$anchors, targets = target_cols)
+}
+
+correlation_pvalue <- function(x, y, method) {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 3 || length(unique(x[ok])) < 2 || length(unique(y[ok])) < 2) return(NA_real_)
+  result <- try(suppressWarnings(stats::cor.test(x[ok], y[ok], method = method)), silent = TRUE)
+  if (inherits(result, "try-error") || is.null(result$p.value)) return(NA_real_)
+  as.numeric(result$p.value)
+}
+
+valid_method <- function(method) {
+  method <- tolower(method)
+  if (!method %in% c("pearson", "spearman", "kendall")) stop(sprintf("Unsupported correlation method: %s", method), call. = FALSE)
+  method
+}
+
+correlation_heatmap_data <- function(matrix_df, targets, config) {
+  method <- valid_method(config$method)
+  target_df <- matrix_df[targets]
+  cor_mat <- stats::cor(target_df, method = method, use = "pairwise.complete.obs")
+  variables <- colnames(cor_mat)
+  n <- length(variables)
+  p_mat <- matrix(NA_real_, nrow = n, ncol = n, dimnames = list(variables, variables))
+  for (i in seq_along(variables)) {
+    for (j in seq_along(variables)) {
+      p_mat[i, j] <- if (i == j) 0 else correlation_pvalue(target_df[[variables[[i]]]], target_df[[variables[[j]]]], method)
+    }
+  }
+  out <- as.data.frame(as.table(cor_mat), stringsAsFactors = FALSE)
+  colnames(out) <- c("x", "y", "correlation")
+  out$pvalue <- as.vector(p_mat)
+  out$x_index <- match(out$x, variables)
+  out$y_index <- match(out$y, variables)
+  triangle <- tolower(config$triangle)
+  if (triangle == "upper") out <- out[out$y_index <= out$x_index, , drop = FALSE]
+  if (triangle == "lower") out <- out[out$y_index >= out$x_index, , drop = FALSE]
+  out$x_plot <- out$x_index
+  out$y_plot <- n - out$y_index + 1
+  out$abs_correlation <- abs(out$correlation)
+  out$value_label <- sprintf("%.2f", out$correlation)
+  out
+}
+
+link_size_labels <- function(breaks) {
+  c(
+    paste0("<", breaks[[1]]),
+    if (length(breaks) > 1) paste0(breaks[-length(breaks)], "~", breaks[-1]) else character(),
+    paste0(">=", breaks[[length(breaks)]])
+  )
+}
+
+anchor_link_data <- function(matrix_df, anchors, targets, config) {
+  method <- valid_method(config$method)
+  n <- length(targets)
+  labels <- link_size_labels(config$breaks)
+  rows <- list()
+  for (anchor_index in seq_along(anchors)) {
+    anchor <- anchors[[anchor_index]]
+    for (target_index in seq_along(targets)) {
+      target <- targets[[target_index]]
+      ok <- is.finite(matrix_df[[anchor]]) & is.finite(matrix_df[[target]])
+      r <- if (sum(ok) < 3) NA_real_ else suppressWarnings(stats::cor(matrix_df[[anchor]][ok], matrix_df[[target]][ok], method = method))
+      p <- correlation_pvalue(matrix_df[[anchor]], matrix_df[[target]], method)
+      bucket <- cut(abs(r), breaks = c(-Inf, config$breaks, Inf), labels = labels, right = FALSE)
+      rows[[length(rows) + 1]] <- data.frame(
+        anchor = anchor,
+        target = target,
+        r = r,
+        pvalue = p,
+        size_bucket = bucket,
+        color_value = ifelse(!is.na(p) && p < config$alpha, r, NA_real_),
+        x = -2.15,
+        y = n + 2.0 - (anchor_index - 1) * 0.62,
+        xend = target_index,
+        yend = n + 0.55,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  do.call(rbind, rows)
+}
+
+marker_label <- function(marker) {
+  marker <- tolower(marker)
+  switch(marker,
+    heart = "♥",
+    star = "✱",
+    circle = "●",
+    square = "■",
+    none = "",
+    "♥"
+  )
+}
+
+make_plot <- function(prepared, config) {
+  matrix_df <- prepared$matrix
+  anchors <- prepared$anchors
+  targets <- prepared$targets
+  n <- length(targets)
+  heatmap_df <- correlation_heatmap_data(matrix_df, targets, config)
+  link_df <- anchor_link_data(matrix_df, anchors, targets, config)
+  size_labels <- link_size_labels(config$breaks)
+  size_values <- stats::setNames(seq(config$style$min_link_width, config$style$max_link_width, length.out = length(size_labels)), size_labels)
+  marker <- marker_label(config$style$marker)
+
+  p <- ggplot2::ggplot() +
+    ggplot2::geom_curve(
+      data = link_df,
+      ggplot2::aes(x = x, y = y, xend = xend, yend = yend, size = size_bucket, colour = color_value),
+      curvature = config$style$curve,
+      lineend = "round",
+      alpha = 0.88,
+      show.legend = c(size = TRUE, colour = FALSE)
+    ) +
+    ggplot2::geom_tile(
+      data = heatmap_df,
+      ggplot2::aes(x = x_plot, y = y_plot, fill = correlation),
+      color = "white",
+      linewidth = 0.55
+    ) +
+    ggplot2::scale_fill_gradientn(
+      colours = grDevices::colorRampPalette(c(config$style$low, config$style$mid, config$style$high))(50),
+      limits = c(-1, 1),
+      name = paste0(tools::toTitleCase(valid_method(config$method)), "'s R")
+    ) +
+    ggplot2::scale_colour_gradientn(
+      colours = grDevices::colorRampPalette(c(config$style$low, config$style$mid, config$style$high))(50),
+      limits = c(-1, 1),
+      na.value = config$style$ns_link,
+      guide = "none"
+    ) +
+    ggplot2::scale_size_manual(values = size_values, drop = FALSE, name = paste0(tools::toTitleCase(valid_method(config$method)), "'s R")) +
+    ggplot2::scale_x_continuous(breaks = seq_along(targets), labels = targets, position = "top", limits = c(-2.9, n + 0.7), expand = ggplot2::expansion(mult = c(0, 0.01))) +
+    ggplot2::scale_y_continuous(breaks = n - seq_along(targets) + 1, labels = targets, limits = c(0.4, n + 2.5), expand = ggplot2::expansion(mult = c(0, 0))) +
+    ggplot2::coord_equal(clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = NULL) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.key = ggplot2::element_rect(fill = "white", color = NA),
+      panel.grid = ggplot2::element_blank(),
+      axis.text = ggplot2::element_text(face = "bold", size = 8),
+      axis.text.x = ggplot2::element_text(angle = 45, hjust = 0, vjust = 0),
+      axis.ticks = ggplot2::element_blank(),
+      legend.position = "left",
+      plot.margin = ggplot2::margin(10, 10, 10, 10)
+    ) +
+    ggplot2::guides(size = ggplot2::guide_legend(order = 2, override.aes = list(colour = "grey50")), fill = ggplot2::guide_colorbar(order = 3))
+
+  if (nzchar(marker)) {
+    p <- p + ggplot2::geom_text(data = heatmap_df, ggplot2::aes(x = x_plot, y = y_plot, label = marker), size = config$style$marker_size, color = "grey25", alpha = 0.82)
+  }
+  if (isTRUE(config$style$show_values)) {
+    p <- p + ggplot2::geom_text(data = heatmap_df, ggplot2::aes(x = x_plot, y = y_plot, label = value_label), size = 2.0, color = "grey15")
+  }
+  anchor_label_df <- unique(link_df[c("anchor", "x", "y")])
+  p + ggplot2::geom_text(data = anchor_label_df, ggplot2::aes(x = x - 0.05, y = y, label = anchor), hjust = 1, fontface = "bold", size = 3.3)
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "anchors", "targets", "method"), value = c("heatmap/mantel", paste(prepared$anchors, collapse = ","), length(prepared$targets), config$method)), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "heatmap/mantel", anchors = prepared$anchors, targets = length(prepared$targets), method = config$method))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

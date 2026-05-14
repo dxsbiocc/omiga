@@ -1,0 +1,74 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: hisat2_build_reference
+  version: 0.1.0
+  name: HISAT2 Build Reference
+  description: Build HISAT2 index files for a FASTA reference genome.
+  tags: [bioinformatics, ngs, alignment, hisat2, fasta, index]
+interface:
+  inputs:
+    reference:
+      kind: file
+      required: true
+      description: FASTA reference genome.
+  params:
+    prefix:
+      kind: string
+      default: reference
+      non_empty: true
+    threads:
+      kind: integer
+      default: 4
+      minimum: 1
+      maximum: 128
+    extra:
+      kind: string
+      default: ""
+      description: Additional hisat2-build arguments.
+  outputs:
+    index_archive:
+      kind: file
+      glob: hisat2-index.tar.gz
+      required: true
+    index_manifest:
+      kind: file
+      glob: index-manifest.json
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  envRef: ngs-hisat2
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+  resourceProfile:
+    tier: heavy
+    localPolicy: warn
+    minCpu: 4
+    recommendedCpu: 16
+    minMemoryGb: 16
+    recommendedMemoryGb: 64
+    diskGb: 80
+    notes:
+      - Transcriptome-aware genome indexing can be memory intensive.
+      - Small references can run locally.
+resources:
+  cpu:
+    default: 4
+    exposed: true
+  walltime:
+    default: 1800s
+    exposed: true
+execution:
+  argv:
+    - python3
+    - ./scripts/ngs_alignment.py
+    - hisat2-index
+    - ${inputs.reference}
+    - ${outdir}
+    - ${params.prefix}
+    - ${params.threads}
+    - ${params.extra}

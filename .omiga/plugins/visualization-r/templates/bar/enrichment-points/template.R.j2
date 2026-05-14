@@ -1,0 +1,198 @@
+#!/usr/bin/env Rscript
+# Template: bar/enrichment-points
+# Purpose: Composite enrichment bar + point-line plot for pathway significance
+#          and gene ratio by ontology/category.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/bar/enrichment_points
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   The source data.json is bundled as example.tsv.
+#
+# Input example:
+#   See example.tsv with Description/ONTOLOGY/GeneRatio/qvalue columns.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template bar/enrichment-points
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    term = arg_or(3, "Description"),
+    ontology = arg_or(4, "ONTOLOGY"),
+    gene_ratio = arg_or(5, "GeneRatio"),
+    qvalue = arg_or(6, "qvalue")
+  ),
+  labels = list(
+    title = arg_or(7, ""),
+    x = arg_or(8, "Gene Ratio(%) \t -log10(qvalue)"),
+    y = ""
+  ),
+  ontology_order = parse_csv_arg(9, "auto"),
+  style = list(
+    palette = parse_csv_arg(10, "#3BE8B0,#1AAFD0,#6A67CE,#FFB900,#FC636B"),
+    qvalue_floor = parse_number_arg(11, 1e-35),
+    max_log10_qvalue = parse_number_arg(12, 35),
+    ratio_scale = parse_number_arg(13, 100),
+    x_min = parse_number_arg(14, -9),
+    x_max = parse_number_arg(15, 35),
+    label_x = parse_number_arg(16, 0),
+    term_label_size = parse_number_arg(17, 3),
+    point_size_outer = parse_number_arg(18, 4),
+    point_size_inner = parse_number_arg(19, 3),
+    bar_alpha = parse_number_arg(20, 0.6),
+    line_width = parse_number_arg(21, 0.5),
+    base_size = parse_number_arg(22, 11)
+  )
+)
+delimiter <- arg_or(23, "auto")
+width <- parse_number_arg(24, 9)
+height <- parse_number_arg(25, 7)
+dpi <- parse_integer_arg(26, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- c("#3BE8B0", "#1AAFD0", "#6A67CE", "#FFB900", "#FC636B")
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+prepare_data <- function(df, config) {
+  required <- c(config$columns$term, config$columns$ontology, config$columns$gene_ratio, config$columns$qvalue)
+  validate_columns(df, required, "bar/enrichment-points input")
+  df <- ensure_numeric_columns(df, c(config$columns$gene_ratio, config$columns$qvalue), "bar/enrichment-points input")
+  df$.term_raw <- as.character(df[[config$columns$term]])
+  df$.ontology_raw <- as.character(df[[config$columns$ontology]])
+  df$.gene_ratio <- df[[config$columns$gene_ratio]]
+  df$.qvalue <- df[[config$columns$qvalue]]
+  df <- df[is.finite(df$.gene_ratio) & is.finite(df$.qvalue) & nzchar(df$.term_raw) & nzchar(df$.ontology_raw), , drop = FALSE]
+
+  ontologies <- unique(df$.ontology_raw)
+  if (length(config$ontology_order) > 0) {
+    ordered <- config$ontology_order[config$ontology_order %in% ontologies]
+    ontologies <- c(ordered, setdiff(ontologies, ordered))
+  }
+  df$.ontology <- factor(df$.ontology_raw, levels = ontologies)
+  df$.log10_qvalue <- -log10(pmax(df$.qvalue, config$style$qvalue_floor))
+  df$.log10_qvalue <- pmin(df$.log10_qvalue, config$style$max_log10_qvalue)
+  df$.gene_ratio_percent <- df$.gene_ratio * config$style$ratio_scale
+  df$.ratio_axis <- -df$.gene_ratio_percent
+  df <- df[order(df$.ontology, df$.log10_qvalue, df$.gene_ratio_percent), , drop = FALSE]
+  df$.term <- factor(df$.term_raw, levels = unique(df$.term_raw))
+  df
+}
+
+enrichment_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    axis.text.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    axis.title.x = ggplot2::element_text(size = 12, face = "bold"),
+    axis.text.x = ggplot2::element_text(size = 10),
+    strip.background = ggplot2::element_blank(),
+    strip.text = ggplot2::element_text(size = 12, face = "bold"),
+    legend.position = "none",
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    plot.title = ggplot2::element_text(hjust = 0.5, face = "bold")
+  )
+}
+
+make_plot <- function(df, config) {
+  ontologies <- levels(df$.ontology)
+  palette <- extend_palette(ontologies, config$style$palette)
+  ggplot2::ggplot(df, ggplot2::aes(y = .term)) +
+    ggplot2::geom_col(
+      ggplot2::aes(x = .log10_qvalue, fill = .ontology),
+      width = 0.82,
+      alpha = config$style$bar_alpha,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_line(
+      ggplot2::aes(x = .ratio_axis, group = .ontology, color = .ontology),
+      orientation = "y",
+      linewidth = config$style$line_width,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(
+      ggplot2::aes(x = .ratio_axis),
+      colour = "white",
+      size = config$style$point_size_outer,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(
+      ggplot2::aes(x = .ratio_axis, colour = .ontology),
+      size = config$style$point_size_inner,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      ggplot2::aes(x = config$style$label_x, label = .term_raw),
+      hjust = 0,
+      size = config$style$term_label_size,
+      lineheight = 0.7,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_colour_manual(values = palette, guide = "none") +
+    ggplot2::scale_x_continuous(limits = c(config$style$x_min, config$style$x_max), expand = c(0, 0)) +
+    ggplot2::facet_wrap(stats::as.formula("~ .ontology"), scales = "free_y") +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    enrichment_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "ontologies", "max_log10_qvalue", "max_gene_ratio_percent"),
+      value = c("bar/enrichment-points", nrow(plot_df), length(levels(plot_df$.ontology)), max(plot_df$.log10_qvalue, na.rm = TRUE), max(plot_df$.gene_ratio_percent, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/enrichment-points", rows = nrow(plot_df), ontologies = length(levels(plot_df$.ontology)), max_log10_qvalue = max(plot_df$.log10_qvalue, na.rm = TRUE), max_gene_ratio_percent = max(plot_df$.gene_ratio_percent, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

@@ -1,0 +1,93 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: star_align_reads
+  version: 0.1.0
+  name: STAR Align Reads
+  description: Align RNA-seq FASTQ reads with STAR against a generated genome directory.
+  tags: [bioinformatics, ngs, alignment, star, rna-seq, fastq, bam]
+interface:
+  inputs:
+    genome_dir:
+      kind: directory
+      required: true
+      description: STAR genome index directory supplied to --genomeDir.
+    reads1:
+      kind: file
+      required: true
+      description: FASTQ reads, or mate 1 FASTQ for paired-end data.
+    reads2:
+      kind: file
+      required: false
+      description: Optional mate 2 FASTQ for paired-end data.
+  params:
+    threads:
+      kind: integer
+      default: 8
+      minimum: 1
+      maximum: 128
+    read_files_command:
+      kind: string
+      default: auto
+      description: auto, none, or a STAR --readFilesCommand value such as "gunzip -c".
+    index_bam:
+      kind: boolean
+      default: true
+      description: Index coordinate-sorted BAM output with samtools index when STAR emits BAM.
+    extra:
+      kind: string
+      default: ""
+      description: Additional STAR alignReads arguments.
+  outputs:
+    alignment:
+      kind: file
+      glob: star_Aligned*
+      required: true
+    alignment_index:
+      kind: file
+      glob: star_Aligned*.bai
+      required: false
+    log_final:
+      kind: file
+      glob: star_Log.final.out
+      required: false
+    summary:
+      kind: json
+      required: true
+runtime:
+  envRef: ngs-star
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+  resourceProfile:
+    tier: hpc-recommended
+    localPolicy: warn
+    minCpu: 8
+    recommendedCpu: 32
+    minMemoryGb: 32
+    recommendedMemoryGb: 128
+    diskGb: 200
+    notes:
+      - STAR alignment against whole-genome indices is not recommended on laptops.
+      - Use SSH/server/HPC for production RNA-seq runs.
+resources:
+  cpu:
+    default: 8
+    exposed: true
+  walltime:
+    default: 14400s
+    exposed: true
+execution:
+  argv:
+    - python3
+    - ./scripts/ngs_alignment.py
+    - star-align
+    - ${inputs.genome_dir}
+    - ${inputs.reads1}
+    - ${inputs.reads2}
+    - ${outdir}
+    - ${params.threads}
+    - ${params.read_files_command}
+    - ${params.index_bam}
+    - ${params.extra}

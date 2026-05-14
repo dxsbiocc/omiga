@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, sta
 import { flushSync } from "react-dom";
 import type { Components } from "react-markdown";
 import type { Theme } from "@mui/material/styles";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Box,
@@ -46,8 +46,10 @@ import "katex/dist/katex.min.css";
 import {
   useSessionStore,
   useActivityStore,
+  mergeActiveTodosWithTiming,
   useChatComposerStore,
   type PermissionMode,
+  type ComputerUseMode,
   type SandboxBackend,
   type ExecutionEnvironment,
   type Message as StoreMessage,
@@ -113,6 +115,14 @@ import {
   toggleNestedToolPanelOpenForFold,
   type NestedToolPanelOpenByFold,
 } from "./toolPanelOpenState";
+import {
+  shouldShowPostTurnSuggestionsGeneratingPlaceholder,
+  shouldStartPostTurnSuggestionsIndicator,
+} from "./postTurnSuggestionsState";
+import {
+  resolveMarkdownImageReference,
+  type MarkdownImageReference,
+} from "./markdownImage";
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { SessionSwitchSkeleton } from "./SessionSwitchSkeleton";
 import { AgentSessionStatus } from "./AgentSessionStatus";
@@ -135,7 +145,6 @@ import { ResearchGoalAuditDetailsDialog } from "./ResearchGoalAuditDetailsDialog
 import { SshDirectoryTreeDialog } from "./SshDirectoryTreeDialog";
 import { ReviewerVerdictList } from "../ReviewerVerdictList";
 import { buildPendingExecutionFeedback } from "../../utils/pendingExecutionFeedback";
-import { parseNextStepSuggestionsFromMarkdown } from "../../utils/parseAssistantNextSteps";
 import { extractSuggestionTooltipMarkdown } from "../../utils/suggestionTooltip";
 import {
   aggregateReviewerVerdicts,
@@ -296,6 +305,191 @@ interface Message {
   initialTodos?: InitialTodoItem[];
 }
 
+type ToastSeverity = "success" | "info" | "warning" | "error";
+
+interface LearningProposalToast {
+  title: string;
+  message: string;
+  severity: ToastSeverity;
+  showPreferenceListAction?: boolean;
+}
+
+interface LearningProposalPromptAction {
+  id: "approve_apply" | "snooze" | "dismiss" | string;
+  label: string;
+  description: string;
+}
+
+interface LearningProposalPrompt {
+  proposalId: string;
+  kind: string;
+  title: string;
+  message: string;
+  actions: LearningProposalPromptAction[];
+}
+
+interface LearningProposalActionResult {
+  proposalId: string;
+  status: string;
+  notification: string;
+}
+
+interface LearningPreferenceCandidateSummary {
+  totalCount: number;
+  candidateCount: number;
+  promotedCount: number;
+  missingSelectedParamsCount: number;
+}
+
+interface LearningPreferenceCandidateView {
+  candidateId: string;
+  status: string;
+  title: string;
+  message: string;
+  canPromote: boolean;
+}
+
+interface LearningPreferenceCandidateOverview {
+  storePath: string;
+  projectPreferencesPath: string;
+  summary: LearningPreferenceCandidateSummary;
+  candidates: LearningPreferenceCandidateView[];
+}
+
+interface LearningPreferencePromotionActionResult {
+  candidateId: string;
+  status: string;
+  notification: string;
+}
+
+interface StreamToolResultPayload {
+  tool_use_id?: string;
+  name: string;
+  input: string;
+  output: string;
+  is_error: boolean;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringField(
+  value: Record<string, unknown> | null,
+  key: string,
+): string | null {
+  const field = value?.[key];
+  return typeof field === "string" && field.trim() ? field.trim() : null;
+}
+
+function parseJsonObject(raw: string | undefined): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    return objectRecord(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function learningProposalToastFromToolResult(
+  resultData: StreamToolResultPayload | undefined,
+): LearningProposalToast | null {
+  if (!resultData || resultData.is_error) return null;
+  if (
+    resultData.name !== "learning_proposal_decide" &&
+    resultData.name !== "learning_proposal_apply"
+  ) {
+    return null;
+  }
+  const output = parseJsonObject(resultData.output);
+  if (!output) return null;
+
+  const notification = stringField(output, "notification");
+  if (notification) {
+    return {
+      title:
+        resultData.name === "learning_proposal_apply"
+          ? "学习建议已固化"
+          : "学习建议已更新",
+      message: notification,
+      severity: "success",
+    };
+  }
+
+  return null;
+}
+
+function learningProposalPromptFromToolResult(
+  resultData: StreamToolResultPayload | undefined,
+): LearningProposalPrompt | null {
+  if (!resultData || resultData.is_error || resultData.name !== "learning_proposal_list") {
+    return null;
+  }
+  const output = parseJsonObject(resultData.output);
+  const proposals = Array.isArray(output?.proposals) ? output.proposals : [];
+  const firstProposal = proposals.map(objectRecord).find(Boolean) ?? null;
+  const proposalId = stringField(firstProposal, "id");
+  const message =
+    stringField(firstProposal, "userMessage") ??
+    stringField(firstProposal, "summary");
+  if (!proposalId || !message) return null;
+
+  const rawActions = Array.isArray(firstProposal?.actions)
+    ? firstProposal.actions
+    : [];
+  const actions = rawActions
+    .map(objectRecord)
+    .filter((action): action is Record<string, unknown> => Boolean(action))
+    .map((action) => ({
+      id: stringField(action, "id") ?? "approve_apply",
+      label: stringField(action, "label") ?? "保存",
+      description: stringField(action, "description") ?? "",
+    }));
+
+  return {
+    proposalId,
+    kind: stringField(firstProposal, "kind") ?? "proposal",
+    title: stringField(firstProposal, "title") ?? "发现可复用建议",
+    message,
+    actions: actions.length > 0
+      ? actions
+      : [
+          {
+            id: "approve_apply",
+            label: "保存",
+            description: "确认并保存为项目学习记录。",
+          },
+          {
+            id: "snooze",
+            label: "稍后",
+            description: "暂时不处理。",
+          },
+          {
+            id: "dismiss",
+            label: "忽略",
+            description: "不保存这条学习建议。",
+          },
+        ],
+  };
+}
+
+function defaultAskUserSelections(
+  questions: AskUserQuestionItem[],
+): Record<string, string> {
+  return questions.reduce<Record<string, string>>((acc, question) => {
+    if (question.multiSelect) return acc;
+    const recommended = question.options.find(
+      (option) => option.recommended && !option.custom,
+    );
+    if (recommended) {
+      acc[question.question.trim()] = recommended.label;
+    }
+    return acc;
+  }, {});
+}
+
 function assistantMessageHasVisibleText(message: Message): boolean {
   return message.role !== "assistant" || message.content.trim().length > 0;
 }
@@ -320,6 +514,7 @@ interface QueuedMainSend {
   composerSelectedPluginIds: string[];
   composerAgentType: string;
   permissionMode: PermissionMode;
+  computerUseMode: ComputerUseMode;
   /** 发送入队时的运行环境（与 composer 一致） */
   environment: ExecutionEnvironment;
   /** SSH 服务器名称（仅在 environment === "ssh" 时有效） */
@@ -1582,12 +1777,124 @@ function LazyMarkdownBlockFallback({ label = "正在加载内容…" }: { label?
   );
 }
 
+interface ImageReadResponse {
+  data: string;
+  mime_type: string;
+}
+
+function markdownImageSrcFromReference(reference: MarkdownImageReference): string {
+  if (reference.kind === "local") {
+    return `${convertFileSrc(reference.localPath)}${reference.suffix}`;
+  }
+  if (reference.kind === "remote") {
+    return reference.src;
+  }
+  return "";
+}
+
+function markdownImagePathLabel(reference: MarkdownImageReference): string {
+  if (reference.kind === "local") return reference.localPath;
+  if (reference.kind === "remote") return reference.src;
+  return reference.rawSrc;
+}
+
+function MarkdownImage({
+  reference,
+  src,
+  alt,
+  sessionId,
+  onImageClick,
+}: {
+  reference: MarkdownImageReference;
+  src: string;
+  alt: string;
+  sessionId?: string;
+  onImageClick: (src: string, alt: string) => void;
+}) {
+  const [fallbackSrc, setFallbackSrc] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const displaySrc = fallbackSrc ?? src;
+  const localPath = reference.kind === "local" ? reference.localPath : "";
+
+  useEffect(() => {
+    setFallbackSrc(null);
+    setLoadError(null);
+  }, [reference.kind, reference.rawSrc, localPath, src]);
+
+  const handleError = useCallback(() => {
+    if (fallbackSrc || reference.kind !== "local" || !localPath) {
+      setLoadError(`图片无法加载：${markdownImagePathLabel(reference)}`);
+      return;
+    }
+
+    if (!sessionId) {
+      setLoadError(`图片无法加载：缺少会话上下文，无法读取 ${localPath}`);
+      return;
+    }
+
+    void invoke<ImageReadResponse>("read_image_base64", {
+      path: localPath,
+      sessionId,
+    })
+      .then((res) => {
+        if (!res.data || !res.mime_type) {
+          throw new Error("empty image response");
+        }
+        setFallbackSrc(`data:${res.mime_type};base64,${res.data}`);
+      })
+      .catch((error) => {
+        setLoadError(`图片无法加载：${String(error)}`);
+      });
+  }, [fallbackSrc, localPath, reference, sessionId]);
+
+  if (loadError) {
+    return (
+      <Alert severity="warning" sx={{ my: 1 }}>
+        {loadError}
+        {localPath ? (
+          <>
+            <br />
+            请确认 Markdown 引用了完整输出路径，而不是只写{" "}
+            <Box component="code" sx={{ fontFamily: "monospace" }}>
+              figure.png
+            </Box>
+            。
+          </>
+        ) : null}
+      </Alert>
+    );
+  }
+
+  return (
+    <Box
+      component="img"
+      src={displaySrc}
+      alt={alt}
+      onClick={() => onImageClick(displaySrc, alt)}
+      onError={handleError}
+      sx={{
+        display: "block",
+        maxWidth: "100%",
+        height: "auto",
+        borderRadius: 1,
+        my: 1,
+        mx: "auto",
+        cursor: "pointer",
+        transition: "opacity 0.2s",
+        "&:hover": { opacity: 0.92 },
+      }}
+    />
+  );
+}
+
 function buildMarkdownComponents(
   isAgent: boolean,
   theme: Theme,
   CHAT: ReturnType<typeof getChatTokens>,
   onImageClick: (src: string, alt: string) => void,
   onNodeClick?: (text: string) => void,
+  workspacePath = "",
+  sessionId = "",
 ) {
   return {
   code({
@@ -1825,22 +2132,26 @@ function buildMarkdownComponents(
   },
   img({ src, alt }) {
     const url = typeof src === "string" ? src : "";
+    const reference = resolveMarkdownImageReference(url, workspacePath);
+    const resolvedUrl = markdownImageSrcFromReference(reference);
+    if (!resolvedUrl) {
+      return (
+        <Alert severity="warning" sx={{ my: 1 }}>
+          内联图片数据已隐藏。请使用 Markdown 文件路径引用输出图片，例如{" "}
+          <Box component="code" sx={{ fontFamily: "monospace" }}>
+            ![图](&lt;path/to/image.png&gt;)
+          </Box>
+          。
+        </Alert>
+      );
+    }
     return (
-      <Box
-        component="img"
-        src={url}
+      <MarkdownImage
+        reference={reference}
+        src={resolvedUrl}
         alt={typeof alt === "string" ? alt : ""}
-        onClick={() => onImageClick(url, typeof alt === "string" ? alt : "")}
-        sx={{
-          display: "block",
-          maxWidth: "100%",
-          height: "auto",
-          borderRadius: 1,
-          my: 1,
-          cursor: "pointer",
-          transition: "opacity 0.2s",
-          "&:hover": { opacity: 0.92 },
-        }}
+        sessionId={sessionId}
+        onImageClick={onImageClick}
       />
     );
   },
@@ -2057,6 +2368,24 @@ export function Chat({ sessionId }: ChatProps) {
     useState(false);
   /** Toast when a background bash command completes (`background-shell-complete`). */
   const [bgToast, setBgToast] = useState<string | null>(null);
+  /** Human-facing learning proposal notification; JSON stays in tool output. */
+  const [learningProposalToast, setLearningProposalToast] =
+    useState<LearningProposalToast | null>(null);
+  const [learningProposalPrompt, setLearningProposalPrompt] =
+    useState<LearningProposalPrompt | null>(null);
+  const [learningProposalBusyAction, setLearningProposalBusyAction] =
+    useState<string | null>(null);
+  const [learningPreferenceListOpen, setLearningPreferenceListOpen] =
+    useState(false);
+  const [learningPreferenceListLoading, setLearningPreferenceListLoading] =
+    useState(false);
+  const [learningPreferenceListError, setLearningPreferenceListError] =
+    useState<string | null>(null);
+  const [learningPreferenceList, setLearningPreferenceList] =
+    useState<LearningPreferenceCandidateOverview | null>(null);
+  const [learningPreferencePromotingId, setLearningPreferencePromotingId] =
+    useState<string | null>(null);
+  const learningProposalSeenRef = useRef<Set<string>>(new Set());
   /** Background Agent tasks (Rust `BackgroundAgentManager`) for teammate-style follow-ups. */
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundAgentTask[]>(
     [],
@@ -2211,6 +2540,7 @@ export function Chat({ sessionId }: ChatProps) {
         }
         st.setComposerAgentType(item.composerAgentType);
         st.setPermissionMode(item.permissionMode);
+        st.setComputerUseMode(item.computerUseMode);
         st.setEnvironment(item.environment);
         st.setSshServer(item.sshServer);
       });
@@ -2243,6 +2573,23 @@ export function Chat({ sessionId }: ChatProps) {
     label: string;
     prompt: string;
   }> | null>(null);
+  /**
+   * Stream id whose completed turn may still emit post-turn metadata.
+   * Cleared as soon as the user/queue starts another main turn so stale
+   * background metadata events cannot leak into the next run.
+   */
+  const postTurnMetaStreamIdRef = useRef<string | null>(null);
+  /** Stream id currently allowed to show/clear the suggestions-generating placeholder. */
+  const postTurnSuggestionStreamIdRef = useRef<string | null>(null);
+  const clearPostTurnSuggestionsIndicator = useCallback(() => {
+    postTurnSuggestionStreamIdRef.current = null;
+    pendingFollowUpSuggestionsRef.current = null;
+    setSuggestionsGenerating(false);
+  }, []);
+  const clearPostTurnMetaState = useCallback(() => {
+    postTurnMetaStreamIdRef.current = null;
+    clearPostTurnSuggestionsIndicator();
+  }, [clearPostTurnSuggestionsIndicator]);
   /** Populated by `turn_summary` stream frame; consumed when attaching the final assistant row */
   const pendingTurnSummaryRef = useRef<string | null>(null);
   /** Populated by `token_usage` stream frame; consumed when attaching the final assistant row */
@@ -2342,6 +2689,7 @@ export function Chat({ sessionId }: ChatProps) {
         composerSelectedPluginIds: [],
         composerAgentType: "general-purpose",
         permissionMode: st.permissionMode,
+        computerUseMode: "off",
         environment: st.environment,
         sshServer: st.sshServer,
         sandboxBackend: st.sandboxBackend,
@@ -2416,6 +2764,7 @@ export function Chat({ sessionId }: ChatProps) {
       setActiveResearchGoal(null);
       setGoalCriteriaDialogOpen(false);
       setGoalAuditDialogOpen(false);
+      setLearningProposalPrompt(null);
       return;
     }
 
@@ -2444,6 +2793,140 @@ export function Chat({ sessionId }: ChatProps) {
       cancelled = true;
     };
   }, [sessionId, researchGoalProjectPath]);
+
+  useEffect(() => {
+    learningProposalSeenRef.current.clear();
+    setLearningProposalPrompt(null);
+    setLearningProposalBusyAction(null);
+    setLearningPreferenceListOpen(false);
+    setLearningPreferenceList(null);
+    setLearningPreferenceListError(null);
+    setLearningPreferencePromotingId(null);
+  }, [sessionId, researchGoalProjectPath]);
+
+  const loadLearningPreferenceCandidates = useCallback(async () => {
+    const projectRoot =
+      currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
+    if (!projectRoot.trim()) {
+      setLearningPreferenceListError("当前会话没有有效项目目录。");
+      setLearningPreferenceListOpen(true);
+      return;
+    }
+    setLearningPreferenceListOpen(true);
+    setLearningPreferenceListLoading(true);
+    setLearningPreferenceListError(null);
+    try {
+      const overview = await invoke<LearningPreferenceCandidateOverview>(
+        "learning_preference_candidates",
+        {
+          projectRoot,
+          includePromoted: true,
+        },
+      );
+      setLearningPreferenceList(overview);
+    } catch (error) {
+      console.warn("[Chat] Failed to load learning preferences:", error);
+      setLearningPreferenceListError(
+        typeof error === "string"
+          ? error
+          : "无法读取已保存的学习记录，请稍后重试。",
+      );
+    } finally {
+      setLearningPreferenceListLoading(false);
+    }
+  }, [currentSession?.projectPath, currentSession?.workingDirectory]);
+
+  const handleLearningProposalAction = useCallback(
+    async (actionId: string) => {
+      const prompt = learningProposalPrompt;
+      if (!prompt || learningProposalBusyAction) return;
+      const projectRoot =
+        currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
+      if (!projectRoot.trim()) {
+        setLearningProposalPrompt(null);
+        return;
+      }
+      setLearningProposalBusyAction(actionId);
+      try {
+        const result = await invoke<LearningProposalActionResult>(
+          "learning_proposal_respond",
+          {
+            projectRoot,
+            proposalId: prompt.proposalId,
+            action: actionId,
+          },
+        );
+        setLearningProposalPrompt(null);
+        setLearningProposalToast({
+          title:
+            result.status === "applied"
+              ? "学习记录已保存"
+              : "学习建议已更新",
+          message: result.notification,
+          severity: result.status === "applied" ? "success" : "info",
+          showPreferenceListAction: result.status === "applied",
+        });
+      } catch (error) {
+        console.warn("[Chat] Failed to respond to learning proposal:", error);
+        setLearningProposalToast({
+          title: "学习建议处理失败",
+          message:
+            typeof error === "string"
+              ? error
+              : "无法更新这条学习建议，请稍后重试。",
+          severity: "error",
+        });
+      } finally {
+        setLearningProposalBusyAction(null);
+      }
+    },
+    [
+      currentSession?.projectPath,
+      currentSession?.workingDirectory,
+      learningProposalBusyAction,
+      learningProposalPrompt,
+    ],
+  );
+
+  const handlePromoteLearningPreference = useCallback(
+    async (candidateId: string) => {
+      const projectRoot =
+        currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
+      if (!projectRoot.trim() || learningPreferencePromotingId) return;
+      setLearningPreferencePromotingId(candidateId);
+      try {
+        const result = await invoke<LearningPreferencePromotionActionResult>(
+          "learning_preference_candidate_promote",
+          {
+            projectRoot,
+            candidateId,
+          },
+        );
+        setLearningProposalToast({
+          title: "项目偏好已保存",
+          message: result.notification,
+          severity: "success",
+          showPreferenceListAction: true,
+        });
+        await loadLearningPreferenceCandidates();
+      } catch (error) {
+        console.warn("[Chat] Failed to promote learning preference:", error);
+        setLearningPreferenceListError(
+          typeof error === "string"
+            ? error
+            : "无法提升这条学习记录，请稍后重试。",
+        );
+      } finally {
+        setLearningPreferencePromotingId(null);
+      }
+    },
+    [
+      currentSession?.projectPath,
+      currentSession?.workingDirectory,
+      learningPreferencePromotingId,
+      loadLearningPreferenceCandidates,
+    ],
+  );
 
   useEffect(() => {
     goalAutoRunLastKeyRef.current = null;
@@ -2741,7 +3224,7 @@ export function Chat({ sessionId }: ChatProps) {
       cancelAnimationFrame(foldIntermediateFlushRafRef.current);
       foldIntermediateFlushRafRef.current = null;
     }
-    pendingFollowUpSuggestionsRef.current = null;
+    clearPostTurnMetaState();
     pendingTurnSummaryRef.current = null;
     pendingTokenUsageRef.current = null;
     clearRunningToolTracking();
@@ -2840,7 +3323,13 @@ export function Chat({ sessionId }: ChatProps) {
         backgroundJobs: [...act.backgroundJobs],
       });
     };
-  }, [sessionId, bumpQueueUi, clearCancelFallbackTimer, clearRunningToolTracking]);
+  }, [
+    sessionId,
+    bumpQueueUi,
+    clearCancelFallbackTimer,
+    clearPostTurnMetaState,
+    clearRunningToolTracking,
+  ]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -3674,31 +4163,20 @@ export function Chat({ sessionId }: ChatProps) {
     alt: string;
   }>({ open: false, src: "", alt: "" });
 
-  const composerSuggestionBundle = useMemo(() => {
+  const composerSuggestions = useMemo(() => {
     const last = messages[messages.length - 1];
     if (
       last?.role === "assistant" &&
       last.followUpSuggestions &&
       last.followUpSuggestions.length > 0
     ) {
-      return {
-        rows: last.followUpSuggestions.map((s) => ({
-          label: compactSuggestionLabel(s.label, s.prompt),
-          text: s.prompt,
-        })),
-        source: "llm" as const,
-      };
+      return last.followUpSuggestions.map((s) => ({
+        label: compactSuggestionLabel(s.label, s.prompt),
+        text: s.prompt,
+      }));
     }
-    if (last?.role === "assistant" && last.content) {
-      const fromMd = parseNextStepSuggestionsFromMarkdown(last.content);
-      if (fromMd.length > 0) {
-        return { rows: fromMd, source: "markdown" as const };
-      }
-    }
-    return { rows: [], source: "none" as const };
+    return [];
   }, [messages]);
-  const composerSuggestions = composerSuggestionBundle.rows;
-  const suggestionSource = composerSuggestionBundle.source;
   const stickyTurnSummary = useMemo(() => {
     const last = messages[messages.length - 1];
     if (last?.role === "assistant" && last.turnSummary?.trim()) {
@@ -3714,6 +4192,16 @@ export function Chat({ sessionId }: ChatProps) {
     !pendingAskUser &&
     !awaitingResumeAfterCancel &&
     composerSuggestions.length > 0;
+  const showSuggestionsGeneratingPlaceholder =
+    shouldShowPostTurnSuggestionsGeneratingPlaceholder({
+      suggestionsGenerating,
+      showNextStepSuggestions,
+      currentStreamId,
+      isConnecting,
+      isStreaming,
+      waitingFirstChunk,
+      activityIsStreaming,
+    });
   const showTurnSummaryCard =
     Boolean(sessionId) &&
     Boolean(stickyTurnSummary) &&
@@ -3727,6 +4215,58 @@ export function Chat({ sessionId }: ChatProps) {
     setPendingAskUser(null);
     setAskUserSelections({});
   }, [sessionId]);
+
+  useEffect(() => {
+    const projectRoot =
+      currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
+    if (
+      !sessionId ||
+      !projectRoot.trim() ||
+      isSwitchingSession ||
+      isStreaming ||
+      isConnecting ||
+      waitingFirstChunk ||
+      pendingAskUser ||
+      learningProposalPrompt
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      // Do not refresh/scan ExecutionRecords from UI idle state. Proposal
+      // generation is an agent/user-triggered analysis step; the UI only
+      // surfaces already-created pending prompts.
+      void invoke<LearningProposalPrompt | null>("learning_proposal_next", {
+        projectRoot,
+        refresh: false,
+      })
+        .then((prompt) => {
+          if (cancelled || !prompt) return;
+          if (learningProposalSeenRef.current.has(prompt.proposalId)) return;
+          learningProposalSeenRef.current.add(prompt.proposalId);
+          setLearningProposalPrompt(prompt);
+        })
+        .catch((error) => {
+          console.warn("[Chat] Failed to load learning proposal prompt:", error);
+        });
+    }, 900);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    currentSession?.projectPath,
+    currentSession?.workingDirectory,
+    isConnecting,
+    isStreaming,
+    isSwitchingSession,
+    learningProposalPrompt,
+    pendingAskUser,
+    sessionId,
+    waitingFirstChunk,
+  ]);
 
   const submitPendingAskUser = useCallback(async () => {
     if (!pendingAskUser) return;
@@ -3913,17 +4453,19 @@ export function Chat({ sessionId }: ChatProps) {
   const markSnapshotStepDone = (
     steps: SnapshotExecutionStep[],
     id: string,
+    completedAt = Date.now(),
   ): SnapshotExecutionStep[] =>
     steps.map((step) =>
       step.id === id && step.status === "running"
-        ? { ...step, status: "done" as const }
+        ? { ...step, status: "done" as const, completedAt }
         : step,
     );
 
   const ensureSnapshotStreamStarted = (
     snap: SessionStreamSnapshot,
   ): SessionStreamSnapshot => {
-    const nextSteps = markSnapshotStepDone(snap.executionSteps, "connect");
+    const now = Date.now();
+    const nextSteps = markSnapshotStepDone(snap.executionSteps, "connect", now);
     return {
       ...snap,
       isConnecting: false,
@@ -3933,7 +4475,12 @@ export function Chat({ sessionId }: ChatProps) {
         ? nextSteps
         : [
             ...nextSteps,
-            { id: "think", title: "推理中", status: "running" as const },
+            {
+              id: "think",
+              title: "推理中",
+              status: "running" as const,
+              startedAt: now,
+            },
           ],
     };
   };
@@ -3941,13 +4488,19 @@ export function Chat({ sessionId }: ChatProps) {
   const markSnapshotFirstOutput = (
     snap: SessionStreamSnapshot,
   ): SessionStreamSnapshot => {
+    const now = Date.now();
     const running = snap.executionSteps.find((step) => step.status === "running");
     if (running?.id === "think") {
       return {
         ...snap,
         executionSteps: [
-          ...markSnapshotStepDone(snap.executionSteps, "think"),
-          { id: "reply", title: "解析输出", status: "running" as const },
+          ...markSnapshotStepDone(snap.executionSteps, "think", now),
+          {
+            id: "reply",
+            title: "解析输出",
+            status: "running" as const,
+            startedAt: now,
+          },
         ],
       };
     }
@@ -3957,9 +4510,10 @@ export function Chat({ sessionId }: ChatProps) {
         executionSteps: [
           ...snap.executionSteps,
           {
-            id: `reply-${Date.now()}`,
+            id: `reply-${now}`,
             title: "解析输出",
             status: "running" as const,
+            startedAt: now,
           },
         ],
       };
@@ -3973,20 +4527,24 @@ export function Chat({ sessionId }: ChatProps) {
     title: string,
     detail: { summary?: string; input?: string; toolName?: string },
   ): SessionStreamSnapshot => {
+    const now = Date.now();
     const stepId = `tool-${toolUseId}`;
     const baseSteps = snap.executionSteps.map((step) => {
       if (
         step.status === "running" &&
         (step.id === "think" || step.id === "reply" || step.id.startsWith("reply-"))
       ) {
-        return { ...step, status: "done" as const };
+        return { ...step, status: "done" as const, completedAt: now };
       }
       return step;
     });
+    const existingStep = baseSteps.find((step) => step.id === stepId);
     const nextStep: SnapshotExecutionStep = {
       id: stepId,
       title,
       status: "running",
+      startedAt: existingStep?.startedAt ?? now,
+      completedAt: undefined,
       summary: detail.summary ?? title,
       ...(detail.input !== undefined ? { input: detail.input } : {}),
       ...(detail.toolName !== undefined ? { toolName: detail.toolName } : {}),
@@ -4005,21 +4563,25 @@ export function Chat({ sessionId }: ChatProps) {
     snap: SessionStreamSnapshot,
     toolUseId: string,
     detail: { output?: string; failed?: boolean },
-  ): SessionStreamSnapshot => ({
-    ...snap,
-    executionSteps: markSnapshotStepDone(
-      snap.executionSteps,
-      `tool-${toolUseId}`,
-    ).map((step) =>
-      step.id === `tool-${toolUseId}`
-        ? {
-            ...step,
-            ...(detail.output !== undefined ? { toolOutput: detail.output } : {}),
-            ...(detail.failed !== undefined ? { failed: detail.failed } : {}),
-          }
-        : step,
-    ),
-  });
+  ): SessionStreamSnapshot => {
+    const now = Date.now();
+    return {
+      ...snap,
+      executionSteps: markSnapshotStepDone(
+        snap.executionSteps,
+        `tool-${toolUseId}`,
+        now,
+      ).map((step) =>
+        step.id === `tool-${toolUseId}`
+          ? {
+              ...step,
+              ...(detail.output !== undefined ? { toolOutput: detail.output } : {}),
+              ...(detail.failed !== undefined ? { failed: detail.failed } : {}),
+            }
+          : step,
+      ),
+    };
+  };
 
   const getBackgroundStreamSnapshot = (
     ownerSessionId: string,
@@ -4031,6 +4593,7 @@ export function Chat({ sessionId }: ChatProps) {
       existing && (existing.streamId === streamId || existing.streamId === null)
         ? existing
         : null;
+    const now = Date.now();
     return {
       streamId,
       roundId: roundId ?? reusable?.roundId ?? null,
@@ -4045,8 +4608,15 @@ export function Chat({ sessionId }: ChatProps) {
       executionSteps:
         reusable?.executionSteps.length
           ? [...reusable.executionSteps]
-          : [{ id: "connect", title: "等待响应", status: "running" as const }],
-      executionStartedAt: reusable?.executionStartedAt ?? Date.now(),
+          : [
+              {
+                id: "connect",
+                title: "等待响应",
+                status: "running" as const,
+                startedAt: now,
+              },
+            ],
+      executionStartedAt: reusable?.executionStartedAt ?? now,
       executionEndedAt: reusable?.executionEndedAt ?? null,
       activeTodos: reusable?.activeTodos ?? null,
       backgroundJobs: reusable?.backgroundJobs ? [...reusable.backgroundJobs] : [],
@@ -4188,14 +4758,15 @@ export function Chat({ sessionId }: ChatProps) {
               }>;
             };
             if (Array.isArray(parsed.todos)) {
+              const nextTodos = parsed.todos.map((todo, index) => ({
+                id: todo.id ?? `todo-${index}`,
+                content: todo.content,
+                activeForm: todo.activeForm ?? todo.active_form ?? todo.content,
+                status: String(todo.status),
+              }));
               snap = {
                 ...snap,
-                activeTodos: parsed.todos.map((todo, index) => ({
-                  id: todo.id ?? `todo-${index}`,
-                  content: todo.content,
-                  activeForm: todo.activeForm ?? todo.active_form ?? todo.content,
-                  status: String(todo.status),
-                })),
+                activeTodos: mergeActiveTodosWithTiming(nextTodos, snap.activeTodos),
               };
             }
           } catch {
@@ -4357,12 +4928,11 @@ export function Chat({ sessionId }: ChatProps) {
           );
         if (!needBootstrap) return;
 
-        pendingFollowUpSuggestionsRef.current = null;
+        clearPostTurnMetaState();
         pendingTurnSummaryRef.current = null;
         pendingTokenUsageRef.current = null;
         isStreamingRef.current = true;
         setIsStreaming(true);
-        setSuggestionsGenerating(false);
         act.setConnecting(false);
         act.setStreaming(true, true);
         segmentStartRef.current = true;
@@ -4497,6 +5067,8 @@ export function Chat({ sessionId }: ChatProps) {
         if (ownerSessionId) {
           clearStreamSnapshot(ownerSessionId);
         }
+        postTurnMetaStreamIdRef.current = streamId;
+        postTurnSuggestionStreamIdRef.current = streamId;
 
         if (isDev) {
           console.debug("[OmigaDev][AgentComplete]", {
@@ -4509,15 +5081,21 @@ export function Chat({ sessionId }: ChatProps) {
         return true;
       };
 
-      const finalizeIfPostTurnMetaOutranComplete = () => {
-        const act = useActivityStore.getState();
+      const finalizeIfPostTurnMetaOutranComplete = (
+        options: { terminalMeta?: boolean } = {},
+      ) => {
         const streamLooksActive =
           currentStreamIdRef.current === streamId ||
-          isStreamingRef.current ||
-          act.isConnecting ||
-          act.isStreaming;
+          (currentStreamIdRef.current === null &&
+            isStreamingRef.current &&
+            postTurnMetaStreamIdRef.current !== streamId);
         if (!streamLooksActive) return false;
-        if (activeRunningToolIdsRef.current.size > 0) return false;
+        // suggestions_complete is emitted only after the visible answer and
+        // post-turn metadata finish. If a stale tool row still looks "running",
+        // settle it instead of leaving the UI stuck at “解析输出”.
+        if (!options.terminalMeta && activeRunningToolIdsRef.current.size > 0) {
+          return false;
+        }
         return finalizeSuccessfulStream("post-turn-meta");
       };
 
@@ -4675,7 +5253,7 @@ export function Chat({ sessionId }: ChatProps) {
           if (!sid || !mid || !tuid || !Array.isArray(qs) || qs.length === 0) {
             break;
           }
-          setAskUserSelections({});
+          setAskUserSelections(defaultAskUserSelections(qs));
           setPendingAskUser({
             toolUseId: tuid,
             sessionId: sid,
@@ -4735,6 +5313,24 @@ export function Chat({ sessionId }: ChatProps) {
             setPendingAskUser((p) =>
               p?.toolUseId === toolResultMatchId ? null : p,
             );
+          }
+          const learningPrompt =
+            learningProposalPromptFromToolResult(resultData);
+          if (
+            learningPrompt &&
+            !learningProposalSeenRef.current.has(learningPrompt.proposalId)
+          ) {
+            learningProposalSeenRef.current.add(learningPrompt.proposalId);
+            setLearningProposalToast(null);
+            setLearningProposalPrompt(learningPrompt);
+          } else if (learningPrompt) {
+            setLearningProposalToast(null);
+          } else {
+            const learningNotice =
+              learningProposalToastFromToolResult(resultData);
+            if (learningNotice) {
+              setLearningProposalToast(learningNotice);
+            }
           }
           segmentStartRef.current = true;
           // Real-time todo sync: push todos to activityStore on every todo_write result
@@ -4799,6 +5395,7 @@ export function Chat({ sessionId }: ChatProps) {
           setPendingAskUser(null);
           setAskUserSelections({});
           pendingTokenUsageRef.current = null;
+          clearPostTurnMetaState();
           useActivityStore.getState().finalizeExecutionRun();
           useActivityStore.getState().clearTransient();
           setCurrentResponse("");
@@ -4842,6 +5439,7 @@ export function Chat({ sessionId }: ChatProps) {
           setPendingAskUser(null);
           setAskUserSelections({});
           pendingTokenUsageRef.current = null;
+          clearPostTurnMetaState();
           useActivityStore.getState().finalizeExecutionRun();
           useActivityStore.getState().clearTransient();
           // Mark round as cancelled - use ref to get latest round ID
@@ -4883,6 +5481,10 @@ export function Chat({ sessionId }: ChatProps) {
         }
         case "turn_summary": {
           if (isEventForReplacedStream()) break;
+          const isLivePostTurnStream = currentStreamIdRef.current === streamId;
+          const isFinalizedPostTurnStream =
+            postTurnMetaStreamIdRef.current === streamId;
+          if (!isLivePostTurnStream && !isFinalizedPostTurnStream) break;
           const raw = payload.data;
           let text: string | null = null;
           if (raw != null && typeof raw === "object" && "text" in raw) {
@@ -4893,16 +5495,13 @@ export function Chat({ sessionId }: ChatProps) {
           }
           if (
             activeRunningToolIdsRef.current.size === 0 &&
-            (currentStreamIdRef.current === streamId ||
-              isStreamingRef.current ||
-              useActivityStore.getState().isConnecting ||
-              useActivityStore.getState().isStreaming)
+            isLivePostTurnStream
           ) {
             pendingTurnSummaryRef.current = text;
             finalizeSuccessfulStream("post-turn-meta");
             break;
           }
-          if (!isStreamingRef.current) {
+          if (isFinalizedPostTurnStream) {
             if (text) {
               setMessages((prev) => {
                 const lastIdx = prev.length - 1;
@@ -4915,13 +5514,15 @@ export function Chat({ sessionId }: ChatProps) {
                 return next;
               });
             }
-          } else {
-            pendingTurnSummaryRef.current = text;
           }
           break;
         }
         case "follow_up_suggestions": {
           if (isEventForReplacedStream()) break;
+          const isLivePostTurnStream = currentStreamIdRef.current === streamId;
+          const isFinalizedPostTurnStream =
+            postTurnMetaStreamIdRef.current === streamId;
+          if (!isLivePostTurnStream && !isFinalizedPostTurnStream) break;
           const raw = payload.data;
           const rows = Array.isArray(raw)
             ? (raw as Array<{ label?: unknown; prompt?: unknown }>)
@@ -4936,10 +5537,7 @@ export function Chat({ sessionId }: ChatProps) {
 
           if (
             activeRunningToolIdsRef.current.size === 0 &&
-            (currentStreamIdRef.current === streamId ||
-              isStreamingRef.current ||
-              useActivityStore.getState().isConnecting ||
-              useActivityStore.getState().isStreaming)
+            isLivePostTurnStream
           ) {
             pendingFollowUpSuggestionsRef.current = parsed;
             setSuggestionsGenerating(false);
@@ -4952,8 +5550,8 @@ export function Chat({ sessionId }: ChatProps) {
           // message, and overwriting the store snapshot with fewer messages would cause the
           // storeMessages useEffect to wipe out that new user message.
           // The suggestions are already persisted to the DB by the Rust backend.
-          if (!isStreamingRef.current) {
-            setSuggestionsGenerating(false);
+          if (isFinalizedPostTurnStream) {
+            clearPostTurnSuggestionsIndicator();
             if (parsed.length > 0) {
               setMessages((prev) => {
                 const lastIdx = prev.length - 1;
@@ -4967,21 +5565,36 @@ export function Chat({ sessionId }: ChatProps) {
                 return next;
               });
             }
-          } else {
-            pendingFollowUpSuggestionsRef.current = parsed;
           }
           break;
         }
         case "suggestions_generating": {
           if (isEventForReplacedStream()) break;
           finalizeIfPostTurnMetaOutranComplete();
-          setSuggestionsGenerating(true);
+          const act = useActivityStore.getState();
+          if (
+            shouldStartPostTurnSuggestionsIndicator({
+              activePostTurnStreamId: postTurnSuggestionStreamIdRef.current,
+              eventStreamId: streamId,
+              currentStreamId: currentStreamIdRef.current,
+              isConnecting: act.isConnecting,
+              isStreaming: isStreamingRef.current,
+              waitingFirstChunk: act.waitingFirstChunk,
+              activityIsStreaming: act.isStreaming,
+              queuedMainSendCount: queuedMainSendQueueRef.current.length,
+              flushingQueuedMainSend: mainQueueFlushPayloadRef.current !== null,
+            })
+          ) {
+            setSuggestionsGenerating(true);
+          }
           break;
         }
         case "suggestions_complete": {
           if (isEventForReplacedStream()) break;
-          finalizeIfPostTurnMetaOutranComplete();
-          setSuggestionsGenerating(false);
+          finalizeIfPostTurnMetaOutranComplete({ terminalMeta: true });
+          if (postTurnSuggestionStreamIdRef.current === streamId) {
+            clearPostTurnSuggestionsIndicator();
+          }
           break;
         }
         case "token_usage": {
@@ -5071,6 +5684,7 @@ export function Chat({ sessionId }: ChatProps) {
       sandboxBackend: storeSb,
       localVenvType: storeVenvType,
       localVenvName: storeVenvName,
+      computerUseMode: storeComputerUseMode,
     } = useChatComposerStore.getState();
 
     const composerAgentType = flushPayload
@@ -5079,6 +5693,9 @@ export function Chat({ sessionId }: ChatProps) {
     const permissionMode = flushPayload
       ? flushPayload.permissionMode
       : storePerm;
+    const computerUseMode = flushPayload
+      ? flushPayload.computerUseMode
+      : storeComputerUseMode;
     const environment = flushPayload ? flushPayload.environment : storeEnv;
     const sshServer = flushPayload ? flushPayload.sshServer : storeSsh;
     const sandboxBackend = flushPayload ? flushPayload.sandboxBackend : storeSb;
@@ -5135,6 +5752,7 @@ export function Chat({ sessionId }: ChatProps) {
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
+      useChatComposerStore.getState().resetTaskComputerUseMode();
       try {
         const response = await invoke<{
           message_id: string;
@@ -5197,6 +5815,7 @@ export function Chat({ sessionId }: ChatProps) {
         composerSelectedPluginIds: [...composerSelectedPluginIds],
         composerAgentType,
         permissionMode,
+        computerUseMode,
         environment,
         sshServer: useChatComposerStore.getState().sshServer,
         sandboxBackend: useChatComposerStore.getState().sandboxBackend,
@@ -5205,8 +5824,11 @@ export function Chat({ sessionId }: ChatProps) {
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
+      useChatComposerStore.getState().resetTaskComputerUseMode();
       return;
     }
+
+    clearPostTurnMetaState();
 
     if (researchParsed || goalParsed) {
       const specialCommand = researchParsed
@@ -5298,6 +5920,7 @@ export function Chat({ sessionId }: ChatProps) {
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
+      useChatComposerStore.getState().resetTaskComputerUseMode();
 
       const requestSessionId = sessionId;
       try {
@@ -5508,6 +6131,7 @@ export function Chat({ sessionId }: ChatProps) {
     composerRef.current?.setValue("");
     useChatComposerStore.getState().clearComposerAttachedPaths();
     useChatComposerStore.getState().clearComposerSelectedPluginIds();
+    useChatComposerStore.getState().resetTaskComputerUseMode();
 
     const requestSessionId = sessionId;
     try {
@@ -5551,6 +6175,7 @@ export function Chat({ sessionId }: ChatProps) {
           localVenvName,
           activeProviderEntryName,
           selectedPluginIds: composerSelectedPluginIds,
+          computerUseMode,
         },
       });
 
@@ -5815,6 +6440,7 @@ export function Chat({ sessionId }: ChatProps) {
       retrySendInFlightRef.current = true;
       queuedMainSendQueueRef.current = [];
       mainQueueFlushPayloadRef.current = null;
+      clearPostTurnMetaState();
       bumpQueueUi();
 
       setMessages(truncated);
@@ -5849,10 +6475,11 @@ export function Chat({ sessionId }: ChatProps) {
       flushSync(() => {
         useChatComposerStore.getState().setComposerAgentType(composeAgent);
       });
-      const { permissionMode } = useChatComposerStore.getState();
+      const { permissionMode, computerUseMode } = useChatComposerStore.getState();
 
       const userMessageId = message.id;
       const requestSessionId = sessionId;
+      useChatComposerStore.getState().resetTaskComputerUseMode();
 
       try {
         const response = await invoke<{
@@ -5880,6 +6507,7 @@ export function Chat({ sessionId }: ChatProps) {
             localVenvName: useChatComposerStore.getState().localVenvName,
             activeProviderEntryName,
             selectedPluginIds: message.composerSelectedPluginIds ?? [],
+            computerUseMode,
             ...(isPersistedMessageIdForRetry(message.id)
               ? { retryFromUserMessageId: message.id }
               : {}),
@@ -6024,6 +6652,7 @@ export function Chat({ sessionId }: ChatProps) {
       replaceStoreMessagesSnapshot,
       bumpQueueUi,
       clearStaleRetryBusyFlag,
+      clearPostTurnMetaState,
       clearRunningToolTracking,
     ],
   );
@@ -6122,6 +6751,7 @@ export function Chat({ sessionId }: ChatProps) {
     if (!next) return;
     bumpQueueUi();
     mainQueueFlushPayloadRef.current = next;
+    clearPostTurnMetaState();
     flushSync(() => {
       composerRef.current?.setValue(next.body);
       const st = useChatComposerStore.getState();
@@ -6135,6 +6765,7 @@ export function Chat({ sessionId }: ChatProps) {
       }
       st.setComposerAgentType(next.composerAgentType);
       st.setPermissionMode(next.permissionMode);
+      st.setComputerUseMode(next.computerUseMode);
       st.setEnvironment(next.environment);
       st.setSshServer(next.sshServer);
       st.setSandboxBackend(next.sandboxBackend);
@@ -6198,10 +6829,9 @@ export function Chat({ sessionId }: ChatProps) {
           setPendingAssistantHint(null);
           setPendingAskUser(null);
           setAskUserSelections({});
-          pendingFollowUpSuggestionsRef.current = null;
+          clearPostTurnMetaState();
           pendingTurnSummaryRef.current = null;
           pendingTokenUsageRef.current = null;
-          setSuggestionsGenerating(false);
           setAwaitingResumeAfterCancel(true);
           const act = useActivityStore.getState();
           act.clearTransient();
@@ -6301,12 +6931,18 @@ export function Chat({ sessionId }: ChatProps) {
     setUserMessageEdit(null);
     setPendingAskUser(null);
     setAskUserSelections({});
+    clearPostTurnMetaState();
     clearQueuedMainSends();
     setFollowUpTaskId(null);
     setBgTranscriptTaskId(null);
     setIndexingStatus("idle");
     composerRef.current?.setValue("");
     setBgToast(null);
+    setLearningProposalToast(null);
+    setLearningPreferenceListOpen(false);
+    setLearningPreferenceList(null);
+    setLearningPreferenceListError(null);
+    setLearningPreferencePromotingId(null);
     setPathRequiredToast(null);
     setCopySuccessToast(false);
     setCurrentRoundId(null);
@@ -6366,6 +7002,7 @@ export function Chat({ sessionId }: ChatProps) {
     currentStreamId,
     clearQueuedMainSends,
     clearCancelFallbackTimer,
+    clearPostTurnMetaState,
     clearRunningToolTracking,
   ]);
 
@@ -6405,8 +7042,17 @@ export function Chat({ sessionId }: ChatProps) {
       return next;
     });
 
-    const { composerAgentType, permissionMode, environment, sshServer, sandboxBackend } =
+    const {
+      composerAgentType,
+      permissionMode,
+      computerUseMode,
+      environment,
+      sshServer,
+      sandboxBackend,
+    } =
       useChatComposerStore.getState();
+    const resumeComputerUseMode =
+      computerUseMode === "session" ? computerUseMode : "off";
     const requestSessionId = sessionId;
 
     try {
@@ -6431,6 +7077,7 @@ export function Chat({ sessionId }: ChatProps) {
           localVenvType: useChatComposerStore.getState().localVenvType,
           localVenvName: useChatComposerStore.getState().localVenvName,
           activeProviderEntryName,
+          computerUseMode: resumeComputerUseMode,
         },
       });
 
@@ -6523,9 +7170,27 @@ export function Chat({ sessionId }: ChatProps) {
     queueMicrotask(() => composerRef.current?.focus());
   }, []);
 
+  const markdownImageWorkspacePath =
+    currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
   const agentComponents = useMemo(
-    () => buildMarkdownComponents(true, theme, CHAT, handleMarkdownImageClick, handleNodeClick),
-    [theme, CHAT, handleMarkdownImageClick, handleNodeClick],
+    () =>
+      buildMarkdownComponents(
+        true,
+        theme,
+        CHAT,
+        handleMarkdownImageClick,
+        handleNodeClick,
+        markdownImageWorkspacePath,
+        sessionId,
+      ),
+    [
+      theme,
+      CHAT,
+      handleMarkdownImageClick,
+      handleNodeClick,
+      markdownImageWorkspacePath,
+      sessionId,
+    ],
   );
   const handleCopyUserMessage = useCallback(
     (message: Message) => {
@@ -7100,7 +7765,7 @@ export function Chat({ sessionId }: ChatProps) {
               </Fade>
             )}
 
-            {suggestionsGenerating && !showNextStepSuggestions && (
+            {showSuggestionsGeneratingPlaceholder && (
               <Fade in timeout={200}>
                 <Box sx={{ width: "100%", pt: 0.5, pb: 0.5 }}>
                   <Typography
@@ -7149,11 +7814,7 @@ export function Chat({ sessionId }: ChatProps) {
                       fontWeight: 500,
                     }}
                   >
-                    {suggestionSource === "llm"
-                      ? "由独立模型根据上文生成，点击填入输入框"
-                      : suggestionSource === "markdown"
-                        ? "由助手正文「下一步建议」小节解析，点击填入输入框"
-                        : ""}
+                    由独立模型根据上文生成，点击填入输入框
                   </Typography>
                   <Stack
                     direction="row"
@@ -7829,6 +8490,139 @@ export function Chat({ sessionId }: ChatProps) {
       </Dialog>
 
       <NotificationToast
+        open={Boolean(learningProposalPrompt)}
+        autoHideDuration={null}
+        onClose={() => {
+          if (learningProposalBusyAction) return;
+          setLearningProposalPrompt(null);
+        }}
+        severity="info"
+        title={learningProposalPrompt?.title ?? "学习建议"}
+        message={learningProposalPrompt?.message ?? ""}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        zIndexOffset={3}
+        actions={
+          <>
+            {(learningProposalPrompt?.actions ?? []).map((action) => (
+              <Button
+                key={action.id}
+                type="button"
+                size="small"
+                variant={action.id === "approve_apply" ? "contained" : "text"}
+                color={
+                  action.id === "dismiss"
+                    ? "inherit"
+                    : action.id === "approve_apply"
+                      ? "success"
+                      : "primary"
+                }
+                disabled={Boolean(learningProposalBusyAction)}
+                onClick={() => void handleLearningProposalAction(action.id)}
+                sx={{ minWidth: 0, px: 1 }}
+              >
+                {learningProposalBusyAction === action.id
+                  ? "处理中…"
+                  : action.label}
+              </Button>
+            ))}
+          </>
+        }
+      />
+
+      <Dialog
+        open={learningPreferenceListOpen}
+        onClose={() => setLearningPreferenceListOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>已保存的学习记录</DialogTitle>
+        <DialogContent>
+          {learningPreferenceListLoading ? (
+            <Stack direction="row" spacing={1.25} alignItems="center">
+              <CircularProgress size={18} />
+              <Typography variant="body2" color="text.secondary">
+                正在读取项目学习记录…
+              </Typography>
+            </Stack>
+          ) : learningPreferenceListError ? (
+            <Alert severity="error">{learningPreferenceListError}</Alert>
+          ) : !learningPreferenceList ||
+            learningPreferenceList.candidates.length === 0 ? (
+            <Alert severity="info">
+              当前项目还没有已保存的偏好候选。只有用户确认保存后才会出现在这里。
+            </Alert>
+          ) : (
+            <Stack spacing={1.5}>
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Chip
+                  size="small"
+                  label={`${learningPreferenceList.summary.totalCount} 条记录`}
+                />
+                <Chip
+                  size="small"
+                  label={`${learningPreferenceList.summary.candidateCount} 条候选`}
+                />
+                <Chip
+                  size="small"
+                  label={`${learningPreferenceList.summary.promotedCount} 条已提升`}
+                />
+              </Stack>
+              {learningPreferenceList.candidates.map((candidate, index) => (
+                <Box key={candidate.candidateId}>
+                  {index > 0 ? <Divider sx={{ mb: 1.5 }} /> : null}
+                  <Stack spacing={0.8}>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
+                        {candidate.title}
+                      </Typography>
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        color={candidate.canPromote ? "success" : "default"}
+                        label={candidate.canPromote ? "可提升" : candidate.status}
+                      />
+                    </Stack>
+                    <Typography variant="body2" color="text.secondary">
+                      {candidate.message}
+                    </Typography>
+                    {candidate.canPromote ? (
+                      <Box>
+                        <Button
+                          type="button"
+                          size="small"
+                          variant="outlined"
+                          color="success"
+                          disabled={Boolean(learningPreferencePromotingId)}
+                          onClick={() =>
+                            void handlePromoteLearningPreference(
+                              candidate.candidateId,
+                            )
+                          }
+                        >
+                          {learningPreferencePromotingId === candidate.candidateId
+                            ? "提升中…"
+                            : "提升为项目偏好"}
+                        </Button>
+                      </Box>
+                    ) : null}
+                  </Stack>
+                </Box>
+              ))}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            type="button"
+            color="inherit"
+            onClick={() => setLearningPreferenceListOpen(false)}
+          >
+            关闭
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <NotificationToast
         open={copySuccessToast}
         autoHideDuration={3000}
         onClose={() => {
@@ -7849,6 +8643,35 @@ export function Chat({ sessionId }: ChatProps) {
         severity="info"
         title="后台任务通知"
         message={bgToast}
+      />
+
+      <NotificationToast
+        open={Boolean(learningProposalToast)}
+        autoHideDuration={9000}
+        onClose={() => {
+          setLearningProposalToast(null);
+        }}
+        severity={learningProposalToast?.severity ?? "info"}
+        title={learningProposalToast?.title ?? "学习建议"}
+        message={learningProposalToast?.message ?? ""}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        zIndexOffset={2}
+        actions={
+          learningProposalToast?.showPreferenceListAction ? (
+            <Button
+              type="button"
+              size="small"
+              variant="text"
+              onClick={() => {
+                setLearningProposalToast(null);
+                void loadLearningPreferenceCandidates();
+              }}
+              sx={{ minWidth: 0, px: 1 }}
+            >
+              查看已保存
+            </Button>
+          ) : null
+        }
       />
 
       <BackgroundAgentTranscriptDrawer

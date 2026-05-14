@@ -1,0 +1,228 @@
+#!/usr/bin/env Rscript
+# Template: heatmap/split-shape
+# Purpose: Two-group correlation heatmap with lower rings and upper stars.
+#
+# Migration note:
+#   This template directly implements the OmicsAgent heatmap/two_shape visual
+#   without carrying forward the ggcor JSON DSL runtime. The original data.json
+#   has been converted to example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template heatmap/split-shape
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, as.character(default)))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    group = arg_or(3, "group"),
+    groups = parse_csv_arg(4, "Normal,Tumor"),
+    variables = parse_csv_arg(5, ""),
+    feature = arg_or(6, "")
+  ),
+  method = arg_or(7, "pearson"),
+  labels = list(title = arg_or(8, "Split Shape")),
+  style = list(
+    low = arg_or(9, "#ed6ca4"),
+    mid = arg_or(10, "#ffffff"),
+    high = arg_or(11, "#7bc4e2"),
+    base_size = parse_number_arg(12, 10),
+    ring_size = parse_number_arg(13, 8.5),
+    ring_hole_size = parse_number_arg(14, 4.2),
+    star_size = parse_number_arg(15, 5.2),
+    show_values = parse_logical_arg(16, FALSE)
+  )
+)
+delimiter <- arg_or(17, "auto")
+width <- parse_number_arg(18, 6)
+height <- parse_number_arg(19, 5.2)
+dpi <- parse_integer_arg(20, 300)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+valid_method <- function(method) {
+  method <- tolower(method)
+  if (!method %in% c("pearson", "spearman", "kendall")) stop(sprintf("Unsupported correlation method: %s", method), call. = FALSE)
+  method
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, config$columns$group, "heatmap/split-shape input")
+  feature_col <- resolve_optional_column(df, config$columns$feature)
+  candidate_cols <- setdiff(colnames(df), c(config$columns$group, feature_col %||% character()))
+  group_values <- unique(as.character(df[[config$columns$group]]))
+  group_values <- group_values[nzchar(group_values)]
+  if (length(config$columns$groups) == 0) config$columns$groups <- sort(group_values)
+  if (length(config$columns$groups) != 2) {
+    stop("heatmap/split-shape requires exactly two group names in group_order, or exactly two groups in the input.", call. = FALSE)
+  }
+  missing_groups <- setdiff(config$columns$groups, group_values)
+  if (length(missing_groups) > 0) {
+    stop(sprintf("heatmap/split-shape missing group value(s): %s", paste(missing_groups, collapse = ", ")), call. = FALSE)
+  }
+  variable_cols <- config$columns$variables
+  if (length(variable_cols) == 0) variable_cols <- candidate_cols
+  missing_variables <- setdiff(variable_cols, candidate_cols)
+  if (length(missing_variables) > 0) {
+    stop(sprintf("heatmap/split-shape missing variable column(s): %s", paste(missing_variables, collapse = ", ")), call. = FALSE)
+  }
+  if (length(variable_cols) < 2) stop("heatmap/split-shape requires at least two numeric variable columns.", call. = FALSE)
+
+  group_matrices <- lapply(config$columns$groups, function(group_name) {
+    group_df <- df[as.character(df[[config$columns$group]]) == group_name, variable_cols, drop = FALSE]
+    converted <- lapply(group_df, function(x) suppressWarnings(as.numeric(x)))
+    bad_cols <- variable_cols[vapply(converted, function(x) any(is.na(x)), logical(1))]
+    if (length(bad_cols) > 0) {
+      stop(sprintf("heatmap/split-shape numeric column(s) contain non-numeric values for %s: %s", group_name, paste(bad_cols, collapse = ", ")), call. = FALSE)
+    }
+    matrix_df <- as.data.frame(converted, check.names = FALSE)
+    names(matrix_df) <- variable_cols
+    if (nrow(matrix_df) < 3) stop(sprintf("Group %s needs at least three rows for correlation.", group_name), call. = FALSE)
+    matrix_df
+  })
+  list(matrices = group_matrices, groups = config$columns$groups, variables = variable_cols)
+}
+
+correlation_long <- function(prepared, config) {
+  method <- valid_method(config$method)
+  cor_a <- stats::cor(prepared$matrices[[1]], method = method, use = "pairwise.complete.obs")
+  cor_b <- stats::cor(prepared$matrices[[2]], method = method, use = "pairwise.complete.obs")
+  variables <- prepared$variables
+  out <- expand.grid(x = variables, y = variables, stringsAsFactors = FALSE)
+  out$x_index <- match(out$x, variables)
+  out$y_index <- match(out$y, variables)
+  out$plot_y <- length(variables) - out$y_index + 1
+  out$cor_a <- mapply(function(x, y) cor_a[y, x], out$x, out$y)
+  out$cor_b <- mapply(function(x, y) cor_b[y, x], out$x, out$y)
+  out$label_a <- sprintf("%.2f", out$cor_a)
+  out$label_b <- sprintf("%.2f", out$cor_b)
+  out
+}
+
+make_plot <- function(prepared, config) {
+  plot_df <- correlation_long(prepared, config)
+  n_vars <- length(prepared$variables)
+  lower_df <- plot_df[plot_df$y_index > plot_df$x_index, , drop = FALSE]
+  upper_df <- plot_df[plot_df$y_index < plot_df$x_index, , drop = FALSE]
+  diag_df <- plot_df[plot_df$y_index == plot_df$x_index, , drop = FALSE]
+
+  p <- ggplot2::ggplot() +
+    ggplot2::geom_point(
+      data = lower_df,
+      ggplot2::aes(x = x_index, y = plot_y, fill = cor_a),
+      shape = 21,
+      size = config$style$ring_size,
+      stroke = 0.45,
+      color = "grey28",
+      alpha = 0.96
+    ) +
+    ggplot2::geom_point(
+      data = lower_df,
+      ggplot2::aes(x = x_index, y = plot_y),
+      shape = 21,
+      size = config$style$ring_hole_size,
+      fill = "white",
+      color = "white",
+      stroke = 0.2
+    ) +
+    ggplot2::geom_text(
+      data = upper_df,
+      ggplot2::aes(x = x_index, y = plot_y, color = cor_b),
+      label = "★",
+      size = config$style$star_size,
+      fontface = "bold"
+    ) +
+    ggplot2::geom_label(
+      data = diag_df,
+      ggplot2::aes(x = x_index, y = plot_y, label = x),
+      size = 2.8,
+      fontface = "bold",
+      label.size = 0,
+      fill = "grey96",
+      color = "grey20"
+    ) +
+    ggplot2::scale_fill_gradientn(
+      colours = grDevices::colorRampPalette(c(config$style$low, config$style$mid, config$style$high))(50),
+      limits = c(-1, 1),
+      name = paste0(prepared$groups[[1]], " r")
+    ) +
+    ggplot2::scale_color_gradientn(
+      colours = grDevices::colorRampPalette(c(config$style$low, config$style$mid, config$style$high))(50),
+      limits = c(-1, 1),
+      name = paste0(prepared$groups[[2]], " r")
+    ) +
+    ggplot2::scale_x_continuous(breaks = seq_len(n_vars), labels = rep("", n_vars), position = "top", expand = ggplot2::expansion(mult = 0.06)) +
+    ggplot2::scale_y_continuous(breaks = seq_len(n_vars), labels = rep("", n_vars), expand = ggplot2::expansion(mult = 0.06)) +
+    ggplot2::coord_equal(clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = NULL) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.key = ggplot2::element_rect(fill = "white", color = NA),
+      panel.grid = ggplot2::element_blank(),
+      axis.text = ggplot2::element_blank(),
+      axis.ticks = ggplot2::element_blank(),
+      legend.position = "right",
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5)
+    )
+
+  if (isTRUE(config$style$show_values)) {
+    p <- p +
+      ggplot2::geom_text(data = lower_df, ggplot2::aes(x = x_index, y = plot_y, label = label_a), size = 2, color = "grey20") +
+      ggplot2::geom_text(data = upper_df, ggplot2::aes(x = x_index, y = plot_y, label = label_b), size = 2, color = "grey20")
+  }
+  p
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "variables", "group_1", "group_2", "method"),
+      value = c("heatmap/split-shape", length(prepared$variables), prepared$groups[[1]], prepared$groups[[2]], config$method)
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "heatmap/split-shape", variables = length(prepared$variables), groups = prepared$groups, method = config$method))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

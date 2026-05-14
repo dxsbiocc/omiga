@@ -1,0 +1,33 @@
+{
+  "name": "operator-enrichment-r",
+  "version": "0.1.0",
+  "description": "Built-in atomic operator plugin: real ORA and GSEA enrichment via clusterProfiler and fgsea in the shared analysis environment.",
+  "operators": "./operators",
+  "templates": "./templates",
+  "environments": "./environments",
+  "interface": {
+    "displayName": "Functional Enrichment",
+    "shortDescription": "clusterProfiler/fgsea enrichment plots",
+    "longDescription": "Provides one atomic functional enrichment operator for query gene lists or ranked gene tables and GMT/two-column TSV gene sets. ORA is computed with clusterProfiler::enricher and ranked GSEA is computed with fgsea in the shared Omiga analysis environment; missing packages fail explicitly instead of falling back to fake results.",
+    "developerName": "Omiga",
+    "category": "Operator",
+    "capabilities": [
+      "Operator",
+      "Functional Enrichment",
+      "Rscript",
+      "Local Execution",
+      "SSH Execution",
+      "ORA",
+      "GSEA-style",
+      "Dot Plot",
+      "Enrichment Curve",
+      "clusterProfiler",
+      "fgsea",
+      "Shared Analysis Environment"
+    ],
+    "brandColor": "#0F766E",
+    "defaultPrompt": [
+      "Expose the functional enrichment plugin and run it on my ranked or significant gene list."
+    ]
+  }
+}

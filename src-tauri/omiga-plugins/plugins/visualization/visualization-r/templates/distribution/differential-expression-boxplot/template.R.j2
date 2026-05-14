@@ -1,0 +1,202 @@
+#!/usr/bin/env Rscript
+# Template: distribution/differential-expression-boxplot
+# Purpose: Differential-expression boxplot with jittered samples and pairwise
+#          significance brackets.
+#
+# Migration note:
+#   This template directly implements the high-quality OmicsAgent
+#   boxplot/differential_expression visual without carrying forward the
+#   private JSON ggplot2 DSL runtime.
+#
+# Input example:
+#   See example.tsv, converted from OmicsAgent data.json.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template distribution/differential-expression-boxplot
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, as.character(default)))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    group = arg_or(3, "stage"),
+    value = arg_or(4, "TP53"),
+    label = arg_or(5, "patient")
+  ),
+  labels = list(
+    title = arg_or(6, "TCGA-ACC"),
+    x = arg_or(7, ""),
+    y = arg_or(8, "Expression of TP53")
+  ),
+  group_order = parse_csv_arg(9, "Stage I,Stage II,Stage III,Stage IV,Unknown"),
+  style = list(
+    palette = parse_csv_arg(10, "#337ab7,#5bc0de,#5cb85c,#f0ad4e,#d9534f"),
+    box_alpha = parse_number_arg(11, 0.80),
+    point_size = parse_number_arg(12, 3),
+    point_alpha = parse_number_arg(13, 0.60),
+    jitter_width = parse_number_arg(14, 0.20),
+    bracket_text_size = parse_number_arg(15, 3.2),
+    base_size = parse_number_arg(16, 12)
+  ),
+  significance = list(
+    enabled = parse_logical_arg(17, TRUE),
+    alpha = parse_number_arg(18, 0.05),
+    max_brackets = parse_integer_arg(19, 8),
+    test = arg_or(20, "wilcox.test")
+  ),
+  random_seed = parse_integer_arg(21, 7)
+)
+delimiter <- arg_or(22, "auto")
+width <- parse_number_arg(23, 8)
+height <- parse_number_arg(24, 6)
+dpi <- parse_integer_arg(25, 300)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+format_p_value <- function(p) {
+  if (is.na(p)) return("p = NA")
+  if (p < 0.001) return("p < 0.001")
+  sprintf("p = %.2g", p)
+}
+
+safe_pairwise_p <- function(x, y, test) {
+  result <- try({
+    if (identical(test, "t.test")) stats::t.test(x, y) else stats::wilcox.test(x, y)
+  }, silent = TRUE)
+  if (inherits(result, "try-error") || is.null(result$p.value)) return(NA_real_)
+  as.numeric(result$p.value)
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$group, config$columns$value), "distribution/differential-expression-boxplot input")
+  df <- ensure_numeric_columns(df, config$columns$value, "distribution/differential-expression-boxplot input")
+  groups <- unique(as.character(df[[config$columns$group]]))
+  if (length(config$group_order) > 0) {
+    ordered <- config$group_order[config$group_order %in% groups]
+    groups <- c(ordered, setdiff(groups, ordered))
+  }
+  if (length(groups) < 2) {
+    stop("distribution/differential-expression-boxplot requires at least two groups.", call. = FALSE)
+  }
+  df$.group <- factor(as.character(df[[config$columns$group]]), levels = groups)
+  df$.value <- df[[config$columns$value]]
+  df <- stats::na.omit(df)
+  set.seed(config$random_seed)
+  df$.x_jitter <- as.numeric(df$.group) + stats::runif(nrow(df), -config$style$jitter_width, config$style$jitter_width)
+  df
+}
+
+significance_data <- function(df, config) {
+  if (!isTRUE(config$significance$enabled)) return(data.frame())
+  groups <- levels(df$.group)
+  if (length(groups) < 2) return(data.frame())
+  pairs <- utils::combn(groups, 2, simplify = FALSE)
+  rows <- lapply(pairs, function(pair) {
+    left_values <- df$.value[df$.group == pair[[1]]]
+    right_values <- df$.value[df$.group == pair[[2]]]
+    p <- safe_pairwise_p(left_values, right_values, config$significance$test)
+    data.frame(group1 = pair[[1]], group2 = pair[[2]], p = p, stringsAsFactors = FALSE)
+  })
+  out <- do.call(rbind, rows)
+  out <- out[!is.na(out$p) & out$p < config$significance$alpha, , drop = FALSE]
+  if (nrow(out) == 0) return(data.frame())
+  out <- out[order(out$p), , drop = FALSE]
+  out <- utils::head(out, config$significance$max_brackets)
+  y_max <- max(df$.value, na.rm = TRUE)
+  y_range <- diff(range(df$.value, na.rm = TRUE))
+  if (!is.finite(y_range) || y_range == 0) y_range <- 1
+  out$x <- match(out$group1, groups)
+  out$xend <- match(out$group2, groups)
+  out$y <- y_max + y_range * (0.10 + seq_len(nrow(out)) * 0.08)
+  out$tip_y <- out$y - y_range * 0.025
+  out$label <- vapply(out$p, format_p_value, character(1))
+  out
+}
+
+plot_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    plot.title = ggplot2::element_text(size = 14, hjust = 0.5, face = "bold"),
+    legend.position = "none"
+  )
+}
+
+make_plot <- function(df, config) {
+  groups <- levels(df$.group)
+  palette <- config$style$palette
+  if (length(palette) < length(groups)) palette <- rep(palette, length.out = length(groups))
+  palette <- stats::setNames(palette[seq_along(groups)], groups)
+  sig_df <- significance_data(df, config)
+  y_top <- max(df$.value, na.rm = TRUE)
+  if (nrow(sig_df) > 0) y_top <- max(sig_df$y, na.rm = TRUE)
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .group, y = .value, fill = .group)) +
+    ggplot2::geom_boxplot(width = 0.62, alpha = config$style$box_alpha, outlier.shape = NA, color = "grey25", linewidth = 0.55) +
+    ggplot2::geom_point(ggplot2::aes(x = .x_jitter, color = .group), size = config$style$point_size, alpha = config$style$point_alpha, stroke = 0, show.legend = FALSE) +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_color_manual(values = palette, guide = "none") +
+    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.05, 0.12)), limits = c(NA, y_top * 1.04)) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    plot_theme(config)
+
+  if (nrow(sig_df) > 0) {
+    p <- p +
+      ggplot2::geom_segment(data = sig_df, ggplot2::aes(x = x, xend = xend, y = y, yend = y), inherit.aes = FALSE, linewidth = 0.45) +
+      ggplot2::geom_segment(data = sig_df, ggplot2::aes(x = x, xend = x, y = tip_y, yend = y), inherit.aes = FALSE, linewidth = 0.45) +
+      ggplot2::geom_segment(data = sig_df, ggplot2::aes(x = xend, xend = xend, y = tip_y, yend = y), inherit.aes = FALSE, linewidth = 0.45) +
+      ggplot2::geom_text(data = sig_df, ggplot2::aes(x = (x + xend) / 2, y = y, label = label), inherit.aes = FALSE, vjust = -0.25, size = config$style$bracket_text_size)
+  }
+  p
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows", "groups", "test"), value = c("distribution/differential-expression-boxplot", nrow(plot_df), length(levels(plot_df$.group)), config$significance$test)), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "distribution/differential-expression-boxplot", rows = nrow(plot_df), groups = levels(plot_df$.group), test = config$significance$test))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

@@ -1,0 +1,148 @@
+#!/usr/bin/env Rscript
+# Template: scatter/cleveland
+# Purpose: Cleveland dot plot for ranked counts or scores.
+#
+# Migration note:
+#   This template migrates OmicsAgent scatter/cleveland from a private JSON
+#   ggplot2 DSL into direct, editable R/ggplot2 code. The original data.json
+#   has been converted to example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/cleveland
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    item = arg_or(3, "Tissue"),
+    value = arg_or(4, "Count")
+  ),
+  top_n = parse_integer_arg(5, 20),
+  sort_order = tolower(arg_or(6, "descending")),
+  labels = list(
+    title = arg_or(7, "Cleveland"),
+    x = arg_or(8, "Count"),
+    y = arg_or(9, "")
+  ),
+  style = list(
+    segment_color = arg_or(10, "#caccd1"),
+    point_color = arg_or(11, "#1aafd0"),
+    point_fill = arg_or(12, "#ffffff"),
+    outer_point_size = parse_number_arg(13, 5),
+    inner_point_size = parse_number_arg(14, 3),
+    segment_width = parse_number_arg(15, 0.6),
+    base_size = parse_number_arg(16, 14)
+  )
+)
+delimiter <- arg_or(17, "auto")
+width <- parse_number_arg(18, 5)
+height <- parse_number_arg(19, 5)
+dpi <- parse_integer_arg(20, 300)
+
+format_axis_number <- function(x) {
+  format(x, big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$item, config$columns$value), "scatter/cleveland input")
+  df <- ensure_numeric_columns(df, config$columns$value, "scatter/cleveland input")
+  if (!config$sort_order %in% c("descending", "ascending", "input")) {
+    stop("sort_order must be one of: descending, ascending, input", call. = FALSE)
+  }
+  df$.item <- as.character(df[[config$columns$item]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.item), , drop = FALSE]
+  if (nrow(df) == 0) stop("scatter/cleveland input has no usable rows.", call. = FALSE)
+  if (config$sort_order == "descending") {
+    df <- df[order(df$.value, decreasing = TRUE), , drop = FALSE]
+  } else if (config$sort_order == "ascending") {
+    df <- df[order(df$.value, decreasing = FALSE), , drop = FALSE]
+  }
+  if (is.finite(config$top_n) && config$top_n > 0) df <- utils::head(df, config$top_n)
+  df$.item <- factor(df$.item, levels = rev(unique(df$.item)))
+  df$.baseline <- if (all(df$.value >= 0, na.rm = TRUE)) 0 else min(0, min(df$.value, na.rm = TRUE))
+  df
+}
+
+make_plot <- function(df, config) {
+  x_max <- max(df$.value, na.rm = TRUE)
+  x_min <- min(df$.baseline, df$.value, na.rm = TRUE)
+  ggplot2::ggplot(df, ggplot2::aes(x = .value, y = .item)) +
+    ggplot2::geom_segment(
+      ggplot2::aes(x = .baseline, xend = .value, y = .item, yend = .item),
+      linewidth = config$style$segment_width,
+      colour = config$style$segment_color,
+      lineend = "round"
+    ) +
+    ggplot2::geom_point(
+      shape = 21,
+      size = config$style$outer_point_size,
+      stroke = 1,
+      colour = config$style$point_color,
+      fill = config$style$point_fill
+    ) +
+    ggplot2::geom_point(
+      size = config$style$inner_point_size,
+      colour = config$style$point_color
+    ) +
+    ggplot2::scale_x_continuous(
+      labels = format_axis_number,
+      limits = c(x_min, x_max * 1.06),
+      expand = ggplot2::expansion(mult = c(0, 0.02))
+    ) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    ggplot2::theme_minimal(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.grid.major.y = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.title.y = ggplot2::element_blank(),
+      axis.title.x = ggplot2::element_text(size = config$style$base_size, face = "bold"),
+      axis.text.y = ggplot2::element_text(size = config$style$base_size * 0.86),
+      plot.title = ggplot2::element_text(size = config$style$base_size * 1.15, face = "bold", hjust = 0.5)
+    )
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "sort_order", "value_min", "value_max"),
+      value = c("scatter/cleveland", nrow(plot_df), config$sort_order, min(plot_df$.value), max(plot_df$.value))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/cleveland", rows = nrow(plot_df), sort_order = config$sort_order, value_min = min(plot_df$.value), value_max = max(plot_df$.value)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

@@ -1,0 +1,76 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: bwa_index_reference
+  version: 0.1.0
+  name: BWA Index Reference
+  description: Build BWA index files for a FASTA reference genome.
+  tags: [bioinformatics, ngs, alignment, bwa, fasta, index]
+interface:
+  inputs:
+    reference:
+      kind: file
+      required: true
+      description: FASTA reference genome readable by bwa index.
+  params:
+    prefix:
+      kind: string
+      default: reference
+      non_empty: true
+      description: Prefix for generated BWA index files under the run output directory.
+    algorithm:
+      kind: enum
+      enum: [auto, is, bwtsw]
+      default: auto
+      description: BWA index algorithm. Use auto to let the wrapper omit -a.
+    extra:
+      kind: string
+      default: ""
+      description: Additional bwa index arguments, shell-split with shlex.
+  outputs:
+    index_archive:
+      kind: file
+      glob: bwa-index.tar.gz
+      required: true
+      description: Tar archive containing generated BWA index files.
+    index_manifest:
+      kind: file
+      glob: index-manifest.json
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  envRef: ngs-bwa
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+  resourceProfile:
+    tier: heavy
+    localPolicy: warn
+    minCpu: 2
+    recommendedCpu: 8
+    minMemoryGb: 8
+    recommendedMemoryGb: 32
+    diskGb: 50
+    notes:
+      - Large reference indexing can be slow on laptops.
+      - Small references can run locally.
+resources:
+  cpu:
+    default: 2
+    exposed: true
+  walltime:
+    default: 1800s
+    exposed: true
+execution:
+  argv:
+    - python3
+    - ./scripts/ngs_alignment.py
+    - bwa-index
+    - ${inputs.reference}
+    - ${outdir}
+    - ${params.prefix}
+    - ${params.algorithm}
+    - ${params.extra}

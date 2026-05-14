@@ -1,0 +1,94 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: bowtie2_align_reads
+  version: 0.1.0
+  name: Bowtie2 Align Reads
+  description: Align single-end or paired-end FASTQ reads with Bowtie2 and optionally convert/sort to BAM.
+  tags: [bioinformatics, ngs, alignment, bowtie2, fastq, sam, bam]
+interface:
+  inputs:
+    index_prefix:
+      kind: string
+      required: true
+      non_empty: true
+      description: Bowtie2 index prefix supplied to bowtie2 -x.
+    reads1:
+      kind: file
+      required: true
+      description: FASTQ reads, or mate 1 FASTQ for paired-end data.
+    reads2:
+      kind: file
+      required: false
+      description: Optional mate 2 FASTQ for paired-end data.
+  params:
+    threads:
+      kind: integer
+      default: 4
+      minimum: 1
+      maximum: 128
+    output:
+      kind: enum
+      enum: [sam, bam, sorted_bam]
+      default: sorted_bam
+    sort_order:
+      kind: enum
+      enum: [coordinate, queryname]
+      default: coordinate
+    index_bam:
+      kind: boolean
+      default: true
+    extra:
+      kind: string
+      default: ""
+      description: Additional bowtie2 arguments; do not include -x, -U, -1, -2, or --threads.
+  outputs:
+    alignment:
+      kind: file
+      glob: bowtie2-aligned.*
+      required: true
+    alignment_index:
+      kind: file
+      glob: bowtie2-aligned.bam.bai
+      required: false
+    summary:
+      kind: json
+      required: true
+runtime:
+  envRef: ngs-bowtie2
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+  resourceProfile:
+    tier: hpc-recommended
+    localPolicy: warn
+    minCpu: 4
+    recommendedCpu: 16
+    minMemoryGb: 8
+    recommendedMemoryGb: 32
+    diskGb: 100
+    notes:
+      - Production FASTQ alignment can produce large SAM/BAM outputs.
+      - Use SSH/server/HPC for multi-sample or whole-genome runs.
+resources:
+  cpu:
+    default: 4
+    exposed: true
+  walltime:
+    default: 7200s
+    exposed: true
+execution:
+  argv:
+    - python3
+    - ./scripts/ngs_alignment.py
+    - bowtie2-align
+    - ${inputs.index_prefix}
+    - ${inputs.reads1}
+    - ${inputs.reads2}
+    - ${outdir}
+    - ${params.threads}
+    - ${params.output}
+    - ${params.sort_order}
+    - ${params.index_bam}
+    - ${params.extra}

@@ -1,0 +1,237 @@
+#!/usr/bin/env Rscript
+# Template: bar/stacked-percent
+# Purpose: Publication-style faceted percent bars plus generic stacked/percent bars.
+#
+# Migration note:
+#   The default faceted_percent mode directly implements the high-quality
+#   OmicsAgent bar/percent visual from backend/scripts/visual/bar/percent.
+#   The old private JSON ggplot2 DSL is intentionally not used at runtime.
+#
+# Input example:
+#   See example.tsv, converted from OmicsAgent data.json.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template bar/stacked-percent
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "type"),
+    segment = arg_or(4, "symbol"),
+    value = arg_or(5, "freq")
+  ),
+  mode = tolower(arg_or(6, "faceted_percent")),
+  labels = list(
+    title = arg_or(7, ""),
+    x = "",
+    y = "",
+    fill = "Genes"
+  ),
+  style = list(
+    palette = c("#009392", "#39b185", "#9ccb86", "#e9e29c", "#eeb479", "#e88471", "#cf597e"),
+    base_size = 12,
+    strip_size = 15,
+    background_alpha = 0.2,
+    bar_width = 0.72,
+    panel_spacing = 1
+  ),
+  axis = list(
+    percent_max = parse_number_arg(8, 0.5)
+  )
+)
+delimiter <- arg_or(9, "auto")
+width <- parse_number_arg(10, 8)
+height <- parse_number_arg(11, 6)
+dpi <- parse_integer_arg(12, 300)
+
+valid_modes <- c("faceted_percent", "stacked", "percent")
+if (!config$mode %in% valid_modes) {
+  stop(sprintf("mode must be one of: %s", paste(valid_modes, collapse = ", ")), call. = FALSE)
+}
+
+format_percent_axis <- function(x) {
+  paste0(format(abs(x), trim = TRUE, scientific = FALSE), "%")
+}
+
+source_palette <- function(values, config) {
+  unique_values <- unique(as.character(values))
+  palette <- config$style$palette
+  if (length(unique_values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(unique_values))
+  } else {
+    palette <- palette[seq_along(unique_values)]
+  }
+  stats::setNames(palette, unique_values)
+}
+
+bar_theme <- function(config, faceted = FALSE) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base +
+    ggplot2::theme(
+      axis.line.y = ggplot2::element_blank(),
+      axis.ticks.y = ggplot2::element_blank(),
+      panel.grid.major.y = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.spacing.x = grid::unit(config$style$panel_spacing, "lines"),
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.background = ggplot2::element_rect(fill = "white", color = NA),
+      strip.text.x = ggplot2::element_text(size = config$style$strip_size, vjust = 0, face = "bold"),
+      strip.background = ggplot2::element_rect(fill = "grey95", color = NA)
+    ) +
+    if (faceted) {
+      ggplot2::theme(
+        legend.position = "none",
+        axis.text.x = ggplot2::element_text(size = 8),
+        axis.title.x = ggplot2::element_text(size = 10)
+      )
+    } else {
+      ggplot2::theme(legend.position = "right")
+    }
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$category, config$columns$segment, config$columns$value), "bar/stacked-percent input")
+  df <- ensure_numeric_columns(df, config$columns$value, "bar/stacked-percent input")
+  category_levels <- unique(as.character(df[[config$columns$category]]))
+  segment_levels <- unique(as.character(df[[config$columns$segment]]))
+  agg <- stats::aggregate(
+    df[[config$columns$value]],
+    by = list(category = df[[config$columns$category]], segment = df[[config$columns$segment]]),
+    FUN = sum,
+    na.rm = TRUE
+  )
+  colnames(agg) <- c(".category", ".segment", ".value")
+  agg$.category <- factor(as.character(agg$.category), levels = category_levels)
+  agg$.segment <- factor(as.character(agg$.segment), levels = segment_levels)
+  totals <- stats::aggregate(agg$.value, by = list(.category = agg$.category), FUN = sum, na.rm = TRUE)
+  colnames(totals) <- c(".category", ".total")
+  agg <- merge(agg, totals, by = ".category", all.x = TRUE, sort = FALSE)
+  agg$.proportion <- ifelse(agg$.total == 0, 0, agg$.value / agg$.total)
+  agg$.percent <- agg$.value * 100
+  agg$.plot_value <- if (config$mode == "percent") agg$.proportion else agg$.value
+  agg
+}
+
+make_faceted_percent_plot <- function(df, config) {
+  palette <- source_palette(df$.segment, config)
+  background <- expand.grid(
+    .category = levels(df$.category),
+    .segment = levels(df$.segment),
+    stringsAsFactors = FALSE
+  )
+  background$.category <- factor(background$.category, levels = levels(df$.category))
+  background$.segment <- factor(background$.segment, levels = levels(df$.segment))
+  background$.background_value <- -abs(config$axis$percent_max)
+  df$.faceted_value <- -df$.percent
+  axis_max <- abs(config$axis$percent_max)
+
+  ggplot2::ggplot(df, ggplot2::aes(x = .faceted_value, y = .category, fill = .segment)) +
+    ggplot2::geom_col(
+      data = background,
+      ggplot2::aes(x = .background_value, y = .category, fill = .segment),
+      inherit.aes = FALSE,
+      alpha = config$style$background_alpha,
+      width = config$style$bar_width,
+      orientation = "y"
+    ) +
+    ggplot2::geom_col(width = config$style$bar_width, orientation = "y") +
+    ggplot2::facet_wrap(stats::as.formula("~ .segment"), nrow = 1) +
+    ggplot2::scale_fill_manual(name = config$labels$fill, values = palette, drop = FALSE) +
+    ggplot2::scale_x_continuous(
+      expand = c(0, 0),
+      limits = c(-axis_max, 0),
+      breaks = c(-axis_max, 0),
+      labels = format_percent_axis
+    ) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    bar_theme(config, faceted = TRUE)
+}
+
+make_stacked_plot <- function(df, config) {
+  palette <- source_palette(df$.segment, config)
+  y_label <- if (config$mode == "percent") "Percent" else config$columns$value
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .category, y = .plot_value, fill = .segment)) +
+    ggplot2::geom_col(width = config$style$bar_width, color = "white", linewidth = 0.2) +
+    ggplot2::scale_fill_manual(values = palette, drop = FALSE) +
+    ggplot2::labs(title = config$labels$title, x = config$columns$category, y = y_label, fill = config$columns$segment) +
+    bar_theme(config, faceted = FALSE)
+  if (config$mode == "percent") {
+    p <- p + ggplot2::scale_y_continuous(
+      labels = function(x) paste0(round(100 * x), "%"),
+      limits = c(0, 1),
+      expand = ggplot2::expansion(mult = c(0, 0.03))
+    )
+  }
+  p
+}
+
+make_plot <- function(df, config) {
+  if (config$mode == "faceted_percent") {
+    make_faceted_percent_plot(df, config)
+  } else {
+    make_stacked_plot(df, config)
+  }
+}
+customize_plot <- function(p, df, config) { p }
+
+save_faceted_grob_outputs <- function(plot, outdir, prefix = "figure", width = 8, height = 6, dpi = 300) {
+  outdir <- ensure_dir(outdir)
+  grob <- ggplot2::ggplotGrob(plot)
+  axis_b_indices <- grep("axis-b", grob$layout$name)
+  if (length(axis_b_indices) > 1) {
+    for (index in axis_b_indices[-1]) {
+      grob$grobs[[index]] <- grid::nullGrob()
+    }
+  }
+
+  pdf_path <- file.path(outdir, paste0(prefix, ".pdf"))
+  ggplot2::ggsave(pdf_path, plot = grob, width = width, height = height, units = "in", device = "pdf", bg = "white")
+
+  png_path <- file.path(outdir, paste0(prefix, ".png"))
+  ggplot2::ggsave(png_path, plot = grob, width = width, height = height, units = "in", dpi = normalize_png_dpi(dpi), device = "png", bg = "white")
+
+  invisible(c(png_path, pdf_path))
+}
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  if (config$mode == "faceted_percent") {
+    save_faceted_grob_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi)
+  } else {
+    save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  }
+  write_tsv(data.frame(metric = c("template", "rows", "mode"), value = c("bar/stacked-percent", nrow(plot_df), config$mode)), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "bar/stacked-percent", rows = nrow(plot_df), mode = config$mode))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

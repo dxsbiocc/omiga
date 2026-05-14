@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+set -eu
+case "$(uname -s 2>/dev/null)-$(uname -m 2>/dev/null)" in
+  Darwin-arm64) exec "$(dirname "$0")/darwin-arm64/computer-use" "$@" ;;
+  Darwin-x86_64) exec "$(dirname "$0")/darwin-x64/computer-use" "$@" ;;
+  *) echo "computer-use backend is only available on macOS in this tracer-bullet plan" >&2; exit 2 ;;
+esac

@@ -146,4 +146,127 @@ describe("ToolCallCard", () => {
     expect(html).toContain("Diagnostics:");
     expect(html).toContain("Raw output");
   });
+
+  it("keeps tool-row hover scoped to the row surface instead of animating every icon", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-1"
+        messageId="tool-hover"
+        content="done"
+        timestamp={1000}
+        toolCall={{
+          name: "bash",
+          status: "completed",
+          input: JSON.stringify({ description: "Run hover regression" }),
+          output: "done",
+          completedAt: 1200,
+        }}
+        previousAssistantHasText
+        nestedOpen={false}
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain(":hover");
+    expect(html).not.toContain(":hover&gt;svg");
+    expect(html).not.toContain(":hover>svg");
+    expect(html).not.toContain("svg:first-of-type");
+    expect(html).not.toContain("svg:nth-of-type");
+  });
+
+  it("summarizes computer_type input without rendering typed text", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-computer"
+        messageId="tool-computer"
+        content=""
+        timestamp={1000}
+        toolCall={{
+          name: "computer_type",
+          status: "completed",
+          input: JSON.stringify({
+            observationId: "obs_1",
+            targetWindowId: 7,
+            text: "password=hunter2",
+          }),
+          output: JSON.stringify({ ok: true }),
+          completedAt: 1100,
+        }}
+        previousAssistantHasText
+        nestedOpen
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("computer_type · text hidden");
+    expect(html).toContain("[hidden 16 chars]");
+    expect(html).not.toContain("hunter2");
+    expect(html).not.toContain("password=hunter2");
+  });
+
+  it("renders operator/template execution insight before raw output", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-template"
+        messageId="tool-template"
+        content=""
+        timestamp={1000}
+        toolCall={{
+          name: "template_execute",
+          status: "completed",
+          input: JSON.stringify({ id: "bulk_differential_expression_basic" }),
+          output: JSON.stringify({
+            status: "succeeded",
+            runId: "oprun_1",
+            runDir: "/tmp/oprun_1",
+            operator: {
+              alias: "bulk_de",
+              id: "omics_differential_expression_basic",
+              version: "0.1.0",
+            },
+            runContext: {
+              kind: "template",
+              parentExecutionId: "execrec_parent",
+            },
+            paramSources: {
+              method: "user_preflight",
+              fdr: "default",
+            },
+            preflight: {
+              answeredParams: [{ param: "method", question: "Choose method" }],
+              paramsBySource: {
+                method: "user_preflight",
+              },
+            },
+            selectedParams: {
+              method: "DESeq2",
+            },
+            outputs: {
+              table: [{ path: "/tmp/oprun_1/out/table.tsv" }],
+            },
+          }),
+          completedAt: 1100,
+        }}
+        previousAssistantHasText
+        nestedOpen
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Template execution");
+    expect(html).toContain("Template run");
+    expect(html).toContain("parent: execrec_parent");
+    expect(html).toContain("paramSources user_preflight: 1");
+    expect(html).toContain("selected: method=DESeq2");
+    expect(html).toContain("Raw output");
+  });
 });

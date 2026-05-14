@@ -96,14 +96,14 @@ impl RetrievalRouteRegistry {
         };
         let Some(entry) = self.entries.get(&key) else {
             return Err(RetrievalError::InvalidRequest {
-                message: format!("Unsupported retrieval source: {category}.{source}"),
+                message: format!("Unsupported retrieval resource: {category}.{source}"),
             });
         };
         let selected = entry.select(keys);
         if !selected.supports_operation(request.operation) {
             return Err(RetrievalError::InvalidRequest {
                 message: format!(
-                    "retrieval source `{}.{}` does not support {}",
+                    "retrieval resource `{}.{}` does not support {}",
                     selected.category,
                     selected.id,
                     request.operation.as_str()
@@ -111,12 +111,16 @@ impl RetrievalRouteRegistry {
             });
         }
         if !is_enabled(keys, &selected) {
+            let settings_target = match selected.provider {
+                RetrievalProviderKind::Builtin => "Settings → Search",
+                RetrievalProviderKind::Plugin => "Settings → Plugins",
+            };
             return Err(RetrievalError::SourceDisabled {
                 category: selected.category.clone(),
                 source_id: selected.id.clone(),
                 message: format!(
-                    "{}.{} is disabled. Enable it in Settings → Search.",
-                    selected.category, selected.id
+                    "{}.{} is disabled. Enable it in {settings_target}.",
+                    selected.category, selected.id,
                 ),
             });
         }
@@ -124,7 +128,7 @@ impl RetrievalRouteRegistry {
     }
 
     fn insert_plugin_registration(&mut self, plugin: PluginRetrievalRegistration) {
-        for source in plugin.retrieval.sources.clone() {
+        for source in plugin.retrieval.resources.clone() {
             let registration = SourceRegistration::from_plugin(&plugin, source);
             let key = registration.key();
             match self.entries.get(&key).cloned() {
@@ -138,7 +142,7 @@ impl RetrievalRouteRegistry {
                     );
                 }
                 Some(_) => self.errors.push(format!(
-                    "plugin retrieval source `{}` from `{}` conflicts with an existing source; set replacesBuiltin=true only for intentional replacements",
+                    "plugin retrieval resource `{}` from `{}` conflicts with an existing resource; set replacesBuiltin=true only for intentional replacements",
                     key.display(), plugin.plugin_id
                 )),
                 None => {
@@ -202,7 +206,7 @@ impl SourceRegistration {
 
     fn from_plugin(
         plugin: &PluginRetrievalRegistration,
-        source: super::plugin::manifest::PluginRetrievalSource,
+        source: crate::domain::plugin_runtime::retrieval::manifest::PluginRetrievalResource,
     ) -> Self {
         Self {
             category: source.category,
@@ -258,23 +262,25 @@ fn is_plugin_source_explicitly_enabled(
     keys: &WebSearchApiKeys,
     source: &SourceRegistration,
 ) -> bool {
-    keys.enabled_sources_by_category
+    if let Some(values) = keys
+        .enabled_sources_by_category
         .as_ref()
         .and_then(|map| map.get(&source.category))
-        .map(|values| {
-            values
-                .iter()
-                .map(|value| normalize_id(value))
-                .any(|id| id == source.id)
-        })
-        .unwrap_or(source.default_enabled)
+    {
+        return values
+            .iter()
+            .map(|value| normalize_id(value))
+            .any(|id| id == source.id);
+    }
+
+    source.default_enabled
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::retrieval::plugin::manifest::{
-        PluginRetrievalManifest, PluginRetrievalRuntime, PluginRetrievalSource,
+    use crate::domain::plugin_runtime::retrieval::manifest::{
+        PluginRetrievalManifest, PluginRetrievalResource, PluginRetrievalRuntime,
     };
     use crate::domain::retrieval::types::{RetrievalRequest, RetrievalTool};
     use std::collections::HashMap;
@@ -300,6 +306,14 @@ mod tests {
     }
 
     fn plugin_registration(source_id: &str, replaces_builtin: bool) -> PluginRetrievalRegistration {
+        plugin_registration_in("dataset", source_id, replaces_builtin)
+    }
+
+    fn plugin_registration_in(
+        category: &str,
+        source_id: &str,
+        replaces_builtin: bool,
+    ) -> PluginRetrievalRegistration {
         PluginRetrievalRegistration {
             plugin_id: "mock@tests".to_string(),
             plugin_root: PathBuf::from("/tmp/mock"),
@@ -315,9 +329,9 @@ mod tests {
                     cancel_grace_ms: None,
                     concurrency: 1,
                 },
-                sources: vec![PluginRetrievalSource {
+                resources: vec![PluginRetrievalResource {
                     id: source_id.to_string(),
-                    category: "dataset".to_string(),
+                    category: category.to_string(),
                     label: source_id.to_string(),
                     description: String::new(),
                     aliases: vec![],
@@ -376,6 +390,55 @@ mod tests {
     }
 
     #[test]
+    fn plugin_only_category_requires_explicit_enablement_or_config_default() {
+        let registry = RetrievalRouteRegistry::new(vec![plugin_registration_in(
+            "external_domain",
+            "external_source",
+            false,
+        )]);
+        assert!(registry.errors().is_empty());
+
+        let disabled_by_default = registry.resolve_request(
+            &request(
+                "external_domain",
+                "external_source",
+                RetrievalOperation::Search,
+            ),
+            &WebSearchApiKeys::default(),
+        );
+        assert!(matches!(
+            disabled_by_default,
+            Err(RetrievalError::SourceDisabled { .. })
+        ));
+
+        let enabled = registry
+            .resolve_request(
+                &request(
+                    "external_domain",
+                    "external_source",
+                    RetrievalOperation::Search,
+                ),
+                &keys_with_enabled("external_domain", &["external_source"]),
+            )
+            .unwrap();
+        assert_eq!(enabled.provider, RetrievalProviderKind::Plugin);
+        assert_eq!(enabled.plugin_id.as_deref(), Some("mock@tests"));
+
+        let disabled = registry.resolve_request(
+            &request(
+                "external_domain",
+                "external_source",
+                RetrievalOperation::Search,
+            ),
+            &keys_with_enabled("external_domain", &[]),
+        );
+        assert!(matches!(
+            disabled,
+            Err(RetrievalError::SourceDisabled { .. })
+        ));
+    }
+
+    #[test]
     fn plugin_cannot_collide_with_builtin_without_replaces_builtin() {
         let registry = RetrievalRouteRegistry::new(vec![plugin_registration("geo", false)]);
 
@@ -414,7 +477,7 @@ mod tests {
     #[test]
     fn unsupported_operation_is_rejected() {
         let mut plugin = plugin_registration("mock_source", false);
-        plugin.retrieval.sources[0].capabilities = vec!["search".to_string()];
+        plugin.retrieval.resources[0].capabilities = vec!["search".to_string()];
         let registry = RetrievalRouteRegistry::new(vec![plugin]);
         let err = registry
             .resolve_request(

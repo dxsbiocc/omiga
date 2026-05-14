@@ -1,0 +1,91 @@
+{
+  "name": "retrieval-knowledge-ncbi-gene",
+  "version": "0.1.0",
+  "description": "Runs NCBI Gene search/query/fetch through Omiga local subprocess routing.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/retrieval_knowledge_ncbi_gene.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "ncbi_gene",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "retrieval-knowledge-ncbi-gene"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "resources": [
+      {
+        "id": "ncbi_gene",
+        "category": "knowledge",
+        "label": "NCBI Gene",
+        "description": "Gene ID, symbol, organism, and genomic location metadata via NCBI E-utilities.",
+        "aliases": [
+          "gene",
+          "ncbi_gene_id",
+          "gene_id"
+        ],
+        "subcategories": [
+          "gene"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key",
+          "pubmed_email",
+          "pubmed_tool_name"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public NCBI E-utilities db=gene calls; optional NCBI credentials are projected only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "organism",
+            "type": "string",
+            "description": "Optional organism filter."
+          },
+          {
+            "name": "taxon_id",
+            "type": "string",
+            "description": "Optional NCBI taxonomy ID filter."
+          },
+          {
+            "name": "retmax",
+            "type": "number",
+            "description": "Maximum NCBI Gene records to request."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "NCBI Gene Retrieval Resource",
+    "shortDescription": "NCBI Gene as a local retrieval plugin",
+    "longDescription": "Runs NCBI Gene search/query/fetch through Omiga local subprocess routing.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Knowledge",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#10B981",
+    "defaultPrompt": [
+      "Query NCBI Gene for TP53 in Homo sapiens.",
+      "Fetch an NCBI Gene ID through the plugin."
+    ]
+  }
+}

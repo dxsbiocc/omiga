@@ -1,0 +1,198 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_diagonal
+  version: 0.1.0
+  name: Diagonal
+  description: Diagonal log2 comparison scatter migrated from OmicsAgent scatter/diagonal with up/down coloring, corner labels, and top gene annotations.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - scatter
+  - diagonal-comparison
+  - differential-expression
+classification:
+  category: visualization/scatter
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - scatter
+  - diagonal-comparison
+  - differential-expression
+  stageInput:
+  - table
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Wide CSV/TSV table with paired x/y abundance columns, group labels, and feature labels. See example.tsv converted from OmicsAgent data.json.
+  params:
+    x_column:
+      kind: string
+      default: WT
+    y_column:
+      kind: string
+      default: KO
+    group_column:
+      kind: string
+      default: group
+    label_column:
+      kind: string
+      default: symbol
+    title:
+      kind: string
+      default: Yap1-KO
+    x_label:
+      kind: string
+      default: WT
+    y_label:
+      kind: string
+      default: KO
+    up_label:
+      kind: string
+      default: Up
+    down_label:
+      kind: string
+      default: Down
+    up_color:
+      kind: string
+      default: '#a16928'
+    none_color:
+      kind: string
+      default: '#edeac2'
+    down_color:
+      kind: string
+      default: '#2887a1'
+    label_text_color:
+      kind: string
+      default: '#525e61'
+    point_size:
+      kind: number
+      default: 3
+    point_alpha:
+      kind: number
+      default: 0.5
+    label_size:
+      kind: number
+      default: 3
+    corner_label_size:
+      kind: number
+      default: 6
+    base_size:
+      kind: number
+      default: 12
+    top_label_count:
+      kind: integer
+      default: 10
+    pseudocount:
+      kind: number
+      default: 0
+    xmin:
+      kind: string
+      default: auto
+    xmax:
+      kind: string
+      default: auto
+    ymin:
+      kind: string
+      default: auto
+    ymax:
+      kind: string
+      default: auto
+    show_diagonal:
+      kind: boolean
+      default: true
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 6
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- diagonal_scatter
+- scatter_diagonal
+- diagonal_comparison
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.x_column}
+  - ${params.y_column}
+  - ${params.group_column}
+  - ${params.label_column}
+  - ${params.title}
+  - ${params.x_label}
+  - ${params.y_label}
+  - ${params.up_label}
+  - ${params.down_label}
+  - ${params.up_color}
+  - ${params.none_color}
+  - ${params.down_color}
+  - ${params.label_text_color}
+  - ${params.point_size}
+  - ${params.point_alpha}
+  - ${params.label_size}
+  - ${params.corner_label_size}
+  - ${params.base_size}
+  - ${params.top_label_count}
+  - ${params.pseudocount}
+  - ${params.xmin}
+  - ${params.xmax}
+  - ${params.ymin}
+  - ${params.ymax}
+  - ${params.show_diagonal}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

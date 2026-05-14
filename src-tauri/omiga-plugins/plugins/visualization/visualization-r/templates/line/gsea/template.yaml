@@ -1,0 +1,122 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_line_gsea
+  version: 0.1.0
+  name: GSEA Curve
+  description: Running enrichment-score curve with optional hit markers for ranked gene-set style data.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - line
+  - gsea
+  - enrichment
+  - omics-preset
+classification:
+  category: visualization/line
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - line
+  - gsea
+  - enrichment
+  - omics-preset
+  stageInput:
+  - ranked_table
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Ranked enrichment-score table. See this template's example.tsv for the expected shape.
+  params:
+    rank_column:
+      kind: string
+      default: rank
+    score_column:
+      kind: string
+      default: running_score
+    hit_column:
+      kind: string
+      default: hit
+      description: Optional hit marker column with TRUE/FALSE, 1/0, or yes/no values.
+    pathway_column:
+      kind: string
+      default: pathway
+      description: Optional pathway/group column for multiple curves.
+    title:
+      kind: string
+      default: GSEA enrichment curve
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- gsea
+- enrichment_curve
+- gsea_curve
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.rank_column}
+  - ${params.score_column}
+  - ${params.hit_column}
+  - ${params.pathway_column}
+  - ${params.title}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

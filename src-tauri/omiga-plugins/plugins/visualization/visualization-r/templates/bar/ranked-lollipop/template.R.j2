@@ -1,0 +1,72 @@
+#!/usr/bin/env Rscript
+# Template: bar/ranked-lollipop
+# Purpose: Ranked score/lollipop plot for pathway scores, feature effects, or ordered metrics.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template bar/ranked-lollipop
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(item = arg_or(3, "item"), score = arg_or(4, "score"), group = arg_or(5, "group")),
+  top_n = as.integer(arg_or(6, "12")),
+  sort_by = tolower(arg_or(7, "abs_value")),
+  labels = list(title = arg_or(8, "Ranked lollipop plot")),
+  style = list(base_size = 12, point_size = 3.2)
+)
+delimiter <- arg_or(9, "auto"); width <- as.numeric(arg_or(10, "7")); height <- as.numeric(arg_or(11, "5.5")); dpi <- as.integer(arg_or(12, "300"))
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$item, config$columns$score), "bar/ranked-lollipop input")
+  df <- ensure_numeric_columns(df, config$columns$score, "bar/ranked-lollipop input")
+  if (!config$sort_by %in% c("value", "abs_value")) stop("sort_by must be one of: value, abs_value", call. = FALSE)
+  key <- if (config$sort_by == "abs_value") abs(df[[config$columns$score]]) else df[[config$columns$score]]
+  df <- df[order(key, decreasing = TRUE), , drop = FALSE]
+  if (is.finite(config$top_n) && config$top_n > 0) df <- utils::head(df, config$top_n)
+  df[[config$columns$item]] <- factor(df[[config$columns$item]], levels = rev(df[[config$columns$item]]))
+  df
+}
+
+make_plot <- function(df, config) {
+  group_col <- resolve_optional_column(df, config$columns$group)
+  mapping <- ggplot2::aes(x = .data[[config$columns$item]], y = .data[[config$columns$score]])
+  if (!is.null(group_col)) mapping <- ggplot2::aes(x = .data[[config$columns$item]], y = .data[[config$columns$score]], color = .data[[group_col]])
+  p <- ggplot2::ggplot(df, mapping) +
+    ggplot2::geom_hline(yintercept = 0, linewidth = 0.35, color = "grey50") +
+    ggplot2::geom_segment(ggplot2::aes(xend = .data[[config$columns$item]], y = 0, yend = .data[[config$columns$score]]), linewidth = 0.7, alpha = 0.82) +
+    ggplot2::geom_point(size = config$style$point_size) +
+    ggplot2::coord_flip() +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = config$columns$score, color = group_col) +
+    theme_visualization(base_size = config$style$base_size)
+  if (!is.null(group_col)) p <- p + ggplot2::scale_colour_manual(values = visualization_palette(length(unique(df[[group_col]]))))
+  p
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows", "sort_by"), value = c("bar/ranked-lollipop", nrow(plot_df), config$sort_by)), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "bar/ranked-lollipop", rows = nrow(plot_df), sort_by = config$sort_by))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

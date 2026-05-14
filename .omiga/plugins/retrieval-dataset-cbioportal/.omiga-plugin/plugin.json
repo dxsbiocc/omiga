@@ -1,0 +1,78 @@
+{
+  "name": "retrieval-dataset-cbioportal",
+  "version": "0.1.0",
+  "description": "Runs cBioPortal study search/query/fetch through Omiga local subprocess routing.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/retrieval_dataset_cbioportal.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "cbioportal",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "retrieval-dataset-cbioportal"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "resources": [
+      {
+        "id": "cbioportal",
+        "category": "dataset",
+        "label": "cBioPortal",
+        "description": "Cancer genomics study metadata via the cBioPortal REST API.",
+        "aliases": [
+          "cbio_portal",
+          "cbio",
+          "cancer_genomics",
+          "tcga"
+        ],
+        "subcategories": [
+          "cancer_genomics"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public cBioPortal study API."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "pageSize",
+            "type": "number",
+            "description": "Maximum studies to request from cBioPortal."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "cBioPortal Retrieval Resource",
+    "shortDescription": "cBioPortal cancer study metadata as a local retrieval plugin",
+    "longDescription": "Runs cBioPortal study search/query/fetch through Omiga local subprocess routing.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Dataset",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#EA580C",
+    "defaultPrompt": [
+      "Search cBioPortal for breast cancer studies.",
+      "Fetch a cBioPortal study through the plugin."
+    ]
+  }
+}

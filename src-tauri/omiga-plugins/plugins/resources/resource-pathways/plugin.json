@@ -1,0 +1,249 @@
+{
+  "name": "resource-pathways",
+  "version": "0.1.0",
+  "description": "Aggregates public pathway and gene-set databases including Reactome, Gene Ontology, MSigDB, and KEGG.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/retrieval_pathway_sources.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "reactome,gene_ontology,msigdb,kegg",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "resource-pathways"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "resources": [
+      {
+        "id": "reactome",
+        "category": "knowledge",
+        "label": "Reactome",
+        "description": "Curated biological pathway and reaction knowledgebase via Reactome Content and Analysis services.",
+        "aliases": [
+          "reactome_pathway",
+          "reactome_pathways",
+          "reaction_network"
+        ],
+        "subcategories": [
+          "pathway"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public Reactome APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "query",
+            "type": "string",
+            "description": "Pathway keyword, Reactome stable ID, or identifier list for analysis."
+          },
+          {
+            "name": "species",
+            "type": "string",
+            "description": "Reactome species filter, default Homo sapiens."
+          },
+          {
+            "name": "identifiers",
+            "type": "string",
+            "description": "Newline/comma separated genes/proteins for overrepresentation analysis."
+          },
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum pathways to return."
+          }
+        ]
+      },
+      {
+        "id": "gene_ontology",
+        "category": "knowledge",
+        "label": "Gene Ontology",
+        "description": "Structured GO terms for biological process, molecular function, and cellular component via QuickGO.",
+        "aliases": [
+          "go",
+          "quickgo",
+          "go_terms",
+          "gene_ontology_terms"
+        ],
+        "subcategories": [
+          "pathway"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI QuickGO API."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "query",
+            "type": "string",
+            "description": "GO keyword or GO:nnnnnnn term ID."
+          },
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum GO terms to return."
+          }
+        ]
+      },
+      {
+        "id": "msigdb",
+        "category": "knowledge",
+        "label": "MSigDB",
+        "description": "Molecular Signatures Database gene-set collections for GSEA, including Hallmark, GO, Reactome, and KEGG-derived sets.",
+        "aliases": [
+          "molecular_signatures_database",
+          "gsea_msigdb",
+          "gene_sets",
+          "gmt"
+        ],
+        "subcategories": [
+          "pathway"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public MSigDB pages/JSON endpoints; respect Broad/MSigDB terms for redistribution."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "query",
+            "type": "string",
+            "description": "Gene-set name keyword or exact MSigDB set name."
+          },
+          {
+            "name": "collection",
+            "type": "string",
+            "description": "Optional MSigDB collection filter, e.g. H, GO:BP, CP:REACTOME."
+          },
+          {
+            "name": "species",
+            "type": "string",
+            "description": "MSigDB namespace, default human."
+          },
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum gene sets to return."
+          }
+        ]
+      },
+      {
+        "id": "kegg",
+        "category": "knowledge",
+        "label": "KEGG",
+        "description": "KEGG REST API for pathway maps, gene-pathway links, modules, compounds, reactions, enzymes, diseases, and drugs.",
+        "aliases": [
+          "kegg_pathway",
+          "kegg_rest",
+          "kyoto_encyclopedia_of_genes_and_genomes"
+        ],
+        "subcategories": [
+          "pathway"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "KEGG REST API is available for academic use by academic users; commercial use may require licensing."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "query",
+            "type": "string",
+            "description": "Pathway keyword, KEGG ID, or source ID for link/conv workflows."
+          },
+          {
+            "name": "organism",
+            "type": "string",
+            "description": "KEGG organism code for pathway listing, default hsa."
+          },
+          {
+            "name": "database",
+            "type": "string",
+            "description": "KEGG database, default pathway."
+          },
+          {
+            "name": "mode",
+            "type": "string",
+            "description": "Optional operation mode: list, find, link, conv, info, ddi."
+          },
+          {
+            "name": "target",
+            "type": "string",
+            "description": "Target database for link/conv, e.g. pathway, genes, ncbi-geneid, uniprot."
+          },
+          {
+            "name": "option",
+            "type": "string",
+            "description": "Optional get/find format such as kgml, json, aaseq, formula, exact_mass."
+          },
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum entries to return."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "Pathway Databases",
+    "shortDescription": "Reactome, Gene Ontology, MSigDB, and KEGG pathway/gene-set retrieval",
+    "longDescription": "Aggregates public pathway and gene-set resources for Search / Query / Fetch: Reactome pathway search and enrichment analysis, Gene Ontology term lookup through QuickGO, MSigDB gene-set search/detail, and KEGG REST pathway workflows adapted from the referenced kegg-database skill.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Knowledge",
+      "Pathways",
+      "Gene Sets",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#F97316",
+    "websiteUrl": "https://github.com/dxsbiocc/omiga-plugins",
+    "defaultPrompt": [
+      "Search Reactome, Gene Ontology, MSigDB, or KEGG for apoptosis pathways.",
+      "Fetch a KEGG pathway ID, Reactome stable ID, GO term, or MSigDB gene set through the pathway plugin."
+    ]
+  }
+}

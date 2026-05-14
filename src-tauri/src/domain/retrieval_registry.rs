@@ -263,6 +263,56 @@ pub fn normalize_enabled_map(
     kind: RegistryEntryKind,
 ) -> HashMap<String, Vec<String>> {
     let mut out = HashMap::new();
+    let categories = category_ids();
+    let known = categories.iter().copied().collect::<HashSet<_>>();
+    for (category, items) in values {
+        let category = normalize_id(&category);
+        if category.is_empty() {
+            continue;
+        }
+        if known.contains(category.as_str()) {
+            out.insert(
+                category.clone(),
+                normalize_enabled_ids(&category, &items, kind, false),
+            );
+        } else {
+            out.insert(category, normalize_unregistered_enabled_ids(&items));
+        }
+    }
+    out
+}
+
+pub fn normalize_unregistered_enabled_ids(values: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        let id = normalize_id(value);
+        if !id.is_empty() && !out.iter().any(|item| item == &id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+pub fn configured_extra_enabled_categories(
+    values: &HashMap<String, Vec<String>>,
+) -> HashMap<String, Vec<String>> {
+    let known = category_ids().iter().copied().collect::<HashSet<_>>();
+    let mut out = HashMap::new();
+    for (category, items) in values {
+        let category = normalize_id(category);
+        if category.is_empty() || known.contains(category.as_str()) {
+            continue;
+        }
+        out.insert(category, normalize_unregistered_enabled_ids(items));
+    }
+    out
+}
+
+pub fn normalize_builtin_enabled_map(
+    values: HashMap<String, Vec<String>>,
+    kind: RegistryEntryKind,
+) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
     for category in category_ids() {
         if let Some(items) = values.get(category) {
             out.insert(
@@ -316,7 +366,7 @@ fn categories() -> Vec<RetrievalCategoryDefinition> {
         RetrievalCategoryDefinition {
             id: "knowledge",
             label: "知识库",
-            description: "Gene / UniProt",
+            description: "Gene / UniProt / Pathway",
             priority: 30,
         },
         RetrievalCategoryDefinition {
@@ -431,9 +481,9 @@ fn subcategories() -> Vec<RetrievalSubcategoryDefinition> {
             "knowledge",
             "pathway",
             "Pathway",
-            "通路、GO 与反应网络",
+            "Reactome、GO、MSigDB、KEGG 等通路与 gene-set 知识库",
             false,
-            Planned,
+            Available,
             40,
         ),
         subcategory(
@@ -496,7 +546,7 @@ fn subcategories() -> Vec<RetrievalSubcategoryDefinition> {
 fn sources() -> Vec<RetrievalSourceDefinition> {
     use RetrievalAutoStrategy::{Fallback, Merge, Single};
     use RetrievalCapability::{Fetch, Query, Search};
-    use RetrievalOrigin::Builtin;
+    use RetrievalOrigin::{Builtin, Extension};
     use RetrievalRiskLevel::{Low, Medium};
     use RetrievalSourceStatus::{Available, OptIn, Planned, RequiresApiKey};
 
@@ -1039,12 +1089,12 @@ fn sources() -> Vec<RetrievalSourceDefinition> {
             "reactome",
             "knowledge",
             "Reactome",
-            "通路与反应网络，待接入。",
-            &[],
+            "人工整理的生物通路、反应网络与富集分析。",
+            &["reactome_pathway", "reactome_pathways", "reaction_network"],
             &["pathway"],
-            &[Query],
-            Planned,
-            Builtin,
+            &[Search, Fetch, Query],
+            Available,
+            Extension,
             false,
             false,
             false,
@@ -1052,11 +1102,84 @@ fn sources() -> Vec<RetrievalSourceDefinition> {
             &[],
             80,
             Merge,
-            &[],
+            PATHWAY_QUERY_PARAMS,
             Low,
-            &["计划接入；当前不可执行。"],
+            &["由 Pathway Databases 插件接入 Reactome Content/Analysis Service。"],
             Some("https://reactome.org/"),
             Some("https://reactome.org/dev/content-service"),
+        ),
+        source(
+            "gene_ontology",
+            "knowledge",
+            "Gene Ontology",
+            "GO biological process、molecular function 与 cellular component 术语。",
+            &["go", "quickgo", "go_terms", "gene_ontology_terms"],
+            &["pathway"],
+            &[Search, Fetch, Query],
+            Available,
+            Extension,
+            false,
+            false,
+            false,
+            &[],
+            &[],
+            82,
+            Merge,
+            PATHWAY_QUERY_PARAMS,
+            Low,
+            &["由 Pathway Databases 插件接入 EMBL-EBI QuickGO API。"],
+            Some("https://geneontology.org/"),
+            Some("https://www.ebi.ac.uk/QuickGO/api/index.html"),
+        ),
+        source(
+            "msigdb",
+            "knowledge",
+            "MSigDB",
+            "Molecular Signatures Database gene-set collections for GSEA。",
+            &["molecular_signatures_database", "gsea_msigdb", "gene_sets", "gmt"],
+            &["pathway"],
+            &[Search, Fetch, Query],
+            Available,
+            Extension,
+            false,
+            false,
+            false,
+            &[],
+            &[],
+            84,
+            Merge,
+            MSIGDB_PARAMS,
+            Low,
+            &["由 Pathway Databases 插件接入 MSigDB 公共页面/JSON；请遵守 MSigDB 再分发条款。"],
+            Some("https://www.gsea-msigdb.org/gsea/msigdb"),
+            Some("https://www.gsea-msigdb.org/gsea/msigdb"),
+        ),
+        source(
+            "kegg",
+            "knowledge",
+            "KEGG",
+            "KEGG pathway、module、compound、reaction、enzyme、disease 与 drug REST API。",
+            &[
+                "kegg_pathway",
+                "kegg_rest",
+                "kyoto_encyclopedia_of_genes_and_genomes",
+            ],
+            &["pathway"],
+            &[Search, Fetch, Query],
+            Available,
+            Extension,
+            false,
+            false,
+            false,
+            &[],
+            &[],
+            86,
+            Merge,
+            KEGG_PARAMS,
+            Low,
+            &["由 Pathway Databases 插件接入 KEGG REST；KEGG API 仅供学术用户学术使用，商业使用需确认授权。"],
+            Some("https://www.kegg.jp/"),
+            Some("https://www.kegg.jp/kegg/rest/keggapi.html"),
         ),
         source(
             "clinvar",
@@ -1510,6 +1633,99 @@ const ENSEMBL_PARAMS: &[RetrievalParameterDefinition] = &[
     ),
 ];
 
+const PATHWAY_QUERY_PARAMS: &[RetrievalParameterDefinition] = &[
+    param(
+        "query",
+        RetrievalParameterType::String,
+        "通路 / GO / gene-set 关键词、稳定 ID 或源原生查询语句。",
+        true,
+    ),
+    param(
+        "species",
+        RetrievalParameterType::String,
+        "物种过滤，例如 Homo sapiens 或 human。",
+        false,
+    ),
+    param(
+        "max_results",
+        RetrievalParameterType::Integer,
+        "返回记录上限。",
+        false,
+    ),
+];
+
+const MSIGDB_PARAMS: &[RetrievalParameterDefinition] = &[
+    param(
+        "query",
+        RetrievalParameterType::String,
+        "MSigDB gene-set 名称关键词或精确 gene-set ID。",
+        true,
+    ),
+    param(
+        "collection",
+        RetrievalParameterType::String,
+        "可选 collection 过滤，例如 H、GO:BP、CP:REACTOME。",
+        false,
+    ),
+    param(
+        "species",
+        RetrievalParameterType::String,
+        "MSigDB namespace，默认 human。",
+        false,
+    ),
+    param(
+        "max_results",
+        RetrievalParameterType::Integer,
+        "返回 gene set 上限。",
+        false,
+    ),
+];
+
+const KEGG_PARAMS: &[RetrievalParameterDefinition] = &[
+    param(
+        "query",
+        RetrievalParameterType::String,
+        "KEGG ID、关键词或 link/conv 源 ID。",
+        true,
+    ),
+    param(
+        "organism",
+        RetrievalParameterType::String,
+        "KEGG organism code，例如 hsa、mmu。",
+        false,
+    ),
+    param(
+        "database",
+        RetrievalParameterType::String,
+        "KEGG database，默认 pathway；也可为 module、compound、drug 等。",
+        false,
+    ),
+    param(
+        "mode",
+        RetrievalParameterType::String,
+        "KEGG REST mode：list、find、link、conv、info。",
+        false,
+    ),
+    param(
+        "target",
+        RetrievalParameterType::String,
+        "link/conv 的目标库，例如 pathway、genes、uniprot、ncbi-geneid。",
+        false,
+    ),
+    param(
+        "option",
+        RetrievalParameterType::String,
+        "可选格式/搜索选项，例如 kgml、json、formula、exact_mass。",
+        false,
+    ),
+    param(
+        "max_results",
+        RetrievalParameterType::Integer,
+        "返回记录上限。",
+        false,
+    ),
+];
+
 const NCBI_DATASETS_PARAMS: &[RetrievalParameterDefinition] = &[
     param(
         "query",
@@ -1825,6 +2041,36 @@ mod tests {
                 RetrievalSourceStatus::Available => {}
             }
         }
+    }
+
+    #[test]
+    fn enabled_source_normalization_preserves_plugin_categories() {
+        let normalized = normalize_enabled_map(
+            HashMap::from([
+                (
+                    "drug".to_string(),
+                    vec![
+                        "ChEMBL".to_string(),
+                        "chembl".to_string(),
+                        "Drug Bank".to_string(),
+                    ],
+                ),
+                (
+                    "dataset".to_string(),
+                    vec!["ncbi-biosample".to_string(), "unknown".to_string()],
+                ),
+            ]),
+            RegistryEntryKind::Source,
+        );
+
+        assert_eq!(
+            normalized.get("drug"),
+            Some(&vec!["chembl".to_string(), "drug_bank".to_string()])
+        );
+        assert_eq!(
+            normalized.get("dataset"),
+            Some(&vec!["biosample".to_string()])
+        );
     }
 
     #[test]

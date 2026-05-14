@@ -30,6 +30,14 @@ const OPERATOR_MAX_MAX_ATTEMPTS: u32 = 5;
 const OPERATOR_CACHE_SCAN_LIMIT: usize = 200;
 const OPERATOR_STRUCTURED_OUTPUTS_FILE: &str = "outputs.json";
 const OPERATOR_STRUCTURED_OUTPUTS_MAX_BYTES: u64 = 1024 * 1024;
+const OPERATOR_PREFLIGHT_MAX_QUESTIONS: usize = 4;
+const OPERATOR_PREFLIGHT_MAX_OPTIONS: usize = 5;
+const OPERATOR_PREFLIGHT_ASK_STATE: &str = "ask";
+const OPERATOR_PREFLIGHT_METADATA_KEY: &str = "preflight";
+const OPERATOR_PARAM_SOURCE_USER_PREFLIGHT: &str = "user_preflight";
+const OPERATOR_PARAM_SOURCE_CALLER: &str = "caller";
+const OPERATOR_PARAM_SOURCE_DEFAULT: &str = "default";
+const OPERATOR_PARAM_SOURCE_SYSTEM: &str = "system";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +193,8 @@ pub struct OperatorPreflightQuestionSpec {
 #[serde(rename_all = "camelCase")]
 pub struct OperatorPreflightAskWhen {
     #[serde(default)]
+    pub always: bool,
+    #[serde(default)]
     pub missing: bool,
     #[serde(default)]
     pub empty: bool,
@@ -200,6 +210,10 @@ pub struct OperatorPreflightOptionSpec {
     pub value: JsonValue,
     #[serde(default)]
     pub preview: Option<String>,
+    #[serde(default)]
+    pub custom: bool,
+    #[serde(default, rename = "customPlaceholder")]
+    pub custom_placeholder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -650,8 +664,10 @@ fn validate_operator_preflight(spec: &OperatorSpec) -> Result<(), String> {
     let Some(preflight) = &spec.preflight else {
         return Ok(());
     };
-    if preflight.questions.len() > 4 {
-        return Err("operator preflight.questions supports at most 4 questions".to_string());
+    if preflight.questions.len() > OPERATOR_PREFLIGHT_MAX_QUESTIONS {
+        return Err(format!(
+            "operator preflight.questions supports at most {OPERATOR_PREFLIGHT_MAX_QUESTIONS} questions"
+        ));
     }
     let mut seen_questions = HashSet::new();
     for question in &preflight.questions {
@@ -676,9 +692,9 @@ fn validate_operator_preflight(spec: &OperatorSpec) -> Result<(), String> {
         if question.header.trim().is_empty() {
             return Err("operator preflight question header must not be empty".to_string());
         }
-        if question.options.len() < 2 || question.options.len() > 4 {
+        if question.options.len() < 2 || question.options.len() > OPERATOR_PREFLIGHT_MAX_OPTIONS {
             return Err(format!(
-                "operator preflight question `{}` must declare 2-4 options",
+                "operator preflight question `{}` must declare 2-{OPERATOR_PREFLIGHT_MAX_OPTIONS} options",
                 question.question
             ));
         }
@@ -694,6 +710,18 @@ fn validate_operator_preflight(spec: &OperatorSpec) -> Result<(), String> {
                 return Err(format!(
                     "operator preflight question `{}` repeats option label `{}`",
                     question.question, option.label
+                ));
+            }
+            if question.multi_select && option.custom {
+                return Err(format!(
+                    "operator preflight question `{}` cannot use custom options with multiSelect",
+                    question.question
+                ));
+            }
+            if !option.custom && option.custom_placeholder.is_some() {
+                return Err(format!(
+                    "operator preflight question `{}` has customPlaceholder on a non-custom option",
+                    question.question
                 ));
             }
         }
@@ -843,8 +871,220 @@ pub fn list_operator_manifest_diagnostics() -> Vec<OperatorManifestDiagnostic> {
     operator_manifest_diagnostics_from_plugins(outcome.plugins())
 }
 
+pub fn list_operator_authoring_diagnostics() -> Vec<OperatorManifestDiagnostic> {
+    let mut diagnostics = discover_operator_candidates()
+        .iter()
+        .flat_map(|spec| {
+            operator_preflight_authoring_diagnostics(spec)
+                .into_iter()
+                .chain(operator_external_network_authoring_diagnostics(spec))
+        })
+        .collect::<Vec<_>>();
+    diagnostics.sort_by(|left, right| {
+        left.source_plugin
+            .cmp(&right.source_plugin)
+            .then_with(|| left.manifest_path.cmp(&right.manifest_path))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    diagnostics
+}
+
+fn operator_preflight_authoring_diagnostics(
+    spec: &OperatorSpec,
+) -> Vec<OperatorManifestDiagnostic> {
+    let Some(preflight) = &spec.preflight else {
+        return Vec::new();
+    };
+    if preflight.questions.is_empty() {
+        return Vec::new();
+    }
+    let asks_method = preflight
+        .questions
+        .iter()
+        .any(preflight_question_mentions_method_choice);
+    let asks_threshold_or_filter = preflight
+        .questions
+        .iter()
+        .any(preflight_question_mentions_threshold_or_filter);
+    let only_data_or_grouping = preflight
+        .questions
+        .iter()
+        .all(preflight_question_mentions_data_or_grouping);
+
+    if only_data_or_grouping && !asks_method && !asks_threshold_or_filter {
+        return vec![OperatorManifestDiagnostic {
+            source_plugin: spec.source.source_plugin.clone(),
+            manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+            severity: "warning".to_string(),
+            message: format!(
+                "operator `{}` preflight only asks data/grouping questions; add method, threshold, or filtering choices when those decisions affect analysis semantics",
+                spec.metadata.id
+            ),
+        }];
+    }
+    Vec::new()
+}
+
+fn operator_external_network_authoring_diagnostics(
+    spec: &OperatorSpec,
+) -> Vec<OperatorManifestDiagnostic> {
+    if !operator_declares_external_network(spec) {
+        return Vec::new();
+    }
+
+    let mut diagnostics = Vec::new();
+    if !cache_config_enabled(spec.cache.as_ref()) {
+        diagnostics.push(OperatorManifestDiagnostic {
+            source_plugin: spec.source.source_plugin.clone(),
+            manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+            severity: "warning".to_string(),
+            message: format!(
+                "operator `{}` declares external_network permissions but has no enabled cache policy; add cache.enabled plus policy metadata for repeatable network runs",
+                spec.metadata.id
+            ),
+        });
+    }
+
+    let mode_supports_offline_fixture = spec
+        .interface
+        .params
+        .get("mode")
+        .filter(|field| matches!(field.kind, OperatorFieldKind::Enum))
+        .map(|field| {
+            field.enum_values.iter().any(|value| {
+                value
+                    .as_str()
+                    .map(|value| value == "offline_fixture")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    let fixture_param_exists = spec.interface.params.contains_key("fixture_json");
+    if !mode_supports_offline_fixture || !fixture_param_exists {
+        diagnostics.push(OperatorManifestDiagnostic {
+            source_plugin: spec.source.source_plugin.clone(),
+            manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+            severity: "warning".to_string(),
+            message: format!(
+                "operator `{}` declares external_network permissions but does not expose both mode=offline_fixture and fixture_json params for deterministic offline validation",
+                spec.metadata.id
+            ),
+        });
+    }
+
+    diagnostics
+}
+
+fn operator_declares_external_network(spec: &OperatorSpec) -> bool {
+    spec.metadata
+        .tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case("external-network"))
+        || spec
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.get("sideEffects"))
+            .and_then(JsonValue::as_array)
+            .map(|side_effects| {
+                side_effects.iter().any(|value| {
+                    value
+                        .as_str()
+                        .map(|value| value.eq_ignore_ascii_case("external_network"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+}
+
+fn preflight_question_mentions_method_choice(question: &OperatorPreflightQuestionSpec) -> bool {
+    preflight_question_text(question).contains_any(&[
+        "method",
+        "stat",
+        "test",
+        "model",
+        "algorithm",
+        "de_method",
+        "方法",
+        "统计",
+        "检验",
+        "模型",
+    ])
+}
+
+fn preflight_question_mentions_threshold_or_filter(
+    question: &OperatorPreflightQuestionSpec,
+) -> bool {
+    preflight_question_text(question).contains_any(&[
+        "threshold",
+        "cutoff",
+        "filter",
+        "pvalue",
+        "p-value",
+        "fdr",
+        "padj",
+        "log2fc",
+        "fc",
+        "min",
+        "max",
+        "top",
+        "size",
+        "阈值",
+        "过滤",
+        "筛选",
+        "显著",
+        "p值",
+    ])
+}
+
+fn preflight_question_mentions_data_or_grouping(question: &OperatorPreflightQuestionSpec) -> bool {
+    preflight_question_text(question).contains_any(&[
+        "input",
+        "data",
+        "type",
+        "sample",
+        "group",
+        "control",
+        "case",
+        "metadata",
+        "column",
+        "comparison",
+        "delimiter",
+        "row",
+        "输入",
+        "数据",
+        "样本",
+        "分组",
+        "对照",
+        "列",
+        "比较",
+    ])
+}
+
+fn preflight_question_text(question: &OperatorPreflightQuestionSpec) -> String {
+    format!(
+        "{} {} {} {}",
+        question.id.as_deref().unwrap_or_default(),
+        question.param,
+        question.question,
+        question.header
+    )
+    .to_ascii_lowercase()
+}
+
+trait ContainsAny {
+    fn contains_any(&self, needles: &[&str]) -> bool;
+}
+
+impl ContainsAny for String {
+    fn contains_any(&self, needles: &[&str]) -> bool {
+        needles.iter().any(|needle| self.contains(needle))
+    }
+}
+
 fn discover_manifest_paths(plugin_root: &Path) -> Vec<PathBuf> {
-    let operators_root = plugin_root.join("operators");
+    let operators_root = crate::domain::plugins::load_plugin_manifest(plugin_root)
+        .and_then(|manifest| manifest.operators)
+        .unwrap_or_else(|| plugin_root.join("operators"));
     let mut out = Vec::new();
     if !operators_root.is_dir() {
         return out;
@@ -1092,30 +1332,66 @@ pub fn list_operator_summaries() -> Vec<OperatorCandidateSummary> {
                     candidate.source.source_plugin.clone(),
                 ))
                 .unwrap_or_default();
-            OperatorCandidateSummary {
-                id: candidate.metadata.id,
-                version: candidate.metadata.version,
-                name: candidate.metadata.name,
-                description: candidate.metadata.description,
-                tags: candidate.metadata.tags,
-                source_plugin: candidate.source.source_plugin,
-                manifest_path: candidate
-                    .source
-                    .manifest_path
-                    .to_string_lossy()
-                    .into_owned(),
-                interface: candidate.interface,
-                execution: candidate.execution,
-                preflight: candidate.preflight,
-                runtime: candidate.runtime,
-                resources: candidate.resources,
-                smoke_tests: candidate.smoke_tests,
-                exposed: !aliases.is_empty(),
-                enabled_aliases: aliases,
-                unavailable_reason: None,
-            }
+            operator_candidate_summary(candidate, aliases)
         })
         .collect()
+}
+
+pub fn list_operator_summaries_for_plugin_root(
+    source_plugin: &str,
+    plugin_root: &Path,
+) -> Vec<OperatorCandidateSummary> {
+    let mut candidates = discover_manifest_paths(plugin_root)
+        .into_iter()
+        .filter_map(|manifest_path| {
+            load_operator_manifest(
+                &manifest_path,
+                source_plugin.to_string(),
+                plugin_root.to_path_buf(),
+            )
+            .ok()
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.metadata
+            .id
+            .cmp(&right.metadata.id)
+            .then_with(|| left.metadata.version.cmp(&right.metadata.version))
+            .then_with(|| left.source.source_plugin.cmp(&right.source.source_plugin))
+    });
+    candidates
+        .into_iter()
+        .map(|candidate| operator_candidate_summary(candidate, Vec::new()))
+        .collect()
+}
+
+fn operator_candidate_summary(
+    candidate: OperatorSpec,
+    enabled_aliases: Vec<String>,
+) -> OperatorCandidateSummary {
+    let exposed = !enabled_aliases.is_empty();
+    OperatorCandidateSummary {
+        id: candidate.metadata.id,
+        version: candidate.metadata.version,
+        name: candidate.metadata.name,
+        description: candidate.metadata.description,
+        tags: candidate.metadata.tags,
+        source_plugin: candidate.source.source_plugin,
+        manifest_path: candidate
+            .source
+            .manifest_path
+            .to_string_lossy()
+            .into_owned(),
+        interface: candidate.interface,
+        execution: candidate.execution,
+        preflight: candidate.preflight,
+        runtime: candidate.runtime,
+        resources: candidate.resources,
+        smoke_tests: candidate.smoke_tests,
+        exposed,
+        enabled_aliases,
+        unavailable_reason: None,
+    }
 }
 
 pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
@@ -1127,7 +1403,7 @@ pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
 
 pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
     let name = format!("{OPERATOR_TOOL_PREFIX}{}", operator.alias);
-    let description = operator
+    let mut description = operator
         .spec
         .metadata
         .description
@@ -1139,6 +1415,10 @@ pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
                 operator.spec.metadata.id, operator.spec.metadata.version
             )
         });
+    if let Some(resource_note) = operator_resource_profile_description(&operator.spec) {
+        description.push_str("\n\nResource note: ");
+        description.push_str(&resource_note);
+    }
     ToolSchema::new(
         name,
         description,
@@ -1146,22 +1426,68 @@ pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
     )
 }
 
+fn operator_resource_profile_description(spec: &OperatorSpec) -> Option<String> {
+    let profile = spec.runtime.as_ref()?.get("resourceProfile")?.as_object()?;
+    let tier = profile
+        .get("tier")
+        .and_then(JsonValue::as_str)
+        .map(|value| value.trim().to_ascii_lowercase().replace('_', "-"))
+        .filter(|value| !value.is_empty())?;
+    if tier == "local-ok" {
+        return None;
+    }
+    let label = match tier.as_str() {
+        "hpc-required" => "HPC required",
+        "hpc-recommended" | "server-recommended" => "HPC/server recommended",
+        "heavy" => "resource-heavy",
+        "local-warn" => "local warning",
+        _ => tier.as_str(),
+    };
+    let mut parts = vec![label.to_string()];
+    if let Some(cpu) = profile.get("recommendedCpu").and_then(JsonValue::as_u64) {
+        parts.push(format!("{cpu} CPU recommended"));
+    }
+    if let Some(memory) = profile
+        .get("recommendedMemoryGb")
+        .and_then(JsonValue::as_u64)
+    {
+        parts.push(format!("{memory} GB RAM recommended"));
+    }
+    if let Some(disk) = profile.get("diskGb").and_then(JsonValue::as_u64) {
+        parts.push(format!("{disk} GB disk"));
+    }
+    let mut out = parts.join("; ");
+    if let Some(note) = profile
+        .get("notes")
+        .and_then(JsonValue::as_array)
+        .and_then(|notes| notes.iter().find_map(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|note| !note.is_empty())
+    {
+        out.push_str(". ");
+        out.push_str(note);
+    }
+    out.push_str(" Prefer SSH/server/HPC execution for production-size inputs; local smoke fixtures are acceptable.");
+    Some(out)
+}
+
 pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
     let mut properties = JsonMap::new();
+    let preflight_questions = preflight_question_text_by_param(spec);
     properties.insert(
         "inputs".to_string(),
-        fields_object_schema(&spec.interface.inputs, true),
+        fields_object_schema(&spec.interface.inputs, true, None),
     );
     properties.insert(
         "params".to_string(),
-        fields_object_schema(&spec.interface.params, true),
+        fields_object_schema(&spec.interface.params, true, Some(&preflight_questions)),
     );
     properties.insert(
         "resources".to_string(),
         resources_object_schema(&spec.resources),
     );
     let mut required = vec![JsonValue::String("inputs".to_string())];
-    if has_caller_required_fields(&spec.interface.params) {
+    if has_caller_required_fields(&spec.interface.params, Some(&preflight_questions)) {
         required.push(JsonValue::String("params".to_string()));
     }
     json!({
@@ -1172,23 +1498,53 @@ pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
     })
 }
 
-fn has_caller_required_fields(fields: &BTreeMap<String, OperatorFieldSpec>) -> bool {
-    fields
-        .values()
-        .any(|field| field.required && field.default.is_none())
+fn preflight_question_text_by_param(spec: &OperatorSpec) -> BTreeMap<String, String> {
+    spec.preflight
+        .as_ref()
+        .map(|preflight| {
+            preflight
+                .questions
+                .iter()
+                .map(|question| (question.param.clone(), question.question.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn has_caller_required_fields(
+    fields: &BTreeMap<String, OperatorFieldSpec>,
+    preflight_questions: Option<&BTreeMap<String, String>>,
+) -> bool {
+    fields.iter().any(|(name, field)| {
+        field.required
+            && field.default.is_none()
+            && !preflight_questions
+                .map(|questions| questions.contains_key(name))
+                .unwrap_or(false)
+    })
 }
 
 fn fields_object_schema(
     fields: &BTreeMap<String, OperatorFieldSpec>,
     include_required: bool,
+    preflight_questions: Option<&BTreeMap<String, String>>,
 ) -> JsonValue {
     let mut properties = JsonMap::new();
     let mut required = Vec::new();
     for (name, field) in fields {
-        if include_required && field.required && field.default.is_none() {
+        let is_preflight_answered = preflight_questions
+            .map(|questions| questions.contains_key(name))
+            .unwrap_or(false);
+        if include_required && field.required && field.default.is_none() && !is_preflight_answered {
             required.push(JsonValue::String(name.clone()));
         }
-        properties.insert(name.clone(), field_schema(field));
+        properties.insert(
+            name.clone(),
+            field_schema(
+                field,
+                preflight_questions.and_then(|questions| questions.get(name)),
+            ),
+        );
     }
     let mut schema = JsonMap::new();
     schema.insert("type".to_string(), JsonValue::String("object".to_string()));
@@ -1200,7 +1556,7 @@ fn fields_object_schema(
     JsonValue::Object(schema)
 }
 
-fn field_schema(field: &OperatorFieldSpec) -> JsonValue {
+fn field_schema(field: &OperatorFieldSpec, preflight_question: Option<&String>) -> JsonValue {
     let mut schema = JsonMap::new();
     match field.kind {
         OperatorFieldKind::Integer => {
@@ -1223,7 +1579,7 @@ fn field_schema(field: &OperatorFieldSpec) -> JsonValue {
             schema.insert("type".to_string(), JsonValue::String("string".to_string()));
         }
     }
-    if let Some(description) = field_description(field) {
+    if let Some(description) = field_description(field, preflight_question.map(String::as_str)) {
         schema.insert("description".to_string(), JsonValue::String(description));
     }
     if let Some(default) = &field.default {
@@ -1241,13 +1597,44 @@ fn field_schema(field: &OperatorFieldSpec) -> JsonValue {
     if let Some(maximum) = field.maximum {
         schema.insert("maximum".to_string(), json!(maximum));
     }
-    JsonValue::Object(schema)
+    let value_schema = JsonValue::Object(schema);
+    if preflight_question.is_some() {
+        return preflight_ask_state_schema(value_schema);
+    }
+    value_schema
 }
 
-fn field_description(field: &OperatorFieldSpec) -> Option<String> {
+fn preflight_ask_state_schema(value_schema: JsonValue) -> JsonValue {
+    let mut wrapped = JsonMap::new();
+    if let Some(description) = value_schema.get("description").cloned() {
+        wrapped.insert("description".to_string(), description);
+    }
+    wrapped.insert(
+        "oneOf".to_string(),
+        json!([
+            value_schema,
+            {
+                "type": "string",
+                "enum": [OPERATOR_PREFLIGHT_ASK_STATE],
+                "description": "Explicit ask state: set this parameter to `ask` to make Omiga ask the user through the operator preflight UI."
+            }
+        ]),
+    );
+    JsonValue::Object(wrapped)
+}
+
+fn field_description(
+    field: &OperatorFieldSpec,
+    preflight_question: Option<&str>,
+) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(description) = &field.description {
         parts.push(description.clone());
+    }
+    if let Some(question) = preflight_question {
+        parts.push(format!(
+            "Ask state: omit this value or set it to `{OPERATOR_PREFLIGHT_ASK_STATE}` to make Omiga collect it before execution (`{question}`); do not guess a value unless the user already specified it."
+        ));
     }
     if field.kind.is_path_like() {
         parts.push(
@@ -1265,10 +1652,46 @@ pub fn operator_preflight_question(
     arguments: &str,
 ) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
     let resolved = resolve_operator_alias(tool_name).ok()?;
-    let preflight = resolved.spec.preflight.as_ref()?;
     let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
     let params = value.get("params").and_then(JsonValue::as_object);
+    operator_preflight_question_for_spec(&resolved.spec, Some(resolved.alias.as_str()), params)
+}
 
+pub fn operator_preflight_question_with_project_preferences(
+    project_root: &Path,
+    tool_name: &str,
+    arguments: &str,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    let resolved = resolve_operator_alias(tool_name).ok()?;
+    let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
+    let params = value.get("params").and_then(JsonValue::as_object);
+    let recommended_params = operator_project_preference_params(project_root, &resolved.spec);
+    operator_preflight_question_for_spec_with_recommended_params(
+        &resolved.spec,
+        Some(resolved.alias.as_str()),
+        params,
+        recommended_params.as_ref(),
+    )
+}
+
+pub fn operator_preflight_question_for_spec(
+    spec: &OperatorSpec,
+    alias: Option<&str>,
+    params: Option<&JsonMap<String, JsonValue>>,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    operator_preflight_question_for_spec_with_recommended_params(spec, alias, params, None)
+}
+
+pub fn operator_preflight_question_for_spec_with_recommended_params(
+    spec: &OperatorSpec,
+    alias: Option<&str>,
+    params: Option<&JsonMap<String, JsonValue>>,
+    recommended_params: Option<&BTreeMap<String, JsonValue>>,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    let preflight = spec.preflight.as_ref()?;
+    let recommended_keys = recommended_params
+        .map(|params| params.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
     let questions = preflight
         .questions
         .iter()
@@ -1278,7 +1701,10 @@ pub fn operator_preflight_question(
                 question: question.question.clone(),
                 header: question.header.clone(),
                 multi_select: question.multi_select,
-                options: question.options.iter().map(ask_option_from_spec).collect(),
+                options: ask_options_from_specs(
+                    question,
+                    recommended_params.and_then(|params| params.get(&question.param)),
+                ),
             },
         )
         .collect::<Vec<_>>();
@@ -1293,8 +1719,9 @@ pub fn operator_preflight_question(
             annotations: None,
             metadata: Some(json!({
                 "source": "operator_preflight",
-                "operator_id": resolved.spec.metadata.id,
-                "operator_alias": resolved.alias,
+                "operator_id": spec.metadata.id,
+                "operator_alias": alias,
+                "recommended_params": recommended_keys,
             })),
         },
     )
@@ -1312,7 +1739,15 @@ pub fn apply_operator_preflight_answers(
     let Some(preflight) = resolved.spec.preflight.as_ref() else {
         return Ok(arguments.to_string());
     };
+    apply_operator_preflight_answers_for_spec(&resolved.spec, preflight, arguments, ask_user_output)
+}
 
+pub fn apply_operator_preflight_answers_for_spec(
+    spec: &OperatorSpec,
+    preflight: &OperatorPreflightSpec,
+    arguments: &str,
+    ask_user_output: &JsonValue,
+) -> Result<String, String> {
     let answers = ask_user_output
         .get("answers")
         .and_then(JsonValue::as_object)
@@ -1322,59 +1757,112 @@ pub fn apply_operator_preflight_answers(
     let root = invocation
         .as_object_mut()
         .ok_or_else(|| "Operator arguments must be a JSON object".to_string())?;
-    let params_value = root
-        .entry("params".to_string())
-        .or_insert_with(|| JsonValue::Object(JsonMap::new()));
-    if !params_value.is_object() {
-        *params_value = JsonValue::Object(JsonMap::new());
-    }
-    let params = params_value
-        .as_object_mut()
-        .ok_or_else(|| "Operator params must be a JSON object".to_string())?;
-
-    for question in &preflight.questions {
-        let Some(answer) = answers.get(question.question.trim()) else {
-            continue;
-        };
-        let labels = preflight_answer_labels(answer, question.multi_select);
-        if labels.is_empty() {
-            continue;
+    let mut answered_params = Vec::new();
+    {
+        let params_value = root
+            .entry("params".to_string())
+            .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+        if !params_value.is_object() {
+            *params_value = JsonValue::Object(JsonMap::new());
         }
-        let values = labels
-            .iter()
-            .map(|label| {
-                question
-                    .options
-                    .iter()
-                    .find(|option| option.label.trim() == label)
-                    .map(|option| option.value.clone())
-                    .ok_or_else(|| {
-                        format!(
-                            "Unsupported preflight choice `{}` for operator parameter `{}`",
-                            label, question.param
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let value = if question.multi_select {
-            JsonValue::Array(values)
-        } else {
-            values
-                .into_iter()
-                .next()
-                .ok_or_else(|| format!("Missing preflight choice for `{}`", question.param))?
-        };
-        params.insert(question.param.clone(), value);
+        let params = params_value
+            .as_object_mut()
+            .ok_or_else(|| "Operator params must be a JSON object".to_string())?;
+
+        for question in &preflight.questions {
+            let Some(answer) = answers.get(question.question.trim()) else {
+                continue;
+            };
+            let labels = preflight_answer_labels(answer, question.multi_select);
+            if labels.is_empty() {
+                continue;
+            }
+            let field = spec
+                .interface
+                .params
+                .get(question.param.trim())
+                .ok_or_else(|| {
+                    format!(
+                        "Preflight question references unknown operator parameter `{}`",
+                        question.param
+                    )
+                })?;
+            let values = labels
+                .iter()
+                .map(|label| preflight_value_for_answer(question, field, label))
+                .collect::<Result<Vec<_>, _>>()?;
+            let value = if question.multi_select {
+                JsonValue::Array(values)
+            } else {
+                values
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| format!("Missing preflight choice for `{}`", question.param))?
+            };
+            params.insert(question.param.clone(), value);
+            answered_params.push(json!({
+                "param": question.param.clone(),
+                "questionId": question.id.clone(),
+                "question": question.question.clone(),
+                "labels": labels,
+            }));
+        }
+    }
+    if !answered_params.is_empty() {
+        attach_operator_preflight_metadata(root, spec, answered_params);
     }
 
     serde_json::to_string(&invocation).map_err(|err| err.to_string())
+}
+
+fn attach_operator_preflight_metadata(
+    root: &mut JsonMap<String, JsonValue>,
+    spec: &OperatorSpec,
+    answered_params: Vec<JsonValue>,
+) {
+    let mut params_by_source = JsonMap::new();
+    for param in answered_params
+        .iter()
+        .filter_map(|entry| entry.get("param").and_then(JsonValue::as_str))
+    {
+        params_by_source.insert(
+            param.to_string(),
+            JsonValue::String(OPERATOR_PARAM_SOURCE_USER_PREFLIGHT.to_string()),
+        );
+    }
+    let metadata_value = root
+        .entry("metadata".to_string())
+        .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+    if !metadata_value.is_object() {
+        *metadata_value = JsonValue::Object(JsonMap::new());
+    }
+    if let Some(metadata) = metadata_value.as_object_mut() {
+        metadata.insert(
+            OPERATOR_PREFLIGHT_METADATA_KEY.to_string(),
+            json!({
+                "source": "operator_preflight",
+                "operatorId": spec.metadata.id,
+                "answeredParams": answered_params,
+                "paramsBySource": params_by_source,
+            }),
+        );
+    }
 }
 
 fn preflight_question_should_ask(
     question: &OperatorPreflightQuestionSpec,
     params: Option<&JsonMap<String, JsonValue>>,
 ) -> bool {
+    if question.ask_when.always {
+        return true;
+    }
     let value = params.and_then(|params| params.get(&question.param));
+    if value
+        .map(json_value_is_preflight_ask_state)
+        .unwrap_or(false)
+    {
+        return true;
+    }
     let missing = value.is_none() || matches!(value, Some(JsonValue::Null));
     if question.ask_when.missing && missing {
         return true;
@@ -1390,6 +1878,31 @@ fn preflight_question_should_ask(
             .any(|expected| preflight_value_matches(actual, expected));
     }
     false
+}
+
+fn json_value_is_preflight_ask_state(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::String(value) => value
+            .trim()
+            .eq_ignore_ascii_case(OPERATOR_PREFLIGHT_ASK_STATE),
+        JsonValue::Object(values) => {
+            values
+                .get("state")
+                .or_else(|| values.get("status"))
+                .and_then(JsonValue::as_str)
+                .map(|value| {
+                    value
+                        .trim()
+                        .eq_ignore_ascii_case(OPERATOR_PREFLIGHT_ASK_STATE)
+                })
+                .unwrap_or(false)
+                || values
+                    .get(OPERATOR_PREFLIGHT_ASK_STATE)
+                    .and_then(JsonValue::as_bool)
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 fn json_value_is_empty(value: &JsonValue) -> bool {
@@ -1411,14 +1924,197 @@ fn preflight_value_matches(actual: &JsonValue, expected: &JsonValue) -> bool {
     }
 }
 
+fn operator_project_preference_params(
+    project_root: &Path,
+    spec: &OperatorSpec,
+) -> Option<BTreeMap<String, JsonValue>> {
+    let canonical_id = canonical_operator_unit_id_for_spec(spec);
+    let hints = crate::domain::learning_proposals::matching_learning_project_preference_hints(
+        project_root,
+        Some(spec.metadata.id.as_str()),
+        Some(canonical_id.as_str()),
+        Some(spec.source.source_plugin.as_str()),
+    )
+    .ok()?;
+    let mut params = BTreeMap::new();
+    for hint in hints.hints {
+        for (key, value) in hint.params {
+            params.entry(key).or_insert(value);
+        }
+    }
+    (!params.is_empty()).then_some(params)
+}
+
+fn ask_options_from_specs(
+    question: &OperatorPreflightQuestionSpec,
+    recommended_value: Option<&JsonValue>,
+) -> Vec<crate::domain::tools::ask_user_question::QuestionOption> {
+    let recommended_index = recommended_value.and_then(|value| {
+        question
+            .options
+            .iter()
+            .position(|option| preflight_option_matches_recommended_value(option, value))
+    });
+    let mut options = question
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| ask_option_from_spec(option, Some(index) == recommended_index))
+        .collect::<Vec<_>>();
+    if let Some(index) = recommended_index.filter(|index| *index < options.len()) {
+        let recommended = options.remove(index);
+        options.insert(0, recommended);
+    }
+    options
+}
+
+fn preflight_option_matches_recommended_value(
+    option: &OperatorPreflightOptionSpec,
+    recommended_value: &JsonValue,
+) -> bool {
+    preflight_value_matches(&option.value, recommended_value)
+        || recommended_value
+            .as_str()
+            .map(|value| option.label.trim().eq_ignore_ascii_case(value.trim()))
+            .unwrap_or(false)
+}
+
 fn ask_option_from_spec(
     option: &OperatorPreflightOptionSpec,
+    recommended: bool,
 ) -> crate::domain::tools::ask_user_question::QuestionOption {
+    let description = if recommended {
+        format!(
+            "推荐：可直接确认，或改选其他选项。{}",
+            option.description.trim()
+        )
+    } else {
+        option.description.clone()
+    };
     crate::domain::tools::ask_user_question::QuestionOption {
         label: option.label.clone(),
-        description: option.description.clone(),
+        description,
         preview: option.preview.clone(),
+        recommended,
+        custom: option.custom,
+        custom_placeholder: option.custom_placeholder.clone(),
     }
+}
+
+fn preflight_value_for_answer(
+    question: &OperatorPreflightQuestionSpec,
+    field: &OperatorFieldSpec,
+    answer_label: &str,
+) -> Result<JsonValue, String> {
+    if let Some(option) = question
+        .options
+        .iter()
+        .find(|option| option.label.trim() == answer_label)
+    {
+        if option.custom {
+            return Err(format!(
+                "Custom preflight choice `{}` for operator parameter `{}` needs a value",
+                option.label, question.param
+            ));
+        }
+        return Ok(option.value.clone());
+    }
+
+    for option in question.options.iter().filter(|option| option.custom) {
+        if let Some(raw_value) = strip_custom_answer_value(answer_label, option.label.trim()) {
+            return parse_custom_preflight_value(field, raw_value).map_err(|err| {
+                format!(
+                    "Invalid custom value for operator parameter `{}`: {err}",
+                    question.param
+                )
+            });
+        }
+    }
+
+    Err(format!(
+        "Unsupported preflight choice `{}` for operator parameter `{}`",
+        answer_label, question.param
+    ))
+}
+
+fn strip_custom_answer_value<'a>(answer: &'a str, label: &str) -> Option<&'a str> {
+    let answer = answer.trim();
+    let rest = answer.strip_prefix(label)?.trim_start();
+    let rest = rest
+        .strip_prefix(':')
+        .or_else(|| rest.strip_prefix('：'))?
+        .trim();
+    (!rest.is_empty()).then_some(rest)
+}
+
+fn parse_custom_preflight_value(field: &OperatorFieldSpec, raw: &str) -> Result<JsonValue, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("value is empty".to_string());
+    }
+    let value = match field.kind {
+        OperatorFieldKind::Integer => {
+            json!(raw
+                .parse::<i64>()
+                .map_err(|_| "expected an integer".to_string())?)
+        }
+        OperatorFieldKind::Number => {
+            let parsed = raw
+                .parse::<f64>()
+                .map_err(|_| "expected a number".to_string())?;
+            if !parsed.is_finite() {
+                return Err("expected a finite number".to_string());
+            }
+            json!(parsed)
+        }
+        OperatorFieldKind::Boolean => match raw.to_ascii_lowercase().as_str() {
+            "true" | "yes" | "y" | "1" | "是" => JsonValue::Bool(true),
+            "false" | "no" | "n" | "0" | "否" => JsonValue::Bool(false),
+            _ => return Err("expected true/false".to_string()),
+        },
+        OperatorFieldKind::Json => {
+            serde_json::from_str(raw).map_err(|err| format!("expected valid JSON: {err}"))?
+        }
+        _ => match field.enum_values.iter().find(|value| match value {
+            JsonValue::String(candidate) => candidate.trim().eq_ignore_ascii_case(raw),
+            _ => *value == &json!(raw),
+        }) {
+            Some(value) => value.clone(),
+            None if !field.enum_values.is_empty() => {
+                let allowed = field
+                    .enum_values
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!("expected one of {allowed}"));
+            }
+            None => JsonValue::String(raw.to_string()),
+        },
+    };
+
+    validate_custom_preflight_bounds(field, &value)?;
+    Ok(value)
+}
+
+fn validate_custom_preflight_bounds(
+    field: &OperatorFieldSpec,
+    value: &JsonValue,
+) -> Result<(), String> {
+    let Some(number) = value.as_f64() else {
+        return Ok(());
+    };
+    if let Some(minimum) = field.minimum {
+        if number < minimum {
+            return Err(format!("must be >= {minimum}"));
+        }
+    }
+    if let Some(maximum) = field.maximum {
+        if number > maximum {
+            return Err(format!("must be <= {maximum}"));
+        }
+    }
+    Ok(())
 }
 
 fn preflight_answer_labels(answer: &JsonValue, multi_select: bool) -> Vec<String> {
@@ -1488,6 +2184,8 @@ pub struct OperatorInvocation {
     pub params: BTreeMap<String, JsonValue>,
     #[serde(default)]
     pub resources: BTreeMap<String, JsonValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1618,12 +2316,20 @@ struct OperatorRunResult {
     run_context: Option<OperatorRunContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provenance_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    export_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    markdown_report: Option<String>,
     outputs: BTreeMap<String, Vec<ArtifactRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     structured_outputs: Option<JsonValue>,
     effective_inputs: BTreeMap<String, JsonValue>,
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    param_sources: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preflight: Option<JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     attempt: u32,
     max_attempts: u32,
@@ -1668,6 +2374,8 @@ pub struct OperatorRunContext {
     pub smoke_test_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smoke_test_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_execution_id: Option<String>,
 }
 
 impl OperatorRunContext {
@@ -1685,6 +2393,12 @@ impl OperatorRunContext {
                 .unwrap_or_default()
                 .trim()
                 .is_empty()
+            && self
+                .parent_execution_id
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
     }
 
     fn normalized(self) -> Option<Self> {
@@ -1692,6 +2406,7 @@ impl OperatorRunContext {
             kind: normalize_optional_string(self.kind),
             smoke_test_id: normalize_optional_string(self.smoke_test_id),
             smoke_test_name: normalize_optional_string(self.smoke_test_name),
+            parent_execution_id: normalize_optional_string(self.parent_execution_id),
         };
         (!normalized.is_empty()).then_some(normalized)
     }
@@ -1735,6 +2450,8 @@ pub struct OperatorRunSummary {
     pub updated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_dir: Option<String>,
     pub output_count: usize,
     pub structured_output_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1964,6 +2681,19 @@ pub async fn execute_operator_tool_call_with_context(
         Ok(resolved) => resolved,
         Err(error) => return (failure_json(alias, None, None, run_context, error), true),
     };
+    execute_resolved_operator_tool_call_with_context(ctx, alias, resolved, arguments, run_context)
+        .await
+}
+
+pub async fn execute_resolved_operator_tool_call_with_context(
+    ctx: &crate::domain::tools::ToolContext,
+    alias: &str,
+    resolved: ResolvedOperator,
+    arguments: &str,
+    run_context: Option<OperatorRunContext>,
+) -> (String, bool) {
+    let run_context = run_context.and_then(OperatorRunContext::normalized);
+    let started_at = chrono::Utc::now().to_rfc3339();
     let invocation = match serde_json::from_str::<OperatorInvocation>(arguments) {
         Ok(invocation) => invocation,
         Err(err) => {
@@ -1977,6 +2707,17 @@ pub async fn execute_operator_tool_call_with_context(
             .with_suggested_action(
                 "Retry with the operator schema's inputs/params/resources shape.",
             );
+            record_operator_failure_best_effort(
+                ctx,
+                alias,
+                Some(&resolved),
+                None,
+                None,
+                run_context.clone(),
+                &started_at,
+                &error,
+            )
+            .await;
             return (
                 failure_json(alias, Some(&resolved), None, run_context, error),
                 true,
@@ -1984,21 +2725,42 @@ pub async fn execute_operator_tool_call_with_context(
         }
     };
 
-    match execute_resolved_operator(ctx, resolved.clone(), invocation, run_context.clone()).await {
-        Ok(result) => (
-            serde_json::to_string_pretty(&result).unwrap_or_else(|err| {
-                failure_json(
-                    alias,
-                    Some(&resolved),
-                    None,
-                    run_context.clone(),
-                    OperatorToolError::new("serialization_failed", false, err.to_string()),
-                )
-            }),
-            false,
-        ),
+    match execute_resolved_operator(
+        ctx,
+        resolved.clone(),
+        invocation.clone(),
+        run_context.clone(),
+    )
+    .await
+    {
+        Ok(result) => {
+            record_operator_success_best_effort(ctx, &result, &started_at).await;
+            (
+                serde_json::to_string_pretty(&result).unwrap_or_else(|err| {
+                    failure_json(
+                        alias,
+                        Some(&resolved),
+                        None,
+                        run_context.clone(),
+                        OperatorToolError::new("serialization_failed", false, err.to_string()),
+                    )
+                }),
+                false,
+            )
+        }
         Err(error) => {
             let run_dir = error.run_dir.clone();
+            record_operator_failure_best_effort(
+                ctx,
+                alias,
+                Some(&resolved),
+                run_dir.as_deref(),
+                Some(&invocation),
+                run_context.clone(),
+                &started_at,
+                &error,
+            )
+            .await;
             (
                 failure_json(
                     alias,
@@ -2042,6 +2804,265 @@ fn failure_json(
     .unwrap_or_else(|_| "{\"status\":\"failed\"}".to_string())
 }
 
+async fn record_operator_success_best_effort(
+    ctx: &crate::domain::tools::ToolContext,
+    result: &OperatorRunResult,
+    started_at: &str,
+) {
+    let output_summary = operator_output_summary(result);
+    let mut metadata = json!({
+        "runId": result.run_id,
+        "runDir": result.run_dir,
+        "provenancePath": result.provenance_path,
+        "exportDir": result.export_dir,
+        "markdownReport": result.markdown_report,
+        "operatorAlias": result.operator.alias,
+        "runContext": result.run_context,
+        "paramSources": result.param_sources,
+        "cache": result.cache,
+    });
+    if let Some(preflight) = &result.preflight {
+        metadata["preflight"] = preflight.clone();
+    }
+    let selected_params = selected_params_for_source(
+        &result.effective_params,
+        &result.param_sources,
+        "user_preflight",
+    );
+    if !selected_params.is_empty() {
+        metadata["selectedParams"] = json!(selected_params);
+    }
+    let record = crate::domain::execution_records::ExecutionRecordInput {
+        kind: "operator".to_string(),
+        unit_id: Some(result.operator.id.clone()),
+        canonical_id: Some(canonical_operator_unit_id(&result.operator)),
+        provider_plugin: Some(result.operator.source_plugin.clone()),
+        status: result.status.clone(),
+        session_id: ctx.session_id.clone(),
+        parent_execution_id: result
+            .run_context
+            .as_ref()
+            .and_then(|context| context.parent_execution_id.clone()),
+        started_at: Some(started_at.to_string()),
+        ended_at: Some(chrono::Utc::now().to_rfc3339()),
+        input_hash: crate::domain::execution_records::hash_execution_map(&result.effective_inputs),
+        param_hash: crate::domain::execution_records::hash_execution_map(&result.effective_params),
+        output_summary_json: Some(output_summary),
+        runtime_json: Some(result.enforcement.clone()),
+        metadata_json: Some(metadata),
+    };
+    crate::domain::execution_records::record_execution_best_effort(&ctx.project_root, record).await;
+}
+
+fn selected_params_for_source(
+    effective_params: &BTreeMap<String, JsonValue>,
+    param_sources: &BTreeMap<String, String>,
+    wanted_source: &str,
+) -> BTreeMap<String, JsonValue> {
+    effective_params
+        .iter()
+        .filter_map(|(param, value)| {
+            param_sources
+                .get(param)
+                .filter(|source| source.as_str() == wanted_source)
+                .map(|_| (param.clone(), value.clone()))
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_operator_failure_best_effort(
+    ctx: &crate::domain::tools::ToolContext,
+    alias: &str,
+    resolved: Option<&ResolvedOperator>,
+    run_dir: Option<&str>,
+    invocation: Option<&OperatorInvocation>,
+    run_context: Option<OperatorRunContext>,
+    started_at: &str,
+    error: &OperatorToolError,
+) {
+    let operator = resolved.map(|resolved| OperatorRunIdentity {
+        alias: alias.to_string(),
+        id: resolved.spec.metadata.id.clone(),
+        version: resolved.spec.metadata.version.clone(),
+        source_plugin: resolved.spec.source.source_plugin.clone(),
+        manifest_path: resolved
+            .spec
+            .source
+            .manifest_path
+            .to_string_lossy()
+            .into_owned(),
+    });
+    let mut metadata = json!({
+        "runDir": run_dir,
+        "operatorAlias": alias,
+        "operator": operator,
+        "runContext": run_context,
+        "error": error,
+    });
+    if let (Some(resolved), Some(invocation)) = (resolved, invocation) {
+        let preflight_param_names = operator_invocation_preflight_answered_params(invocation);
+        let supplied_param_names = invocation.params.keys().cloned().collect::<BTreeSet<_>>();
+        metadata["paramSources"] = json!(operator_param_sources(
+            &resolved.spec,
+            &supplied_param_names,
+            &preflight_param_names,
+            &invocation.params,
+        ));
+        if let Some(preflight) = operator_invocation_preflight_metadata(invocation) {
+            metadata["preflight"] = preflight;
+        }
+    }
+    let (input_hash, param_hash) = invocation
+        .map(|invocation| {
+            (
+                crate::domain::execution_records::hash_execution_map(&invocation.inputs),
+                crate::domain::execution_records::hash_execution_map(&invocation.params),
+            )
+        })
+        .unwrap_or((None, None));
+    let output_summary = json!({
+        "errorKind": error.kind,
+        "retryable": error.retryable,
+        "runDir": run_dir,
+    });
+    let record = crate::domain::execution_records::ExecutionRecordInput {
+        kind: "operator".to_string(),
+        unit_id: operator.as_ref().map(|operator| operator.id.clone()),
+        canonical_id: operator.as_ref().map(canonical_operator_unit_id),
+        provider_plugin: operator
+            .as_ref()
+            .map(|operator| operator.source_plugin.clone()),
+        status: "failed".to_string(),
+        session_id: ctx.session_id.clone(),
+        parent_execution_id: run_context
+            .as_ref()
+            .and_then(|context| context.parent_execution_id.clone()),
+        started_at: Some(started_at.to_string()),
+        ended_at: Some(chrono::Utc::now().to_rfc3339()),
+        input_hash,
+        param_hash,
+        output_summary_json: Some(output_summary),
+        runtime_json: Some(enforcement_json_for_context(ctx)),
+        metadata_json: Some(metadata),
+    };
+    crate::domain::execution_records::record_execution_best_effort(&ctx.project_root, record).await;
+}
+
+fn canonical_operator_unit_id(operator: &OperatorRunIdentity) -> String {
+    format!("{}/operator/{}", operator.source_plugin, operator.id.trim())
+}
+
+fn canonical_operator_unit_id_for_spec(spec: &OperatorSpec) -> String {
+    format!(
+        "{}/operator/{}",
+        spec.source.source_plugin,
+        spec.metadata.id.trim()
+    )
+}
+
+fn operator_output_summary(result: &OperatorRunResult) -> JsonValue {
+    let output_artifact_count = result
+        .outputs
+        .values()
+        .map(|artifacts| artifacts.len())
+        .sum::<usize>();
+    json!({
+        "runId": result.run_id,
+        "outputKeys": result.outputs.keys().cloned().collect::<Vec<_>>(),
+        "outputArtifactCount": output_artifact_count,
+        "structuredOutputCount": result.structured_outputs.as_ref().map(output_artifact_count_json).unwrap_or(0),
+        "status": result.status,
+    })
+}
+
+fn output_artifact_count_json(value: &JsonValue) -> usize {
+    value.as_object().map(|object| object.len()).unwrap_or(0)
+}
+
+fn enforcement_json_for_context(ctx: &crate::domain::tools::ToolContext) -> JsonValue {
+    json!({
+        "executionEnvironment": ctx.execution_environment,
+        "sandboxBackend": ctx.sandbox_backend,
+        "localVenvType": ctx.local_venv_type,
+        "localVenvName": ctx.local_venv_name,
+    })
+}
+
+pub fn operator_invocation_preflight_metadata(
+    invocation: &OperatorInvocation,
+) -> Option<JsonValue> {
+    invocation
+        .metadata
+        .get(OPERATOR_PREFLIGHT_METADATA_KEY)
+        .cloned()
+}
+
+pub fn operator_invocation_preflight_param_sources(
+    invocation: &OperatorInvocation,
+) -> BTreeMap<String, String> {
+    operator_invocation_preflight_answered_params(invocation)
+        .into_iter()
+        .map(|param| (param, OPERATOR_PARAM_SOURCE_USER_PREFLIGHT.to_string()))
+        .collect()
+}
+
+fn operator_invocation_preflight_answered_params(
+    invocation: &OperatorInvocation,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Some(preflight) = operator_invocation_preflight_metadata(invocation) else {
+        return out;
+    };
+    if let Some(params_by_source) = preflight
+        .get("paramsBySource")
+        .and_then(JsonValue::as_object)
+    {
+        out.extend(params_by_source.keys().cloned());
+    }
+    if let Some(answered) = preflight
+        .get("answeredParams")
+        .and_then(JsonValue::as_array)
+    {
+        out.extend(
+            answered
+                .iter()
+                .filter_map(|entry| entry.get("param").and_then(JsonValue::as_str))
+                .map(str::to_string),
+        );
+    }
+    out
+}
+
+fn operator_param_sources(
+    spec: &OperatorSpec,
+    supplied_param_names: &BTreeSet<String>,
+    preflight_param_names: &BTreeSet<String>,
+    effective_params: &BTreeMap<String, JsonValue>,
+) -> BTreeMap<String, String> {
+    effective_params
+        .keys()
+        .map(|param| {
+            let source = if preflight_param_names.contains(param) {
+                OPERATOR_PARAM_SOURCE_USER_PREFLIGHT
+            } else if supplied_param_names.contains(param) {
+                OPERATOR_PARAM_SOURCE_CALLER
+            } else if spec
+                .interface
+                .params
+                .get(param)
+                .and_then(|field| field.default.as_ref())
+                .is_some()
+            {
+                OPERATOR_PARAM_SOURCE_DEFAULT
+            } else {
+                OPERATOR_PARAM_SOURCE_SYSTEM
+            };
+            (param.clone(), source.to_string())
+        })
+        .collect()
+}
+
 async fn execute_resolved_operator(
     ctx: &crate::domain::tools::ToolContext,
     resolved: ResolvedOperator,
@@ -2079,11 +3100,20 @@ async fn execute_resolved_operator(
         invocation.params.keys(),
         &resolved.spec.interface.params,
     )?;
+    let preflight = operator_invocation_preflight_metadata(&invocation);
+    let preflight_param_names = operator_invocation_preflight_answered_params(&invocation);
+    let supplied_param_names = invocation.params.keys().cloned().collect::<BTreeSet<_>>();
     let mut effective_params = apply_param_defaults(&resolved.spec, invocation.params);
     validate_field_values("params", &resolved.spec.interface.params, &effective_params)?;
     let effective_resources =
         apply_resource_defaults_and_overrides(&resolved.spec, invocation.resources)?;
     apply_equal_bindings(&resolved.spec, &mut effective_params, &effective_resources)?;
+    let param_sources = operator_param_sources(
+        &resolved.spec,
+        &supplied_param_names,
+        &preflight_param_names,
+        &effective_params,
+    );
 
     let canonical_inputs = canonicalize_inputs(
         ctx,
@@ -2132,6 +3162,8 @@ async fn execute_resolved_operator(
                 canonical_inputs,
                 input_fingerprints,
                 effective_params,
+                param_sources,
+                preflight,
                 effective_resources,
                 enforcement,
             )
@@ -2159,6 +3191,8 @@ async fn execute_resolved_operator(
                 canonical_inputs.clone(),
                 input_fingerprints.clone(),
                 effective_params.clone(),
+                param_sources.clone(),
+                preflight.clone(),
                 effective_resources.clone(),
                 enforcement.clone(),
                 cache_metadata.clone(),
@@ -2177,6 +3211,8 @@ async fn execute_resolved_operator(
                 canonical_inputs.clone(),
                 input_fingerprints.clone(),
                 effective_params.clone(),
+                param_sources.clone(),
+                preflight.clone(),
                 effective_resources.clone(),
                 enforcement.clone(),
                 cache_metadata.clone(),
@@ -2396,6 +3432,8 @@ async fn record_operator_cache_hit(
     effective_inputs: BTreeMap<String, JsonValue>,
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
+    param_sources: BTreeMap<String, String>,
+    preflight: Option<JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     enforcement: JsonValue,
 ) -> Result<OperatorRunResult, OperatorToolError> {
@@ -2419,6 +3457,36 @@ async fn record_operator_cache_hit(
         source_run_id: Some(hit.run_id.clone()),
         source_run_dir: Some(hit.run_dir.clone()),
     };
+    let export_dir = if surface.kind == OperatorExecutionSurfaceKind::Local {
+        let source_out = PathBuf::from(&hit.run_dir).join("out");
+        Some(
+            export_local_operator_results(ctx, resolved, run_id, &source_out)
+                .map_err(|error| error.with_run_dir(run_dir))?,
+        )
+    } else {
+        Some(
+            export_environment_operator_results(
+                ctx,
+                resolved,
+                run_id,
+                &format!("{}/out", hit.run_dir),
+            )
+            .await
+            .map_err(|error| error.with_run_dir(run_dir))?,
+        )
+    };
+    let markdown_report =
+        operator_result_markdown_report(resolved, export_dir.as_deref(), &hit.result.outputs);
+    if let (Some(export_dir), Some(report)) = (export_dir.as_deref(), markdown_report.as_deref()) {
+        if surface.kind == OperatorExecutionSurfaceKind::Local {
+            write_local_operator_result_readme(export_dir, report)
+                .map_err(|error| error.with_run_dir(run_dir))?;
+        } else {
+            write_environment_operator_result_readme(ctx, export_dir, report)
+                .await
+                .map_err(|error| error.with_run_dir(run_dir))?;
+        }
+    }
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
         run_id: run_id.to_string(),
@@ -2434,11 +3502,15 @@ async fn record_operator_cache_hit(
         } else {
             format!("{run_dir}/provenance.json")
         }),
+        export_dir,
+        markdown_report,
         outputs: hit.result.outputs.clone(),
         structured_outputs: hit.result.structured_outputs.clone(),
         effective_inputs,
         input_fingerprints,
         effective_params,
+        param_sources,
+        preflight,
         effective_resources,
         attempt: retry_state.attempt,
         max_attempts: retry_state.max_attempts,
@@ -2597,6 +3669,21 @@ impl OperatorContainerKind {
 struct OperatorContainerSelection {
     kind: OperatorContainerKind,
     image: String,
+    prepare: Option<OperatorContainerImagePrepare>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OperatorContainerImagePrepare {
+    Dockerfile {
+        dockerfile: String,
+        context: String,
+        tag: String,
+    },
+    SingularityDefinition {
+        definition: String,
+        sif: String,
+        hash: String,
+    },
 }
 
 fn selected_direct_container(
@@ -2611,6 +3698,7 @@ fn selected_direct_container(
             .map(|kind| OperatorContainerSelection {
                 kind,
                 image: runtime_container_image(runtime, kind),
+                prepare: None,
             });
     }
 
@@ -2622,6 +3710,7 @@ fn selected_direct_container(
         .map(|kind| OperatorContainerSelection {
             kind,
             image: runtime_container_image(runtime, kind),
+            prepare: None,
         })
 }
 
@@ -3573,6 +4662,8 @@ async fn execute_local(
     effective_inputs: BTreeMap<String, JsonValue>,
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
+    param_sources: BTreeMap<String, String>,
+    preflight: Option<JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     enforcement: JsonValue,
     cache: Option<OperatorRunCacheMetadata>,
@@ -3689,6 +4780,28 @@ async fn execute_local(
                 return Err(error);
             }
         };
+    update_local_status(&run_path, "exporting_results", None, Some(&status_metadata))?;
+    let export_dir = match export_local_operator_results(ctx, resolved, run_id, &out) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            let error = if error.run_dir.is_none() {
+                error.with_run_dir(run_dir)
+            } else {
+                error
+            };
+            update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
+            return Err(error);
+        }
+    };
+    let markdown_report =
+        operator_result_markdown_report(resolved, export_dir.as_deref(), &outputs);
+    if let (Some(export_dir), Some(report)) = (export_dir.as_deref(), markdown_report.as_deref()) {
+        if let Err(error) = write_local_operator_result_readme(export_dir, report) {
+            let error = error.with_run_dir(run_dir);
+            update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
+            return Err(error);
+        }
+    }
     let provenance_path = run_path.join("provenance.json");
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
@@ -3698,11 +4811,15 @@ async fn execute_local(
         run_dir: run_dir.to_string(),
         run_context,
         provenance_path: Some(provenance_path.to_string_lossy().into_owned()),
+        export_dir,
+        markdown_report,
         outputs,
         structured_outputs,
         effective_inputs,
         input_fingerprints,
         effective_params,
+        param_sources,
+        preflight,
         effective_resources,
         attempt: retry_state.attempt,
         max_attempts: retry_state.max_attempts,
@@ -3728,6 +4845,8 @@ async fn execute_in_environment(
     effective_inputs: BTreeMap<String, JsonValue>,
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
+    param_sources: BTreeMap<String, String>,
+    preflight: Option<JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     enforcement: JsonValue,
     cache: Option<OperatorRunCacheMetadata>,
@@ -3811,6 +4930,47 @@ async fn execute_in_environment(
             return Err(error);
         }
     };
+    update_environment_status(
+        ctx,
+        run_dir,
+        "exporting_results",
+        None,
+        Some(&status_metadata),
+    )
+    .await?;
+    let export_dir =
+        match export_environment_operator_results(ctx, resolved, run_id, &format!("{run_dir}/out"))
+            .await
+        {
+            Ok(path) => Some(path),
+            Err(error) => {
+                let error = if error.run_dir.is_none() {
+                    error.with_run_dir(run_dir)
+                } else {
+                    error
+                };
+                update_environment_status(
+                    ctx,
+                    run_dir,
+                    "failed",
+                    Some(&error),
+                    Some(&status_metadata),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+    let markdown_report =
+        operator_result_markdown_report(resolved, export_dir.as_deref(), &outputs);
+    if let (Some(export_dir), Some(report)) = (export_dir.as_deref(), markdown_report.as_deref()) {
+        if let Err(error) = write_environment_operator_result_readme(ctx, export_dir, report).await
+        {
+            let error = error.with_run_dir(run_dir);
+            update_environment_status(ctx, run_dir, "failed", Some(&error), Some(&status_metadata))
+                .await?;
+            return Err(error);
+        }
+    }
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
         run_id: run_id.to_string(),
@@ -3819,11 +4979,15 @@ async fn execute_in_environment(
         run_dir: run_dir.to_string(),
         run_context,
         provenance_path: Some(format!("{run_dir}/provenance.json")),
+        export_dir,
+        markdown_report,
         outputs,
         structured_outputs,
         effective_inputs,
         input_fingerprints,
         effective_params,
+        param_sources,
+        preflight,
         effective_resources,
         attempt: retry_state.attempt,
         max_attempts: retry_state.max_attempts,
@@ -3976,6 +5140,14 @@ fn operator_execution_command(
     inputs: &BTreeMap<String, JsonValue>,
 ) -> String {
     let Some(selection) = operator_container_for_command(ctx, spec, surface_kind) else {
+        if let Some(command) =
+            operator_conda_environment_command(ctx, spec, surface_kind, run_dir, argv)
+        {
+            return command;
+        }
+        if let Some(command) = operator_environment_ref_error_command(ctx, spec, surface_kind) {
+            return command;
+        }
         return command_with_log_capture(argv);
     };
     containerized_operator_command(ctx, spec, selection, surface_kind, run_dir, argv, inputs)
@@ -3992,6 +5164,604 @@ fn operator_container_for_command(
     spec.runtime
         .as_ref()
         .and_then(|runtime| selected_direct_container(ctx, runtime))
+        .or_else(|| operator_container_from_environment_profile(ctx, spec, surface_kind))
+}
+
+fn operator_container_from_environment_profile(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Option<OperatorContainerSelection> {
+    operator_environment_container_selection(ctx, spec, surface_kind)
+        .ok()
+        .flatten()
+}
+
+fn operator_environment_container_selection(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Result<Option<OperatorContainerSelection>, String> {
+    let Some(profile) = operator_environment_profile(spec) else {
+        return Ok(None);
+    };
+    let kind = profile
+        .runtime
+        .kind
+        .as_deref()
+        .unwrap_or("system")
+        .trim()
+        .to_ascii_lowercase();
+    let Some(container_kind) = container_kind_from_name(&kind) else {
+        return Ok(None);
+    };
+    if let Some(image) = operator_environment_profile_image(&profile) {
+        return Ok(Some(OperatorContainerSelection {
+            kind: container_kind,
+            image,
+            prepare: None,
+        }));
+    }
+    if surface_kind != OperatorExecutionSurfaceKind::Local {
+        return Err(format!(
+            "Environment profile `{}` uses `{kind}` without runtime.image. File-based `{kind}` builds are only supported for local Operator runs; build the image on the target system and set runtime.image.",
+            profile.canonical_id
+        ));
+    }
+    match container_kind {
+        OperatorContainerKind::Docker => {
+            let dockerfile = operator_dockerfile_from_environment_profile(&profile)?;
+            let context =
+                operator_docker_build_context_from_environment_profile(&profile, &dockerfile);
+            let dockerfile_bytes = fs::read(&dockerfile).map_err(|err| {
+                format!(
+                    "Read Dockerfile for environment profile `{}` at `{}`: {err}",
+                    profile.canonical_id,
+                    dockerfile.display()
+                )
+            })?;
+            let env_hash = sha256_hex(&dockerfile_bytes);
+            let tag = format!(
+                "omiga-env-{}:{}",
+                safe_operator_env_component(&profile.canonical_id).to_ascii_lowercase(),
+                &env_hash[..12]
+            );
+            Ok(Some(OperatorContainerSelection {
+                kind: OperatorContainerKind::Docker,
+                image: tag.clone(),
+                prepare: Some(OperatorContainerImagePrepare::Dockerfile {
+                    dockerfile: dockerfile.to_string_lossy().into_owned(),
+                    context: context.to_string_lossy().into_owned(),
+                    tag,
+                }),
+            }))
+        }
+        OperatorContainerKind::Singularity => {
+            let definition = operator_singularity_definition_from_environment_profile(&profile)?;
+            let definition_bytes = fs::read(&definition).map_err(|err| {
+                format!(
+                    "Read Singularity definition for environment profile `{}` at `{}`: {err}",
+                    profile.canonical_id,
+                    definition.display()
+                )
+            })?;
+            let env_hash = sha256_hex(&definition_bytes);
+            let env_key = format!(
+                "{}-{}",
+                safe_operator_env_component(&profile.canonical_id),
+                &env_hash[..12]
+            );
+            let sif = ctx
+                .project_root
+                .join(".omiga/operator-envs/singularity")
+                .join(format!("{env_key}.sif"))
+                .to_string_lossy()
+                .into_owned();
+            Ok(Some(OperatorContainerSelection {
+                kind: OperatorContainerKind::Singularity,
+                image: sif.clone(),
+                prepare: Some(OperatorContainerImagePrepare::SingularityDefinition {
+                    definition: definition.to_string_lossy().into_owned(),
+                    sif,
+                    hash: env_hash,
+                }),
+            }))
+        }
+    }
+}
+
+fn operator_environment_ref_error_command(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Option<String> {
+    if surface_kind == OperatorExecutionSurfaceKind::Sandbox {
+        return None;
+    }
+    let env_ref = operator_runtime_env_ref(spec)?;
+    let profile = operator_environment_profile(spec)?;
+    let kind = profile
+        .runtime
+        .kind
+        .as_deref()
+        .unwrap_or("system")
+        .trim()
+        .to_ascii_lowercase();
+    let message = if matches!(kind.as_str(), "docker" | "singularity") {
+        match operator_environment_container_selection(ctx, spec, surface_kind) {
+            Ok(Some(_)) | Ok(None) => return None,
+            Err(message) => message,
+        }
+    } else if matches!(
+        kind.as_str(),
+        "system" | "local" | "host" | "conda" | "mamba" | "micromamba"
+    ) {
+        return None;
+    } else {
+        format!(
+            "Operator environment envRef `{env_ref}` resolved to unsupported runtime.type `{kind}`. Supported environment runtimes are system/local/host, conda/mamba/micromamba, docker, and singularity."
+        )
+    };
+    Some(command_with_log_capture(&[
+        "/bin/sh".to_string(),
+        "-lc".to_string(),
+        format!("printf '%s\\n' {} >&2; exit 127", sh_quote(&message)),
+    ]))
+}
+
+fn operator_environment_profile_image(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Option<String> {
+    profile
+        .runtime
+        .image
+        .clone()
+        .or_else(|| {
+            profile
+                .runtime
+                .extra
+                .get("image")
+                .and_then(JsonValue::as_str)
+                .map(str::to_string)
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn operator_dockerfile_from_environment_profile(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Result<PathBuf, String> {
+    if let Some(raw) = profile_runtime_extra_str(profile, &["dockerfile", "dockerFile"]) {
+        let path = operator_profile_relative_path(profile, raw)?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if file_name != "Dockerfile" {
+            return Err(format!(
+                "Docker environment profile `{}` must use a standard `Dockerfile`; got `{}`.",
+                profile.canonical_id,
+                path.display()
+            ));
+        }
+        if !path.is_file() {
+            return Err(format!(
+                "Docker environment profile `{}` declares Dockerfile `{}` but it does not exist.",
+                profile.canonical_id,
+                path.display()
+            ));
+        }
+        return Ok(path);
+    }
+    let manifest_dir = operator_environment_manifest_dir(profile)?;
+    let candidate = manifest_dir.join("Dockerfile");
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    Err(format!(
+        "Docker environment profile `{}` requires runtime.image or a standard `Dockerfile` next to environment.yaml.",
+        profile.canonical_id
+    ))
+}
+
+fn operator_docker_build_context_from_environment_profile(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    dockerfile: &Path,
+) -> PathBuf {
+    profile_runtime_extra_str(profile, &["context", "buildContext", "build_context"])
+        .and_then(|raw| operator_profile_relative_path(profile, raw).ok())
+        .unwrap_or_else(|| {
+            dockerfile
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        })
+}
+
+fn operator_singularity_definition_from_environment_profile(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Result<PathBuf, String> {
+    if let Some(raw) = profile_runtime_extra_str(
+        profile,
+        &[
+            "definitionFile",
+            "definition_file",
+            "singularityDef",
+            "singularity_def",
+        ],
+    ) {
+        let path = operator_profile_relative_path(profile, raw)?;
+        if path.extension().and_then(|ext| ext.to_str()) != Some("def") {
+            return Err(format!(
+                "Singularity environment profile `{}` must use a `.def` definition file; got `{}`.",
+                profile.canonical_id,
+                path.display()
+            ));
+        }
+        if !path.is_file() {
+            return Err(format!(
+                "Singularity environment profile `{}` declares definition file `{}` but it does not exist.",
+                profile.canonical_id,
+                path.display()
+            ));
+        }
+        return Ok(path);
+    }
+    let manifest_dir = operator_environment_manifest_dir(profile)?;
+    let candidate = manifest_dir.join("singularity.def");
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    Err(format!(
+        "Singularity environment profile `{}` requires runtime.image or a standard `singularity.def` next to environment.yaml.",
+        profile.canonical_id
+    ))
+}
+
+fn profile_runtime_extra_str<'a>(
+    profile: &'a crate::domain::environments::EnvironmentProfileSummary,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        profile
+            .runtime
+            .extra
+            .get(*key)
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn operator_profile_relative_path(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    Ok(operator_environment_manifest_dir(profile)?.join(path))
+}
+
+fn operator_environment_manifest_dir(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Result<PathBuf, String> {
+    let manifest = PathBuf::from(&profile.manifest_path);
+    manifest.parent().map(Path::to_path_buf).ok_or_else(|| {
+        format!(
+            "Environment profile `{}` has no manifest parent directory.",
+            profile.canonical_id
+        )
+    })
+}
+
+fn operator_conda_environment_command(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+    run_dir: &str,
+    argv: &[String],
+) -> Option<String> {
+    if surface_kind == OperatorExecutionSurfaceKind::Sandbox {
+        return None;
+    }
+    let env_ref = operator_runtime_env_ref(spec)?;
+    let Some(profile) = operator_environment_profile(spec) else {
+        return Some(command_with_log_capture(&[
+            "/bin/sh".to_string(),
+            "-lc".to_string(),
+            format!(
+                "printf '%s\\n' {} >&2; exit 127",
+                sh_quote(&format!(
+                    "Operator environment envRef `{env_ref}` did not resolve for plugin `{}`.",
+                    spec.source.source_plugin
+                ))
+            ),
+        ]));
+    };
+    let kind = profile
+        .runtime
+        .kind
+        .as_deref()
+        .unwrap_or("system")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(kind.as_str(), "conda" | "mamba" | "micromamba") {
+        return None;
+    }
+    match operator_conda_environment_selection(ctx, &profile, surface_kind) {
+        Ok(selection) => {
+            let shell_script =
+                conda_environment_shell_script(&selection, run_dir, &shell_join(argv));
+            Some(command_with_log_capture(&[
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                shell_script,
+            ]))
+        }
+        Err(message) => Some(command_with_log_capture(&[
+            "/bin/sh".to_string(),
+            "-lc".to_string(),
+            format!("printf '%s\\n' {} >&2; exit 127", sh_quote(&message)),
+        ])),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OperatorCondaEnvironmentSelection {
+    env_prefix: String,
+    env_yaml_b64: String,
+    env_hash: String,
+    env_vars: BTreeMap<String, String>,
+}
+
+fn operator_conda_environment_selection(
+    ctx: &crate::domain::tools::ToolContext,
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Result<OperatorCondaEnvironmentSelection, String> {
+    let conda_file = operator_conda_environment_file(profile)?;
+    let bytes = fs::read(&conda_file).map_err(|err| {
+        format!(
+            "Read conda environment file `{}`: {err}",
+            conda_file.display()
+        )
+    })?;
+    let env_hash = sha256_hex(&bytes);
+    let env_key = format!(
+        "{}-{}",
+        safe_operator_env_component(&profile.canonical_id),
+        &env_hash[..12]
+    );
+    let env_prefix = operator_conda_env_prefix(ctx, surface_kind, &env_key);
+    use base64::{engine::general_purpose, Engine as _};
+    Ok(OperatorCondaEnvironmentSelection {
+        env_prefix,
+        env_yaml_b64: general_purpose::STANDARD.encode(bytes),
+        env_hash,
+        env_vars: profile.runtime.env.clone(),
+    })
+}
+
+fn operator_conda_environment_file(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Result<PathBuf, String> {
+    for key in [
+        "condaEnvFile",
+        "conda_env_file",
+        "condaFile",
+        "conda_file",
+        "environmentFile",
+        "environment_file",
+    ] {
+        if let Some(raw) = profile_runtime_extra_str(profile, &[key]) {
+            let path = operator_profile_relative_path(profile, raw)?;
+            validate_conda_environment_yaml_path(profile, &path)?;
+            if !path.is_file() {
+                return Err(format!(
+                    "Environment profile `{}` declares conda YAML file `{}` but it does not exist.",
+                    profile.canonical_id,
+                    path.display()
+                ));
+            }
+            return Ok(path);
+        }
+    }
+    let manifest_dir = operator_environment_manifest_dir(profile)?;
+    for name in ["conda.yaml", "conda.yml"] {
+        let candidate = manifest_dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "Environment profile `{}` does not declare or contain a standard conda YAML file. Use `runtime.condaEnvFile: ./conda.yaml` or `./conda.yml`.",
+        profile.canonical_id
+    ))
+}
+
+fn validate_conda_environment_yaml_path(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    path: &Path,
+) -> Result<(), String> {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+    if !matches!(extension.as_deref(), Some("yaml" | "yml")) {
+        return Err(format!(
+            "Conda/mamba environment profile `{}` must use a `.yaml` or `.yml` file; got `{}`.",
+            profile.canonical_id,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn operator_conda_env_prefix(
+    ctx: &crate::domain::tools::ToolContext,
+    surface_kind: OperatorExecutionSurfaceKind,
+    env_key: &str,
+) -> String {
+    let rel = format!(".omiga/operator-envs/conda/{env_key}");
+    if surface_kind == OperatorExecutionSurfaceKind::Local {
+        return ctx.project_root.join(rel).to_string_lossy().into_owned();
+    }
+    crate::domain::tools::env_store::remote_path(ctx, &rel)
+}
+
+fn conda_environment_shell_script(
+    selection: &OperatorCondaEnvironmentSelection,
+    run_dir: &str,
+    inner_command: &str,
+) -> String {
+    let env_yaml = format!("{run_dir}/env/conda-environment.yaml");
+    let exports = shell_export_lines(&selection.env_vars);
+    format!(
+        r#"set -e
+OMIGA_CONDA_PREFIX={env_prefix}
+OMIGA_CONDA_YAML={env_yaml}
+OMIGA_CONDA_HASH={env_hash}
+OMIGA_MICROMAMBA="${{OMIGA_MICROMAMBA:-$HOME/.omiga/bin/micromamba}}"
+mkdir -p "$(dirname "$OMIGA_CONDA_YAML")" "$(dirname "$OMIGA_CONDA_PREFIX")"
+printf %s {env_yaml_b64} | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$OMIGA_CONDA_YAML"
+omiga_find_conda_manager() {{
+  OMIGA_CONDA_MANAGER_KIND=
+  OMIGA_CONDA_BIN=
+  if [ -n "${{OMIGA_MICROMAMBA:-}}" ] && [ -x "$OMIGA_MICROMAMBA" ]; then
+    OMIGA_CONDA_MANAGER_KIND=micromamba
+    OMIGA_CONDA_BIN=$OMIGA_MICROMAMBA
+    return 0
+  fi
+  if command -v micromamba >/dev/null 2>&1; then
+    OMIGA_CONDA_MANAGER_KIND=micromamba
+    OMIGA_CONDA_BIN=$(command -v micromamba)
+    return 0
+  fi
+  if command -v mamba >/dev/null 2>&1; then
+    OMIGA_CONDA_MANAGER_KIND=mamba
+    OMIGA_CONDA_BIN=$(command -v mamba)
+    return 0
+  fi
+  if command -v conda >/dev/null 2>&1; then
+    OMIGA_CONDA_MANAGER_KIND=conda
+    OMIGA_CONDA_BIN=$(command -v conda)
+    return 0
+  fi
+  return 1
+}}
+omiga_missing_conda_manager() {{
+  cat >&2 <<'OMIGA_CONDA_HINT'
+No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment.
+Recommended: install the official micromamba binary at $HOME/.omiga/bin/micromamba, or set OMIGA_MICROMAMBA=/absolute/path/to/micromamba.
+Then rerun the Operator; Omiga will create and reuse the isolated env from conda.yaml/conda.yml under .omiga/operator-envs/conda.
+OMIGA_CONDA_HINT
+  exit 127
+}}
+omiga_find_conda_manager || true
+if [ ! -f "$OMIGA_CONDA_PREFIX/.omiga-env-hash" ] || [ "$(cat "$OMIGA_CONDA_PREFIX/.omiga-env-hash" 2>/dev/null || true)" != "$OMIGA_CONDA_HASH" ]; then
+  if [ -z "$OMIGA_CONDA_BIN" ]; then
+    omiga_missing_conda_manager
+  fi
+  rm -rf "$OMIGA_CONDA_PREFIX"
+  case "$OMIGA_CONDA_MANAGER_KIND" in
+    micromamba)
+      "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+      ;;
+    mamba)
+      "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+      ;;
+    conda)
+      "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+      ;;
+  esac
+  printf '%s' "$OMIGA_CONDA_HASH" > "$OMIGA_CONDA_PREFIX/.omiga-env-hash"
+fi
+{exports}
+case "${{OMIGA_CONDA_MANAGER_KIND:-}}" in
+  micromamba)
+    "$OMIGA_CONDA_BIN" run -p "$OMIGA_CONDA_PREFIX" /bin/sh -lc {inner}
+    ;;
+  mamba)
+    "$OMIGA_CONDA_BIN" run -p "$OMIGA_CONDA_PREFIX" /bin/sh -lc {inner}
+    ;;
+  conda)
+    "$OMIGA_CONDA_BIN" run -p "$OMIGA_CONDA_PREFIX" /bin/sh -lc {inner}
+    ;;
+  *)
+    PATH="$OMIGA_CONDA_PREFIX/bin:$PATH" /bin/sh -lc {inner}
+    ;;
+esac"#,
+        env_prefix = sh_quote(&selection.env_prefix),
+        env_yaml = sh_quote(&env_yaml),
+        env_hash = sh_quote(&selection.env_hash),
+        env_yaml_b64 = sh_quote(&selection.env_yaml_b64),
+        exports = exports,
+        inner = sh_quote(inner_command),
+    )
+}
+
+fn shell_export_lines(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .filter(|(key, _)| is_safe_shell_identifier(key))
+        .map(|(key, value)| format!("export {key}={}", sh_quote(value)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_safe_shell_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn operator_runtime_env_ref(spec: &OperatorSpec) -> Option<&str> {
+    let runtime = spec.runtime.as_ref()?;
+    runtime
+        .get("envRef")
+        .or_else(|| runtime.get("env_ref"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn operator_environment_profile(
+    spec: &OperatorSpec,
+) -> Option<crate::domain::environments::EnvironmentProfileSummary> {
+    let env_ref = operator_runtime_env_ref(spec)?;
+    let resolved = crate::domain::environments::resolve_environment_ref(
+        Some(env_ref),
+        &spec.source.source_plugin,
+        &spec.source.plugin_root,
+    );
+    resolved.profile
+}
+
+fn safe_operator_env_component(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-').trim_matches('.');
+    if out.is_empty() {
+        "environment".to_string()
+    } else {
+        out.to_string()
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    format!("{digest:x}")
 }
 
 fn containerized_operator_command(
@@ -4005,7 +5775,8 @@ fn containerized_operator_command(
 ) -> String {
     let inner = command_with_log_capture(argv);
     let mounts = operator_container_mounts(ctx, spec, surface_kind, run_dir, inputs);
-    match selection.kind {
+    let kind = selection.kind;
+    let container_command = match selection.kind {
         OperatorContainerKind::Docker => {
             let mut tokens = vec!["docker".to_string(), "run".to_string(), "--rm".to_string()];
             for mount in mounts {
@@ -4015,7 +5786,7 @@ fn containerized_operator_command(
             tokens.extend([
                 "-w".to_string(),
                 run_dir.to_string(),
-                selection.image,
+                selection.image.clone(),
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
                 inner,
@@ -4035,13 +5806,104 @@ fn containerized_operator_command(
                 tokens.push(container_bind_spec(&mount.path, mount.writable));
             }
             tokens.extend([
-                selection.image,
+                selection.image.clone(),
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
                 inner,
             ]);
             shell_join(&tokens)
         }
+    };
+    container_runtime_shell_script(kind, selection.prepare.as_ref(), &container_command)
+}
+
+fn container_runtime_shell_script(
+    kind: OperatorContainerKind,
+    prepare: Option<&OperatorContainerImagePrepare>,
+    container_command: &str,
+) -> String {
+    let preflight = container_runtime_preflight_script(kind);
+    let prepare = prepare
+        .map(container_runtime_prepare_script)
+        .unwrap_or_default();
+    format!(
+        r#"set -e
+mkdir -p logs
+omiga_container_runtime_missing() {{
+  message=$1
+  printf '%s\n' "$message" >&2
+  printf '%s\n' "$message" >> logs/stderr.txt
+  printf '\n__OMIGA_OPERATOR_EXIT_CODE=127\n'
+  exit 127
+}}
+{preflight}
+{prepare}
+set +e
+{container_command} >> logs/stdout.txt 2>> logs/stderr.txt
+code=$?
+printf '\n__OMIGA_OPERATOR_EXIT_CODE=%s\n' "$code"
+exit "$code""#
+    )
+}
+
+fn container_runtime_preflight_script(kind: OperatorContainerKind) -> &'static str {
+    match kind {
+        OperatorContainerKind::Docker => {
+            r#"if ! command -v docker >/dev/null 2>&1; then
+  omiga_container_runtime_missing 'Docker runtime is required for this Operator environment but `docker` was not found in the active PATH/base environment/virtual environment. Install Docker Desktop/Engine, make the `docker` CLI available, and retry.'
+fi
+if ! docker version >/dev/null 2>&1; then
+  omiga_container_runtime_missing 'Docker CLI was found, but `docker version` failed. Start Docker Desktop/daemon or fix Docker permissions, then retry.'
+fi"#
+        }
+        OperatorContainerKind::Singularity => {
+            r#"if command -v singularity >/dev/null 2>&1; then
+  :
+elif command -v apptainer >/dev/null 2>&1; then
+  singularity() { apptainer "$@"; }
+else
+  omiga_container_runtime_missing 'Singularity/Apptainer runtime is required for this Operator environment but neither `singularity` nor `apptainer` was found in the active PATH/base environment/virtual environment. Install SingularityCE or Apptainer and retry.'
+fi"#
+        }
+    }
+}
+
+fn container_runtime_prepare_script(prepare: &OperatorContainerImagePrepare) -> String {
+    match prepare {
+        OperatorContainerImagePrepare::Dockerfile {
+            dockerfile,
+            context,
+            tag,
+        } => format!(
+            r#"OMIGA_DOCKERFILE={dockerfile}
+OMIGA_DOCKER_CONTEXT={context}
+OMIGA_DOCKER_IMAGE={tag}
+if ! docker image inspect "$OMIGA_DOCKER_IMAGE" >/dev/null 2>&1; then
+  docker build -t "$OMIGA_DOCKER_IMAGE" -f "$OMIGA_DOCKERFILE" "$OMIGA_DOCKER_CONTEXT" >> logs/stdout.txt 2>> logs/stderr.txt
+fi"#,
+            dockerfile = sh_quote(dockerfile),
+            context = sh_quote(context),
+            tag = sh_quote(tag),
+        ),
+        OperatorContainerImagePrepare::SingularityDefinition {
+            definition,
+            sif,
+            hash,
+        } => format!(
+            r#"OMIGA_SINGULARITY_DEF={definition}
+OMIGA_SINGULARITY_SIF={sif}
+OMIGA_SINGULARITY_HASH={hash}
+mkdir -p "$(dirname "$OMIGA_SINGULARITY_SIF")"
+if [ ! -f "$OMIGA_SINGULARITY_SIF" ] || [ "$(cat "$OMIGA_SINGULARITY_SIF.omiga-env-hash" 2>/dev/null || true)" != "$OMIGA_SINGULARITY_HASH" ]; then
+  rm -f "$OMIGA_SINGULARITY_SIF.tmp"
+  singularity build "$OMIGA_SINGULARITY_SIF.tmp" "$OMIGA_SINGULARITY_DEF" >> logs/stdout.txt 2>> logs/stderr.txt
+  mv "$OMIGA_SINGULARITY_SIF.tmp" "$OMIGA_SINGULARITY_SIF"
+  printf '%s' "$OMIGA_SINGULARITY_HASH" > "$OMIGA_SINGULARITY_SIF.omiga-env-hash"
+fi"#,
+            definition = sh_quote(definition),
+            sif = sh_quote(sif),
+            hash = sh_quote(hash),
+        ),
     }
 }
 
@@ -4336,6 +6198,326 @@ async fn collect_environment_outputs(
         outputs.insert(name.clone(), artifacts);
     }
     Ok(outputs)
+}
+
+fn safe_operator_export_component(value: &str, fallback: &str) -> String {
+    let mut out = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    out = out
+        .trim_matches(|ch| matches!(ch, '.' | '_' | '-' | ' '))
+        .to_string();
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
+}
+
+fn operator_export_relative_path(resolved: &ResolvedOperator, run_id: &str) -> String {
+    let alias = safe_operator_export_component(&resolved.alias, "operator");
+    let run = safe_operator_export_component(run_id, "run");
+    format!("operator-results/{alias}/{run}")
+}
+
+fn local_operator_export_dir(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+) -> PathBuf {
+    ctx.project_root
+        .join(operator_export_relative_path(resolved, run_id))
+}
+
+fn environment_operator_export_dir(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+) -> String {
+    crate::domain::tools::env_store::remote_path(
+        ctx,
+        &operator_export_relative_path(resolved, run_id),
+    )
+}
+
+fn copy_dir_contents(source_dir: &Path, target_dir: &Path) -> Result<(), String> {
+    if !source_dir.is_dir() {
+        return Err(format!(
+            "operator output directory {} does not exist",
+            source_dir.display()
+        ));
+    }
+    if target_dir.exists() {
+        fs::remove_dir_all(target_dir).map_err(|err| {
+            format!(
+                "remove previous exported results {}: {err}",
+                target_dir.display()
+            )
+        })?;
+    }
+    fs::create_dir_all(target_dir).map_err(|err| {
+        format!(
+            "create exported results dir {}: {err}",
+            target_dir.display()
+        )
+    })?;
+    for entry in fs::read_dir(source_dir).map_err(|err| {
+        format!(
+            "read operator output directory {}: {err}",
+            source_dir.display()
+        )
+    })? {
+        let entry = entry.map_err(|err| format!("read operator output entry: {err}"))?;
+        let source = entry.path();
+        let target = target_dir.join(entry.file_name());
+        copy_path_recursively(&source, &target)?;
+    }
+    Ok(())
+}
+
+fn copy_path_recursively(source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|err| format!("read metadata for {}: {err}", source.display()))?;
+    if metadata.is_dir() {
+        fs::create_dir_all(target)
+            .map_err(|err| format!("create exported subdir {}: {err}", target.display()))?;
+        for entry in fs::read_dir(source)
+            .map_err(|err| format!("read output subdir {}: {err}", source.display()))?
+        {
+            let entry = entry.map_err(|err| format!("read output subdir entry: {err}"))?;
+            copy_path_recursively(&entry.path(), &target.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if metadata.is_file() || metadata.file_type().is_symlink() {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("create exported parent {}: {err}", parent.display()))?;
+        }
+        fs::copy(source, target).map_err(|err| {
+            format!(
+                "copy operator result {} to {}: {err}",
+                source.display(),
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn export_local_operator_results(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+    source_out_dir: &Path,
+) -> Result<String, OperatorToolError> {
+    let export_dir = local_operator_export_dir(ctx, resolved, run_id);
+    copy_dir_contents(source_out_dir, &export_dir).map_err(|err| {
+        OperatorToolError::new("result_export_failed", false, err)
+            .with_suggested_action("Check session workspace write permissions and retry.")
+    })?;
+    Ok(export_dir.to_string_lossy().into_owned())
+}
+
+async fn export_environment_operator_results(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+    source_out_dir: &str,
+) -> Result<String, OperatorToolError> {
+    let export_dir = environment_operator_export_dir(ctx, resolved, run_id);
+    let command = format!(
+        "if [ ! -d {} ]; then echo 'operator output directory missing' >&2; exit 2; fi\nrm -rf {}\nmkdir -p {}\ncp -R {}/. {}/",
+        sh_quote(source_out_dir),
+        sh_quote(&export_dir),
+        sh_quote(&export_dir),
+        sh_quote(source_out_dir),
+        sh_quote(&export_dir),
+    );
+    let result = execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 60).await?;
+    if result.returncode != 0 {
+        return Err(OperatorToolError::new(
+            "result_export_failed",
+            false,
+            format!(
+                "copy operator results to session workspace failed with exit code {}.",
+                result.returncode
+            ),
+        )
+        .with_suggested_action("Check session workspace write permissions and retry."));
+    }
+    Ok(export_dir)
+}
+
+fn operator_result_markdown_report(
+    resolved: &ResolvedOperator,
+    export_dir: Option<&str>,
+    outputs: &BTreeMap<String, Vec<ArtifactRef>>,
+) -> Option<String> {
+    let export_dir = export_dir?.trim();
+    if export_dir.is_empty() {
+        return None;
+    }
+    let title = resolved
+        .spec
+        .metadata
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(resolved.alias.as_str());
+    let mut lines = vec![
+        format!("# {title}"),
+        String::new(),
+        "Generated artifacts are exported together in this folder so the final reply can reference static files directly instead of embedding JSON, HTML, or base64 payloads.".to_string(),
+        "Use the PNG Markdown image below in the final reply; Omiga renders it through the chat image component. Keep the full path inside `<...>` and do not shorten it to `figure.png`. PNG exports are generated at 300 DPI minimum.".to_string(),
+        String::new(),
+    ];
+
+    if let Some(path) =
+        first_exported_artifact_path(export_dir, outputs, &["figure_png", "plot_png", "png"])
+    {
+        lines.push(format!("![{title}](<{path}>)"));
+        lines.push(String::new());
+    }
+
+    let mut primary_links = Vec::new();
+    if let Some(path) =
+        first_exported_artifact_path(export_dir, outputs, &["figure_pdf", "plot_pdf", "pdf"])
+    {
+        primary_links.push(format!("[PDF](<{path}>)"));
+    }
+    if let Some(path) =
+        first_exported_artifact_path(export_dir, outputs, &["plot_script", "script", "r_script"])
+    {
+        primary_links.push(format!("[plot-script.R](<{path}>)"));
+    }
+    if let Some(path) =
+        first_exported_artifact_path(export_dir, outputs, &["rerun_script", "rerun"])
+    {
+        primary_links.push(format!("[rerun.sh](<{path}>)"));
+    }
+    primary_links.push(format!("[Result folder](<{export_dir}>)"));
+    lines.push(format!("Primary files: {}", primary_links.join(" · ")));
+    lines.push(String::new());
+    lines.push("## Files".to_string());
+
+    let mut seen = std::collections::BTreeSet::new();
+    for (name, artifacts) in outputs {
+        for artifact in artifacts {
+            let path = exported_artifact_path(export_dir, &artifact.path);
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let size = artifact
+                .size
+                .map(|value| format!(" — {} bytes", value))
+                .unwrap_or_default();
+            lines.push(format!(
+                "- `{name}`: [{file}](<{path}>){size}",
+                file = exported_artifact_label(&path)
+            ));
+        }
+    }
+    if seen.is_empty() {
+        lines.push("- No declared output artifacts were exported.".to_string());
+    }
+    Some(lines.join("\n"))
+}
+
+fn first_exported_artifact_path(
+    export_dir: &str,
+    outputs: &BTreeMap<String, Vec<ArtifactRef>>,
+    preferred_output_names: &[&str],
+) -> Option<String> {
+    for preferred in preferred_output_names {
+        if let Some(path) = outputs
+            .get(*preferred)
+            .and_then(|artifacts| artifacts.first())
+            .map(|artifact| exported_artifact_path(export_dir, &artifact.path))
+        {
+            return Some(path);
+        }
+    }
+    for (name, artifacts) in outputs {
+        let lower_name = name.to_ascii_lowercase();
+        if preferred_output_names
+            .iter()
+            .any(|preferred| lower_name.contains(preferred.trim_matches('_')))
+        {
+            if let Some(path) = artifacts
+                .first()
+                .map(|artifact| exported_artifact_path(export_dir, &artifact.path))
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn exported_artifact_path(export_dir: &str, source_path: &str) -> String {
+    let file = exported_artifact_label(source_path);
+    if export_dir.ends_with('/') || export_dir.ends_with('\\') {
+        format!("{export_dir}{file}")
+    } else if export_dir.contains('\\') && !export_dir.contains('/') {
+        format!("{export_dir}\\{file}")
+    } else {
+        format!("{export_dir}/{file}")
+    }
+}
+
+fn exported_artifact_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn write_local_operator_result_readme(
+    export_dir: &str,
+    markdown: &str,
+) -> Result<(), OperatorToolError> {
+    fs::write(Path::new(export_dir).join("README.md"), markdown).map_err(|err| {
+        OperatorToolError::new(
+            "result_export_failed",
+            false,
+            format!("write result README.md: {err}"),
+        )
+        .with_suggested_action("Check session workspace write permissions and retry.")
+    })
+}
+
+async fn write_environment_operator_result_readme(
+    ctx: &crate::domain::tools::ToolContext,
+    export_dir: &str,
+    markdown: &str,
+) -> Result<(), OperatorToolError> {
+    use base64::{engine::general_purpose, Engine as _};
+    let encoded = general_purpose::STANDARD.encode(markdown.as_bytes());
+    let target = format!("{}/README.md", export_dir.trim_end_matches('/'));
+    let command = format!(
+        "mkdir -p {} && printf %s {} | base64 -d > {}",
+        sh_quote(export_dir),
+        sh_quote(&encoded),
+        sh_quote(&target),
+    );
+    execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30)
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            OperatorToolError::new("result_export_failed", true, err.message)
+                .with_suggested_action("Check session workspace write permissions and retry.")
+        })
 }
 
 fn read_local_structured_outputs(
@@ -5713,6 +7895,14 @@ fn summarize_operator_run_documents(
     let provenance_path_value = provenance.as_ref().and_then(|value| {
         json_string_at(value, &["provenancePath"]).or(default_provenance_path.clone())
     });
+    let export_dir = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["exportDir"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["exportDir"]))
+        });
     let output_count = provenance.as_ref().map(output_artifact_count).unwrap_or(0);
     let structured_output_count = provenance
         .as_ref()
@@ -5809,6 +7999,7 @@ fn summarize_operator_run_documents(
             run_dir: run_dir_value,
             updated_at,
             provenance_path: provenance_path_value,
+            export_dir,
             output_count,
             structured_output_count,
             error_message,
@@ -6021,11 +8212,16 @@ mod tests {
         plugin_name: &str,
         operator_dir: &str,
     ) -> (PathBuf, PathBuf) {
-        let plugin_root = crate::domain::plugins::dev_builtin_marketplace_path()
-            .parent()
-            .unwrap()
-            .join("plugins")
-            .join(plugin_name);
+        let plugin_root = match plugin_name {
+            "operator-seqtk" | "ngs-alignment" => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repo root")
+                .join(".omiga/plugins")
+                .join(plugin_name),
+            _ => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/plugins/legacy")
+                .join(plugin_name),
+        };
         let manifest = plugin_root
             .join("operators")
             .join(operator_dir)
@@ -6129,7 +8325,221 @@ mod tests {
             inputs: BTreeMap::from([("input".to_string(), JsonValue::String(input.to_string()))]),
             params: BTreeMap::new(),
             resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn operator_tool_schema_surfaces_resource_profile_warning() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["/bin/echo", "ok"]);
+        spec.metadata.description = Some("Align reads".to_string());
+        spec.runtime = Some(json!({
+            "resourceProfile": {
+                "tier": "hpc-recommended",
+                "localPolicy": "warn",
+                "recommendedCpu": 32,
+                "recommendedMemoryGb": 128,
+                "diskGb": 200,
+                "notes": ["Use SSH/server/HPC for production RNA-seq runs."]
+            }
+        }));
+
+        let schema = operator_tool_schema(ResolvedOperator {
+            alias: "align".to_string(),
+            spec,
+        });
+
+        assert!(schema.description.contains("Resource note"));
+        assert!(schema.description.contains("HPC/server recommended"));
+        assert!(schema.description.contains("32 CPU recommended"));
+        assert!(schema.description.contains("128 GB RAM recommended"));
+    }
+
+    #[tokio::test]
+    async fn successful_operator_tool_call_writes_execution_record() {
+        let tmp = TempDir::new().unwrap();
+        let spec = argv_operator_spec(
+            &tmp,
+            &[
+                "/bin/sh",
+                "-c",
+                "printf 'execution-record-success\\n' >/dev/null",
+            ],
+        );
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path())
+            .with_session_id(Some("session-op".to_string()));
+        let arguments =
+            serde_json::to_string(&OperatorInvocation::default()).expect("serialize invocation");
+
+        let (raw, is_error) = execute_resolved_operator_tool_call_with_context(
+            &ctx,
+            "x",
+            ResolvedOperator {
+                alias: "x".to_string(),
+                spec,
+            },
+            &arguments,
+            None,
+        )
+        .await;
+
+        assert!(!is_error, "{raw}");
+        let rows = crate::domain::execution_records::list_recent_execution_records(tmp.path(), 10)
+            .await
+            .expect("records");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "operator");
+        assert_eq!(rows[0].unit_id.as_deref(), Some("x"));
+        assert_eq!(rows[0].canonical_id.as_deref(), Some("p/operator/x"));
+        assert_eq!(rows[0].provider_plugin.as_deref(), Some("p"));
+        assert_eq!(rows[0].status, "succeeded");
+        assert_eq!(rows[0].session_id.as_deref(), Some("session-op"));
+    }
+
+    #[tokio::test]
+    async fn operator_result_and_record_include_param_sources() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["/bin/sh", "-c", "true"]);
+        spec.interface.params.insert(
+            "method".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("manual")],
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.interface.params.insert(
+            "alpha".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Number,
+                default: Some(json!(0.05)),
+                ..OperatorFieldSpec::default()
+            },
+        );
+        let invocation = OperatorInvocation {
+            params: BTreeMap::from([("method".to_string(), json!("manual"))]),
+            metadata: BTreeMap::from([(
+                OPERATOR_PREFLIGHT_METADATA_KEY.to_string(),
+                json!({
+                    "source": "operator_preflight",
+                    "operatorId": "x",
+                    "answeredParams": [{"param": "method"}],
+                    "paramsBySource": {"method": OPERATOR_PARAM_SOURCE_USER_PREFLIGHT},
+                }),
+            )]),
+            ..OperatorInvocation::default()
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let arguments = serde_json::to_string(&invocation).expect("serialize invocation");
+
+        let (raw, is_error) = execute_resolved_operator_tool_call_with_context(
+            &ctx,
+            "x",
+            ResolvedOperator {
+                alias: "x".to_string(),
+                spec,
+            },
+            &arguments,
+            None,
+        )
+        .await;
+
+        assert!(!is_error, "{raw}");
+        let parsed = serde_json::from_str::<JsonValue>(&raw).unwrap();
+        assert_eq!(
+            parsed["paramSources"]["method"],
+            OPERATOR_PARAM_SOURCE_USER_PREFLIGHT
+        );
+        assert_eq!(
+            parsed["paramSources"]["alpha"],
+            OPERATOR_PARAM_SOURCE_DEFAULT
+        );
+        assert_eq!(
+            parsed["preflight"]["paramsBySource"]["method"],
+            OPERATOR_PARAM_SOURCE_USER_PREFLIGHT
+        );
+
+        let rows = crate::domain::execution_records::list_recent_execution_records(tmp.path(), 10)
+            .await
+            .expect("records");
+        let metadata = rows[0].metadata_json.as_deref().unwrap_or_default();
+        assert!(metadata.contains("\"paramSources\""));
+        assert!(metadata.contains(OPERATOR_PARAM_SOURCE_USER_PREFLIGHT));
+    }
+
+    #[tokio::test]
+    async fn failed_operator_tool_call_writes_execution_record() {
+        let tmp = TempDir::new().unwrap();
+        let spec = argv_operator_spec(
+            &tmp,
+            &["/bin/sh", "-c", "echo execution-record-failure >&2; exit 7"],
+        );
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let arguments =
+            serde_json::to_string(&OperatorInvocation::default()).expect("serialize invocation");
+
+        let (raw, is_error) = execute_resolved_operator_tool_call_with_context(
+            &ctx,
+            "x",
+            ResolvedOperator {
+                alias: "x".to_string(),
+                spec,
+            },
+            &arguments,
+            None,
+        )
+        .await;
+
+        assert!(is_error, "{raw}");
+        let rows = crate::domain::execution_records::list_recent_execution_records(tmp.path(), 10)
+            .await
+            .expect("records");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "operator");
+        assert_eq!(rows[0].unit_id.as_deref(), Some("x"));
+        assert_eq!(rows[0].status, "failed");
+        assert!(rows[0]
+            .metadata_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("tool_exit_nonzero"));
+    }
+
+    #[tokio::test]
+    async fn operator_success_does_not_fail_when_execution_record_write_fails() {
+        let tmp = TempDir::new().unwrap();
+        let state_dir = tmp.path().join(".omiga");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_dir.join("execution"), "not a directory").unwrap();
+        let spec = argv_operator_spec(
+            &tmp,
+            &[
+                "/bin/sh",
+                "-c",
+                "printf 'record-write-blocked\\n' >/dev/null",
+            ],
+        );
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let arguments =
+            serde_json::to_string(&OperatorInvocation::default()).expect("serialize invocation");
+
+        let (raw, is_error) = execute_resolved_operator_tool_call_with_context(
+            &ctx,
+            "x",
+            ResolvedOperator {
+                alias: "x".to_string(),
+                spec,
+            },
+            &arguments,
+            None,
+        )
+        .await;
+
+        assert!(!is_error, "{raw}");
+        let parsed: JsonValue = serde_json::from_str(&raw).expect("operator result json");
+        assert_eq!(parsed["status"], "succeeded");
+        assert!(state_dir.join("execution").is_file());
     }
 
     #[test]
@@ -6187,6 +8597,53 @@ bindings:
     }
 
     #[test]
+    fn discovers_operators_from_manifest_declared_path() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("plugin.json"),
+            r#"{"name":"custom-operator-plugin","operators":"./custom-units"}"#,
+        )
+        .unwrap();
+        let manifest = tmp
+            .path()
+            .join("custom-units")
+            .join("custom")
+            .join("operator.yaml");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: custom_manifest_path
+  version: 1
+execution:
+  argv: ["true"]
+"#,
+        )
+        .unwrap();
+        let plugin = crate::domain::plugins::LoadedPlugin {
+            id: "custom-operator-plugin@local".to_string(),
+            manifest_name: Some("custom-operator-plugin".to_string()),
+            display_name: None,
+            description: None,
+            root: tmp.path().to_path_buf(),
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        };
+
+        let candidates = discover_operator_candidates_from_plugins([&plugin]);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].metadata.id, "custom_manifest_path");
+    }
+
+    #[test]
     fn discovers_bundled_smoke_operator_from_active_plugin() {
         let (plugin_root, manifest) = bundled_smoke_operator_paths();
         assert!(manifest.is_file());
@@ -6213,7 +8670,7 @@ bindings:
         assert_eq!(smoke.source.source_plugin, "operator-smoke@omiga-curated");
         assert_eq!(smoke.metadata.version, "0.1.0");
         assert_eq!(smoke.execution.argv[0], "/bin/sh");
-        assert_eq!(smoke.execution.argv[1], "./bin/write_text_report.sh");
+        assert_eq!(smoke.execution.argv[1], "./scripts/write_text_report.sh");
         assert_eq!(smoke.smoke_tests.len(), 1);
         assert_eq!(smoke.smoke_tests[0].id, "default");
         assert_eq!(
@@ -6233,7 +8690,7 @@ bindings:
         assert_eq!(container.execution.argv[0], "/bin/sh");
         assert_eq!(
             container.execution.argv[1],
-            "./bin/write_container_report.sh"
+            "./scripts/write_container_report.sh"
         );
         assert_eq!(container.smoke_tests.len(), 1);
         assert_eq!(container.smoke_tests[0].id, "default");
@@ -6255,7 +8712,7 @@ bindings:
         )
         .unwrap();
         assert!(Path::new(&argv[1]).is_absolute());
-        assert!(argv[1].ends_with("bin/write_text_report.sh"));
+        assert!(argv[1].ends_with("scripts/write_text_report.sh"));
     }
 
     #[test]
@@ -6284,6 +8741,19 @@ bindings:
                 "seqtk-sample",
                 "seqtk_sample_reads",
                 "/bin/sh",
+            ),
+            (
+                "operator-pubmed-search",
+                "pubmed-search",
+                "pubmed_search",
+                "python3",
+            ),
+            ("operator-geo-search", "geo-search", "geo_search", "python3"),
+            (
+                "operator-uniprot-search",
+                "uniprot-search",
+                "uniprot_search",
+                "python3",
             ),
         ];
 
@@ -6332,6 +8802,13 @@ bindings:
                             .iter()
                             .any(|option| option.value == json!("deseq2"))
                 }));
+                assert!(preflight.questions.iter().any(|question| {
+                    question.param == "pvalue_threshold"
+                        && question
+                            .options
+                            .iter()
+                            .any(|option| option.custom && option.custom_placeholder.is_some())
+                }));
                 let schema = operator_parameters_schema(operator);
                 assert!(schema["required"]
                     .as_array()
@@ -6341,16 +8818,66 @@ bindings:
                 let required_params = schema["properties"]["params"]["required"]
                     .as_array()
                     .unwrap();
-                assert!(required_params.iter().any(|value| value == "de_method"));
-                assert!(required_params
+                assert!(required_params.iter().any(|value| value == "group_column"));
+                assert!(!required_params.iter().any(|value| value == "de_method"));
+                assert!(!required_params
                     .iter()
                     .any(|value| value == "input_data_type"));
+                assert!(
+                    schema["properties"]["params"]["properties"]["de_method"]["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Ask state")
+                );
+                let ask_state_schema = schema["properties"]["params"]["properties"]["de_method"]
+                    ["oneOf"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|candidate| candidate["enum"] == json!(["ask"]))
+                    .expect("preflight params should allow explicit ask state");
+                assert_eq!(ask_state_schema["type"], "string");
             }
             assert_eq!(
                 operator.source.source_plugin,
                 format!("{plugin_name}@omiga-curated")
             );
         }
+    }
+
+    #[test]
+    fn transcriptomics_analysis_plugin_does_not_expose_operator_units() {
+        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join(".omiga/plugins/transcriptomics");
+        assert!(
+            !plugin_root.join("operators").exists(),
+            "transcriptomics keeps template-only public units"
+        );
+        assert!(
+            plugin_root.join("template_backing_operators").is_dir(),
+            "private backing specs preserve template validation without exposing operators"
+        );
+        let plugin = crate::domain::plugins::LoadedPlugin {
+            id: "transcriptomics@omiga-curated".to_string(),
+            manifest_name: Some("transcriptomics".to_string()),
+            display_name: Some("Transcriptomics".to_string()),
+            description: None,
+            root: plugin_root,
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        };
+
+        let candidates = discover_operator_candidates_from_plugins([&plugin]);
+        assert!(
+            candidates.is_empty(),
+            "Transcriptomics should expose templates only; operator versions are private backing specs"
+        );
     }
 
     #[test]
@@ -6362,6 +8889,7 @@ bindings:
             header: "Method".to_string(),
             multi_select: false,
             ask_when: OperatorPreflightAskWhen {
+                always: false,
                 missing: true,
                 empty: true,
                 values: vec![json!("auto")],
@@ -6372,12 +8900,16 @@ bindings:
                     description: "Let the operator choose.".to_string(),
                     value: json!("auto"),
                     preview: None,
+                    custom: false,
+                    custom_placeholder: None,
                 },
                 OperatorPreflightOptionSpec {
                     label: "Manual".to_string(),
                     description: "Use a fixed method.".to_string(),
                     value: json!("manual"),
                     preview: None,
+                    custom: false,
+                    custom_placeholder: None,
                 },
             ],
         };
@@ -6396,10 +8928,371 @@ bindings:
             &question,
             Some(&manual_params)
         ));
+
+        let mut ask_params = JsonMap::new();
+        ask_params.insert("method".to_string(), JsonValue::String("ASK".to_string()));
+        assert!(preflight_question_should_ask(&question, Some(&ask_params)));
+
+        let mut ask_object_params = JsonMap::new();
+        ask_object_params.insert("method".to_string(), json!({"state": "ask"}));
+        assert!(preflight_question_should_ask(
+            &question,
+            Some(&ask_object_params)
+        ));
+
         assert_eq!(
             preflight_answer_labels(&json!("Auto, Manual"), true),
             vec!["Auto".to_string(), "Manual".to_string()]
         );
+
+        let always_question = OperatorPreflightQuestionSpec {
+            ask_when: OperatorPreflightAskWhen {
+                always: true,
+                missing: false,
+                empty: false,
+                values: Vec::new(),
+            },
+            ..question
+        };
+        assert!(preflight_question_should_ask(
+            &always_question,
+            Some(&manual_params)
+        ));
+    }
+
+    #[test]
+    fn preflight_answers_record_param_source_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["true"]);
+        spec.metadata.id = "preflight_metadata".to_string();
+        spec.interface.params.insert(
+            "method".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("manual")],
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.preflight = Some(OperatorPreflightSpec {
+            questions: vec![OperatorPreflightQuestionSpec {
+                id: Some("method".to_string()),
+                param: "method".to_string(),
+                question: "Pick method?".to_string(),
+                header: "Method".to_string(),
+                multi_select: false,
+                ask_when: OperatorPreflightAskWhen {
+                    always: true,
+                    missing: false,
+                    empty: false,
+                    values: Vec::new(),
+                },
+                options: vec![
+                    OperatorPreflightOptionSpec {
+                        label: "Auto".to_string(),
+                        description: "Auto method".to_string(),
+                        value: json!("auto"),
+                        preview: None,
+                        custom: false,
+                        custom_placeholder: None,
+                    },
+                    OperatorPreflightOptionSpec {
+                        label: "Manual".to_string(),
+                        description: "Manual method".to_string(),
+                        value: json!("manual"),
+                        preview: None,
+                        custom: false,
+                        custom_placeholder: None,
+                    },
+                ],
+            }],
+        });
+        let updated = apply_operator_preflight_answers_for_spec(
+            &spec,
+            spec.preflight.as_ref().unwrap(),
+            &json!({"params": {"method": "ask"}}).to_string(),
+            &json!({"answers": {"Pick method?": "Manual"}}),
+        )
+        .expect("apply preflight");
+        let parsed = serde_json::from_str::<JsonValue>(&updated).unwrap();
+
+        assert_eq!(parsed["params"]["method"], "manual");
+        assert_eq!(
+            parsed["metadata"]["preflight"]["paramsBySource"]["method"],
+            OPERATOR_PARAM_SOURCE_USER_PREFLIGHT
+        );
+        assert_eq!(
+            parsed["metadata"]["preflight"]["answeredParams"][0]["param"],
+            "method"
+        );
+    }
+
+    #[test]
+    fn preflight_project_preferences_recommend_without_overriding_explicit_params() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["true"]);
+        spec.metadata.id = "preflight_recommendation".to_string();
+        spec.interface.params.insert(
+            "method".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("manual")],
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.preflight = Some(OperatorPreflightSpec {
+            questions: vec![OperatorPreflightQuestionSpec {
+                id: Some("method".to_string()),
+                param: "method".to_string(),
+                question: "Pick method?".to_string(),
+                header: "Method".to_string(),
+                multi_select: false,
+                ask_when: OperatorPreflightAskWhen {
+                    always: false,
+                    missing: true,
+                    empty: true,
+                    values: Vec::new(),
+                },
+                options: vec![
+                    OperatorPreflightOptionSpec {
+                        label: "Auto".to_string(),
+                        description: "Auto method".to_string(),
+                        value: json!("auto"),
+                        preview: None,
+                        custom: false,
+                        custom_placeholder: None,
+                    },
+                    OperatorPreflightOptionSpec {
+                        label: "Manual".to_string(),
+                        description: "Manual method".to_string(),
+                        value: json!("manual"),
+                        preview: None,
+                        custom: false,
+                        custom_placeholder: None,
+                    },
+                ],
+            }],
+        });
+        let recommended_params = BTreeMap::from([("method".to_string(), json!("manual"))]);
+
+        let missing_params = operator_preflight_question_for_spec_with_recommended_params(
+            &spec,
+            Some("recommend"),
+            None,
+            Some(&recommended_params),
+        )
+        .expect("missing params should ask");
+        assert_eq!(missing_params.questions[0].options[0].label, "Manual");
+        assert!(missing_params.questions[0].options[0].recommended);
+        assert!(missing_params.questions[0].options[0]
+            .description
+            .contains("推荐"));
+
+        let mut explicit_params = JsonMap::new();
+        explicit_params.insert("method".to_string(), json!("auto"));
+        assert!(
+            operator_preflight_question_for_spec_with_recommended_params(
+                &spec,
+                Some("recommend"),
+                Some(&explicit_params),
+                Some(&recommended_params),
+            )
+            .is_none(),
+            "project preferences must not override explicit caller params"
+        );
+
+        let mut ask_params = JsonMap::new();
+        ask_params.insert("method".to_string(), json!({"state": "ask"}));
+        let ask_question = operator_preflight_question_for_spec_with_recommended_params(
+            &spec,
+            Some("recommend"),
+            Some(&ask_params),
+            Some(&recommended_params),
+        )
+        .expect("explicit ask state should still ask with recommendation");
+        assert_eq!(ask_question.questions[0].options[0].label, "Manual");
+    }
+
+    #[test]
+    fn preflight_authoring_diagnostics_flag_data_only_questions() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["true"]);
+        spec.metadata.id = "data_only_preflight".to_string();
+        spec.interface.params.insert(
+            "group_column".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::String,
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.interface.params.insert(
+            "sample_column".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::String,
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.preflight = Some(OperatorPreflightSpec {
+            questions: vec![
+                test_preflight_question("group", "group_column", "Which group column?"),
+                test_preflight_question("sample", "sample_column", "Which sample column?"),
+            ],
+        });
+
+        let diagnostics = operator_preflight_authoring_diagnostics(&spec);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, "warning");
+        assert!(diagnostics[0].message.contains("data/grouping"));
+
+        spec.interface.params.insert(
+            "de_method".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("deseq2")],
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.preflight
+            .as_mut()
+            .unwrap()
+            .questions
+            .push(test_preflight_question(
+                "method",
+                "de_method",
+                "Which analysis method?",
+            ));
+        assert!(operator_preflight_authoring_diagnostics(&spec).is_empty());
+    }
+
+    #[test]
+    fn external_network_authoring_diagnostics_require_cache_and_fixture_mode() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["true"]);
+        spec.metadata.id = "network_operator".to_string();
+        spec.metadata.tags.push("external-network".to_string());
+        spec.permissions = Some(json!({
+            "sideEffects": ["external_network"],
+            "network": {"hosts": ["example.test"], "mode": "read_only"}
+        }));
+
+        let diagnostics = operator_external_network_authoring_diagnostics(&spec);
+
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("cache.enabled")));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("offline_fixture")));
+
+        spec.cache = Some(json!({
+            "enabled": true,
+            "policyVersion": "external-network/v1"
+        }));
+        spec.interface.params.insert(
+            "mode".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("live"), json!("offline_fixture")],
+                default: Some(json!("auto")),
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.interface.params.insert(
+            "fixture_json".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::String,
+                default: Some(json!("")),
+                ..OperatorFieldSpec::default()
+            },
+        );
+
+        assert!(operator_external_network_authoring_diagnostics(&spec).is_empty());
+    }
+
+    fn test_preflight_question(
+        id: &str,
+        param: &str,
+        question: &str,
+    ) -> OperatorPreflightQuestionSpec {
+        OperatorPreflightQuestionSpec {
+            id: Some(id.to_string()),
+            param: param.to_string(),
+            question: question.to_string(),
+            header: id.to_string(),
+            multi_select: false,
+            ask_when: OperatorPreflightAskWhen {
+                always: true,
+                missing: false,
+                empty: false,
+                values: Vec::new(),
+            },
+            options: vec![
+                OperatorPreflightOptionSpec {
+                    label: "A".to_string(),
+                    description: "First option".to_string(),
+                    value: json!("a"),
+                    preview: None,
+                    custom: false,
+                    custom_placeholder: None,
+                },
+                OperatorPreflightOptionSpec {
+                    label: "B".to_string(),
+                    description: "Second option".to_string(),
+                    value: json!("b"),
+                    preview: None,
+                    custom: false,
+                    custom_placeholder: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn preflight_custom_answers_parse_against_param_type() {
+        let field = OperatorFieldSpec {
+            kind: OperatorFieldKind::Number,
+            minimum: Some(0.0),
+            maximum: Some(1.0),
+            ..OperatorFieldSpec::default()
+        };
+        let question = OperatorPreflightQuestionSpec {
+            id: Some("fdr".to_string()),
+            param: "pvalue_threshold".to_string(),
+            question: "Pick FDR?".to_string(),
+            header: "FDR".to_string(),
+            multi_select: false,
+            ask_when: OperatorPreflightAskWhen {
+                always: true,
+                missing: false,
+                empty: false,
+                values: Vec::new(),
+            },
+            options: vec![
+                OperatorPreflightOptionSpec {
+                    label: "FDR 0.05".to_string(),
+                    description: "Default".to_string(),
+                    value: json!(0.05),
+                    preview: None,
+                    custom: false,
+                    custom_placeholder: None,
+                },
+                OperatorPreflightOptionSpec {
+                    label: "自定义".to_string(),
+                    description: "Typed value".to_string(),
+                    value: json!(0.05),
+                    preview: None,
+                    custom: true,
+                    custom_placeholder: Some("0.05".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            preflight_value_for_answer(&question, &field, "自定义：0.2").unwrap(),
+            json!(0.2)
+        );
+        assert!(preflight_value_for_answer(&question, &field, "自定义：2").is_err());
     }
 
     #[test]
@@ -6432,7 +9325,7 @@ bindings:
         )
         .unwrap();
         assert!(Path::new(&argv[1]).is_absolute());
-        assert!(argv[1].ends_with("bin/write_container_report.sh"));
+        assert!(argv[1].ends_with("scripts/write_container_report.sh"));
 
         let command = operator_execution_command(
             &docker_ctx,
@@ -6481,6 +9374,7 @@ bindings:
                 kind: Some("smoke".to_string()),
                 smoke_test_id: Some("default".to_string()),
                 smoke_test_name: Some("Active container smoke".to_string()),
+                parent_execution_id: None,
             }),
         )
         .await
@@ -7087,6 +9981,286 @@ execution:
         assert!(command.contains("logs/stdout.txt"));
     }
 
+    fn write_conda_environment_profile(plugin_root: &Path, id: &str) {
+        let env_dir = plugin_root.join("environments").join(id);
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            format!(
+                r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: {id}
+  version: 0.1.0
+runtime:
+  type: conda
+  condaEnvFile: ./conda.yaml
+diagnostics:
+  checkCommand: [bwa, --version]
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            env_dir.join("conda.yaml"),
+            "channels:\n  - conda-forge\n  - bioconda\ndependencies:\n  - bwa =0.7.17\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn local_operator_command_wraps_conda_environment_ref() {
+        let tmp = TempDir::new().unwrap();
+        write_conda_environment_profile(tmp.path(), "ngs-bwa");
+        let mut spec = argv_operator_spec(&tmp, &["bwa", "index", "ref.fa"]);
+        spec.runtime = Some(json!({
+            "envRef": "ngs-bwa",
+            "placement": { "supported": ["local"] },
+            "container": { "supported": ["none"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_conda",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("$HOME/.omiga/bin/micromamba"));
+        assert!(command.contains("OMIGA_MICROMAMBA"));
+        assert!(command.contains("active PATH/base environment/virtual environment"));
+        assert!(command.contains("env create -y -p"));
+        assert!(command.contains("run -p"));
+        assert!(command.contains(".omiga/operator-envs/conda"));
+        assert!(command.contains("bwa"));
+        assert!(command.contains("ref.fa"));
+    }
+
+    #[test]
+    fn conda_environment_ref_rejects_non_yaml_environment_file() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("bad-conda");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: bad-conda
+  version: 0.1.0
+runtime:
+  type: conda
+  condaEnvFile: ./requirements.txt
+"#,
+        )
+        .unwrap();
+        fs::write(env_dir.join("requirements.txt"), "bwa\n").unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["bwa", "index", "ref.fa"]);
+        spec.runtime = Some(json!({
+            "envRef": "bad-conda",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_bad_conda",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("must use a `.yaml` or `.yml` file"));
+        assert!(command.contains("requirements.txt"));
+    }
+
+    #[test]
+    fn environment_profile_can_select_container_runtime() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("docker-env");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: docker-env
+  version: 0.1.0
+runtime:
+  type: docker
+  image: alpine:3.19
+"#,
+        )
+        .unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["echo", "hello"]);
+        spec.runtime = Some(json!({
+            "envRef": "docker-env",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let selection =
+            operator_container_for_command(&ctx, &spec, OperatorExecutionSurfaceKind::Local)
+                .expect("container selection");
+
+        assert_eq!(selection.kind, OperatorContainerKind::Docker);
+        assert_eq!(selection.image, "alpine:3.19");
+    }
+
+    #[test]
+    fn docker_environment_profile_builds_from_standard_dockerfile() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("docker-env");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: docker-env
+  version: 0.1.0
+runtime:
+  type: docker
+  dockerfile: ./Dockerfile
+"#,
+        )
+        .unwrap();
+        fs::write(env_dir.join("Dockerfile"), "FROM alpine:3.19\n").unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["echo", "hello"]);
+        spec.runtime = Some(json!({
+            "envRef": "docker-env",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_docker_env",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("command -v docker"));
+        assert!(command.contains("docker version"));
+        assert!(command.contains("docker build -t"));
+        assert!(command.contains("'docker' 'run'"));
+        assert!(command.contains("omiga-env-"));
+        assert!(command.contains("docker-env"));
+        assert!(command.contains("logs/stderr.txt"));
+    }
+
+    #[test]
+    fn singularity_environment_profile_builds_from_standard_definition() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("singularity-env");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: singularity-env
+  version: 0.1.0
+runtime:
+  type: singularity
+  definitionFile: ./singularity.def
+"#,
+        )
+        .unwrap();
+        fs::write(
+            env_dir.join("singularity.def"),
+            "Bootstrap: docker\nFrom: alpine:3.19\n",
+        )
+        .unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["echo", "hello"]);
+        spec.runtime = Some(json!({
+            "envRef": "singularity-env",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_singularity_env",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("command -v singularity"));
+        assert!(command.contains("command -v apptainer"));
+        assert!(command.contains("singularity build"));
+        assert!(command.contains("'singularity' 'exec'"));
+        assert!(command.contains(".omiga/operator-envs/singularity"));
+    }
+
+    #[test]
+    fn container_environment_profile_without_image_or_file_reports_guidance() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("docker-env");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: docker-env
+  version: 0.1.0
+runtime:
+  type: docker
+"#,
+        )
+        .unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["echo", "hello"]);
+        spec.runtime = Some(json!({
+            "envRef": "docker-env",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_missing_container_env",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("requires runtime.image or a standard `Dockerfile`"));
+        assert!(!command.contains("'echo' 'hello' > logs/stdout.txt"));
+    }
+
+    #[test]
+    fn ngs_alignment_wrapper_smoke_fixture_runs_with_mock_tools() {
+        let (plugin_root, _) = bundled_plugin_operator_manifest_path("ngs-alignment", "bwa-index");
+        let script = plugin_root
+            .join("scripts")
+            .join("test_ngs_alignment_smoke.py");
+
+        let output = std::process::Command::new("python3")
+            .arg(&script)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .current_dir(plugin_root)
+            .output()
+            .expect("run ngs alignment smoke test");
+
+        assert!(
+            output.status.success(),
+            "ngs alignment smoke failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("smoke fixture passed"));
+    }
+
     #[test]
     fn local_runtime_prefers_no_container_when_manifest_allows_none() {
         let tmp = TempDir::new().unwrap();
@@ -7488,6 +10662,7 @@ execution:
                 kind: Some("smoke".to_string()),
                 smoke_test_id: Some("default".to_string()),
                 smoke_test_name: Some("Write text report smoke".to_string()),
+                parent_execution_id: None,
             }),
         )
         .await
@@ -7507,6 +10682,14 @@ execution:
         let report_path = Path::new(&result.outputs["report"][0].path);
         assert_eq!(
             fs::read_to_string(report_path).unwrap(),
+            "hello operator smoke\nhello operator smoke\n"
+        );
+        let export_dir = result
+            .export_dir
+            .as_deref()
+            .expect("successful runs should export results to the session workspace");
+        assert_eq!(
+            fs::read_to_string(Path::new(export_dir).join("operator-report.txt")).unwrap(),
             "hello operator smoke\nhello operator smoke\n"
         );
         assert!(Path::new(&format!("{}/status.json", result.run_dir)).is_file());
@@ -7621,6 +10804,7 @@ execution:
             kind: Some("smoke".to_string()),
             smoke_test_id: Some("default".to_string()),
             smoke_test_name: Some("Cache bypass smoke".to_string()),
+            parent_execution_id: None,
         });
 
         let first = execute_resolved_operator(
@@ -7654,6 +10838,176 @@ execution:
             first.outputs["report"][0].path
         );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "run\nrun\n");
+    }
+
+    #[tokio::test]
+    async fn executes_pubmed_operator_with_offline_fixture() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) =
+            bundled_plugin_operator_manifest_path("operator-pubmed-search", "pubmed-search");
+        let spec = load_operator_manifest(
+            &manifest,
+            "operator-pubmed-search@omiga-curated",
+            plugin_root.clone(),
+        )
+        .unwrap();
+        let fixture = plugin_root.join("examples").join("pubmed_fixture.json");
+        let invocation = OperatorInvocation {
+            inputs: BTreeMap::new(),
+            params: BTreeMap::from([
+                ("query".to_string(), json!("TP53 cancer")),
+                ("limit".to_string(), json!(2)),
+                ("mode".to_string(), json!("offline_fixture")),
+                (
+                    "fixture_json".to_string(),
+                    json!(fixture.to_string_lossy().to_string()),
+                ),
+                ("email".to_string(), json!("")),
+            ]),
+            resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let result = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "pubmed_search".to_string(),
+                spec,
+            },
+            invocation,
+            Some(OperatorRunContext {
+                kind: Some("operator-pilot".to_string()),
+                smoke_test_id: Some("offline-fixture".to_string()),
+                smoke_test_name: Some("PubMed offline fixture".to_string()),
+                parent_execution_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, "succeeded");
+        let structured_outputs = result.structured_outputs.as_ref().unwrap();
+        assert_eq!(structured_outputs["summary"]["count"], 2);
+        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
+        let results_path = Path::new(&result.outputs["results"][0].path);
+        let results = fs::read_to_string(results_path).expect("results");
+        assert!(results.contains("31452104"));
+        assert!(results.contains("25772236"));
+    }
+
+    #[tokio::test]
+    async fn executes_geo_operator_with_offline_fixture() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) =
+            bundled_plugin_operator_manifest_path("operator-geo-search", "geo-search");
+        let spec = load_operator_manifest(
+            &manifest,
+            "operator-geo-search@omiga-curated",
+            plugin_root.clone(),
+        )
+        .unwrap();
+        let fixture = plugin_root.join("examples").join("geo_fixture.json");
+        let invocation = OperatorInvocation {
+            inputs: BTreeMap::new(),
+            params: BTreeMap::from([
+                ("query".to_string(), json!("TP53 cancer")),
+                ("limit".to_string(), json!(2)),
+                ("mode".to_string(), json!("offline_fixture")),
+                (
+                    "fixture_json".to_string(),
+                    json!(fixture.to_string_lossy().to_string()),
+                ),
+                ("email".to_string(), json!("")),
+            ]),
+            resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let result = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "geo_search".to_string(),
+                spec,
+            },
+            invocation,
+            Some(OperatorRunContext {
+                kind: Some("operator-pilot".to_string()),
+                smoke_test_id: Some("offline-fixture".to_string()),
+                smoke_test_name: Some("GEO offline fixture".to_string()),
+                parent_execution_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, "succeeded");
+        let structured_outputs = result.structured_outputs.as_ref().unwrap();
+        assert_eq!(structured_outputs["summary"]["count"], 2);
+        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
+        let results_path = Path::new(&result.outputs["results"][0].path);
+        let results = fs::read_to_string(results_path).expect("results");
+        assert!(results.contains("GSE123456"));
+        assert!(results.contains("GSE123457"));
+    }
+
+    #[tokio::test]
+    async fn executes_uniprot_operator_with_offline_fixture() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) =
+            bundled_plugin_operator_manifest_path("operator-uniprot-search", "uniprot-search");
+        let spec = load_operator_manifest(
+            &manifest,
+            "operator-uniprot-search@omiga-curated",
+            plugin_root.clone(),
+        )
+        .unwrap();
+        let fixture = plugin_root.join("examples").join("uniprot_fixture.json");
+        let invocation = OperatorInvocation {
+            inputs: BTreeMap::new(),
+            params: BTreeMap::from([
+                ("query".to_string(), json!("TP53")),
+                ("limit".to_string(), json!(2)),
+                ("mode".to_string(), json!("offline_fixture")),
+                (
+                    "fixture_json".to_string(),
+                    json!(fixture.to_string_lossy().to_string()),
+                ),
+                ("organism".to_string(), json!("")),
+                ("taxon_id".to_string(), json!("9606")),
+                ("reviewed".to_string(), json!("true")),
+            ]),
+            resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let result = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "uniprot_search".to_string(),
+                spec,
+            },
+            invocation,
+            Some(OperatorRunContext {
+                kind: Some("operator-pilot".to_string()),
+                smoke_test_id: Some("offline-fixture".to_string()),
+                smoke_test_name: Some("UniProt offline fixture".to_string()),
+                parent_execution_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, "succeeded");
+        let structured_outputs = result.structured_outputs.as_ref().unwrap();
+        assert_eq!(structured_outputs["summary"]["count"], 2);
+        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
+        let results_path = Path::new(&result.outputs["results"][0].path);
+        let results = fs::read_to_string(results_path).expect("results");
+        assert!(results.contains("P04637"));
+        assert!(results.contains("P38398"));
     }
 
     #[tokio::test]
@@ -7739,6 +11093,7 @@ execution:
                 )]),
                 params: BTreeMap::new(),
                 resources: BTreeMap::new(),
+                metadata: BTreeMap::new(),
             },
             None,
         )

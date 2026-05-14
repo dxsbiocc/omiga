@@ -95,7 +95,7 @@ fn _assert_error_send_sync(_: RetrievalError) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::retrieval::plugin::manifest::load_plugin_retrieval_manifest;
+    use crate::domain::plugin_runtime::retrieval::manifest::load_plugin_retrieval_manifest;
     use crate::domain::tools::WebSearchApiKeys;
     use crate::infrastructure::streaming::StreamOutputItem;
     use futures::StreamExt;
@@ -148,7 +148,7 @@ mod tests {
                     "cancelGraceMs": 10,
                     "concurrency": 1
                 },
-                "sources": [{
+                "resources": [{
                     "id": source_id,
                     "category": "dataset",
                     "capabilities": ["search", "fetch", "query"]
@@ -258,7 +258,7 @@ for line in sys.stdin:
             "id": msg["id"],
             "type": "initialized",
             "protocolVersion": 1,
-            "sources": [{"category":"dataset", "id":"mock_source", "capabilities":["search", "fetch", "query"]}]
+            "resources": [{"category":"dataset", "id":"mock_source", "capabilities":["search", "fetch", "query"]}]
         }), flush=True)
     elif msg.get("type") == "execute":
         req = msg["request"]
@@ -339,7 +339,7 @@ for line in sys.stdin:
             "id": msg["id"],
             "type": "initialized",
             "protocolVersion": 1,
-            "sources": [{"category":"dataset", "id":"slow_source", "capabilities":["search", "fetch", "query"]}]
+            "resources": [{"category":"dataset", "id":"slow_source", "capabilities":["search", "fetch", "query"]}]
         }), flush=True)
     elif msg.get("type") == "execute":
         time.sleep(5)
@@ -359,7 +359,7 @@ for line in sys.stdin:
             "id": msg["id"],
             "type": "initialized",
             "protocolVersion": 1,
-            "sources": [{"category":"dataset", "id":"quarantine_source", "capabilities":["search", "fetch", "query"]}]
+            "resources": [{"category":"dataset", "id":"quarantine_source", "capabilities":["search", "fetch", "query"]}]
         }), flush=True)
     elif msg.get("type") == "execute":
         print(json.dumps({

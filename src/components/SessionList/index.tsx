@@ -38,7 +38,7 @@ import {
   AutoAwesome as AutoAwesomeIcon,
   HelpOutline as HelpOutlineIcon,
   MenuBook as MenuBookIcon,
-  Logout as LogoutIcon,
+  Close as CloseIcon,
   GitHub as GitHubIcon,
   ChevronRight,
 } from "@mui/icons-material";
@@ -420,7 +420,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     }
   };
 
-  const handleLogOut = async () => {
+  const handleCloseWindow = async () => {
     handleUserMenuClose();
     try {
       await getCurrentWindow().close();
@@ -674,9 +674,9 @@ export function SessionList({ onSelectSession }: SessionListProps) {
       )}
 
       {/* App logo */}
-      <Box sx={{ px: 2, pt: 2, pb: 1, display: "flex", alignItems: "center", gap: 1 }}>
-        <OmigaLogo size={18} />
-        <Typography variant="subtitle1" fontWeight={700} sx={{ letterSpacing: -0.3, color: "text.primary" }}>
+      <Box sx={{ px: 2, pt: 2, pb: 1.25, display: "flex", alignItems: "center", gap: 1.25 }}>
+        <OmigaLogo size={28} />
+        <Typography variant="h6" fontWeight={750} sx={{ letterSpacing: 0, color: "text.primary" }}>
           Omiga
         </Typography>
       </Box>
@@ -1104,7 +1104,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         </DialogContent>
       </Dialog>
 
-      {/* Bottom profile (reference layout) */}
+      {/* Bottom local workspace menu */}
       <Box
         onClick={handleUserMenuOpen}
         sx={{
@@ -1121,13 +1121,13 @@ export function SessionList({ onSelectSession }: SessionListProps) {
           },
         }}
       >
-        <OmigaLogo size={18} animated={false} />
+        <OmigaLogo size={24} animated={false} />
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography variant="body2" fontWeight={600} color="text.primary" noWrap>
-            dengxsh
+            {t("localWorkspace")}
           </Typography>
           <Typography variant="caption" color="text.secondary" display="block" noWrap>
-            {t("proPlan")}
+            {t("noAccountRequired")}
           </Typography>
         </Box>
         <UnfoldMore sx={{ fontSize: 18, color: "text.secondary", flexShrink: 0 }} />
@@ -1245,12 +1245,12 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         <Divider />
         <MenuItem
           onMouseEnter={closeLanguageSubmenuNow}
-          onClick={() => void handleLogOut()}
+          onClick={() => void handleCloseWindow()}
         >
           <ListItemIcon>
-            <LogoutIcon fontSize="small" />
+            <CloseIcon fontSize="small" />
           </ListItemIcon>
-          <ListItemText>{t("logOut")}</ListItemText>
+          <ListItemText>{t("closeWindow")}</ListItemText>
         </MenuItem>
       </Menu>
 

@@ -1,0 +1,13 @@
+item	score	group
+Interferon alpha response	2.7	Hallmark
+E2F targets	-2.2	Hallmark
+TNFA signaling via NFKB	2.1	Hallmark
+Oxidative phosphorylation	-1.9	Hallmark
+MYC targets	1.7	Hallmark
+Glycolysis	1.5	Hallmark
+Hypoxia	1.2	Hallmark
+Apoptosis	-1.1	Hallmark
+Cell cycle checkpoint	-0.9	Custom
+DNA repair	0.8	Custom
+Antigen presentation	1.4	Custom
+Complement	-1.3	Custom

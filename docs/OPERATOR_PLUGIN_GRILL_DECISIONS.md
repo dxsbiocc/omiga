@@ -20,7 +20,7 @@ Non-goal for MVP: full DAG workflow orchestration, Snakemake/Nextflow parity, sc
 8. **Versioning**: Agent cannot choose versions in tool args; registry resolves the enabled version and run metadata locks it.
 9. **Registry**: operator install/enable/version state is user-scoped and read from the local Omiga app/user registry. The current session execution surface decides where the operator runs; SSH execution does not require a separate remote registry for schema exposure.
 10. **Plugin distribution**: existing plugins are the distribution layer; `OperatorRegistry` is the runtime capability index.
-11. **Gating**: exposed operator requires source plugin enabled, operator enabled, version resolvable, and no unresolved conflict.
+11. **Gating**: exposed operator requires resource plugin enabled, operator enabled, version resolvable, and no unresolved conflict.
 12. **Conflicts**: short flat names are used by default; same-id conflicts are not auto-overridden and require explicit source or alias selection.
 13. **Manifest schema**: manifests must include `apiVersion: omiga.ai/operator/v1alpha1` and `kind: Operator`, parsed into stable internal `OperatorSpec`.
 14. **Rich schema**: manifest uses Omiga-specific rich input/param/output/resource schema; Agent/UI receive generated JSON Schema.
@@ -81,7 +81,7 @@ Deferred post-MVP runtime-environment slice:
 ## Current first-version completion notes
 
 - Operator run listing, details, logs, and verification are execution-surface aware: local reads use `{session-workspace}/.omiga/runs`, while SSH/sandbox reads use the active remote workspace `.omiga/runs` through the existing execution environment.
-- Remote operator artifacts/logs/provenance are never copied into the local registry or workspace; UI and Agent-facing results keep remote references and read/verify them in place.
+- Remote operator artifacts/logs/provenance are never copied into the local registry or local workspace; UI and Agent-facing results keep remote references and read/verify them in place. Successful runs also export a user-facing copy inside the active execution surface workspace at `operator-results/{alias}/{run_id}`.
 - Smoke runs are now manifest-driven via `smokeTests`, so user-added and built-in plugins can expose deterministic validation payloads through the same generic operator runner. When multiple smoke tests are declared, the UI lets the user choose which payload to run and then opens/verifies the resulting run.
 - Operator cards summarize calls/successes/failures/latest status from the current execution surface run history; clicking a card opens an operator detail view with manifest identity, aliases, smoke tests, and matching run statuses.
 - Smoke run provenance/status now records `runContext.kind=smoke` plus smoke test id/name, so cards can distinguish normal calls from smoke validation runs, including failed smoke runs that only have `status.json`.
@@ -91,8 +91,8 @@ Deferred post-MVP runtime-environment slice:
 - Retry policy now retries only retryable infrastructure failures and records `attempt`, `maxAttempts`, and `previousErrors`; tool exits, validation failures, and output failures remain Agent-correction errors.
 - Path-like input provenance now records strong local sha256 fingerprints and best-effort remote sha256 fingerprints, with stat/reference fallback when remote checksum tools are unavailable.
 - Output collection is bounded to the active session run workspace: manifests declare relative output globs under `${outdir}`, and absolute or parent-directory output globs are rejected.
-- Cache policy is explicit opt-in via manifest `cache.enabled`. Cache lookup is scoped to the active execution surface's `.omiga/runs`, keys include operator identity plus input fingerprints/run configuration, smoke runs bypass cache, and cache hits record provenance under the active workspace while reusing verified in-place artifact refs instead of copying results.
-- Built-in omics operators now pair atomic analysis with default display artifacts without faking domain results: differential expression uses DESeq2/edgeR/limma priority plus Wilcoxon/chi-square/t-test fallbacks, PCA writes score/scree/group summaries, and functional enrichment uses `clusterProfiler::enricher` plus `fgsea` for ORA/GSEA.
+- Cache policy is explicit opt-in via manifest `cache.enabled`. Cache lookup is scoped to the active execution surface's `.omiga/runs`, keys include operator identity plus input fingerprints/run configuration, smoke runs bypass cache, and cache hits record provenance under the active workspace while reusing verified in-place artifact refs plus exporting a per-run user-facing copy.
+- Built-in omics operators now pair atomic analysis with default display artifacts without faking domain results: differential expression uses DESeq2/edgeR/limma priority and emits PNG/PDF plots, PCA writes score/scree/group summaries, and functional enrichment uses `clusterProfiler::enricher` plus `fgsea` for ORA/GSEA.
 - Manual local smoke E2E was verified on 2026-05-07 with `operator__write_text_report`, producing `.omiga/runs/{run_id}/out/operator-report.txt` containing two `hello operator smoke` lines.
 - Manual local Docker smoke E2E was verified on 2026-05-07 with `operator__container_text_report`, producing `.omiga/runs/{run_id}/out/container-operator-report.txt` from the `alpine:3.19` image.
 - Manual SSH smoke E2E was verified on 2026-05-07 with `operator__write_text_report` on the remote GPU execution surface, producing `data/query/.omiga/runs/{run_id}/out/operator-report.txt` and keeping logs/provenance/artifacts inside the selected remote session workspace rather than remote `~`.

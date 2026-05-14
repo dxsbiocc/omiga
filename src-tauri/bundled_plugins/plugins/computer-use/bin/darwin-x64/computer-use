@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+if [ "${OMIGA_COMPUTER_USE_EXPERIMENTAL_RUST:-}" = "1" ] && [ "${OMIGA_COMPUTER_USE_SIDECAR:-}" = "rust" ]; then
+  candidate="$(dirname "$0")/../computer-use-sidecar"
+  if [ -x "$candidate" ]; then
+    exec "$candidate" "$@"
+  fi
+  echo "Internal Rust Computer Use feature requested, but bin/computer-use-sidecar is not installed" >&2
+  exit 2
+fi
+exec "$(dirname "$0")/../computer-use-macos.py" "$@"

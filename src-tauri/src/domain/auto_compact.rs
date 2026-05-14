@@ -1,7 +1,8 @@
 //! Automatic conversation compaction when estimated prompt size approaches the model context limit.
 //!
 //! Mirrors the intent of Claude Code's `autoCompact` (threshold below context window). Omiga keeps
-//! domain [`Message`] rows in SQLite; when compacting we replace the full message list for the session.
+//! the SQLite transcript as the user-visible audit log; compaction only mutates the in-memory
+//! model-context copy used for subsequent provider calls.
 
 use crate::api::{ContentBlock, Message as ApiMessage};
 use crate::constants::tool_limits::truncate_utf8_prefix;
@@ -18,6 +19,10 @@ const TOOL_SCHEMA_OVERHEAD_TOKENS: u32 = 28_000;
 /// Start compacting before the hard context edge. Users can override with
 /// `OMIGA_AUTO_COMPACT_THRESHOLD_PERCENT`; default is 80%.
 const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u32 = 80;
+/// When compaction is triggered, trim the chat-history portion down near this
+/// percentage of the full context window. This creates real headroom after a
+/// compaction pass instead of trimming only barely below the trigger threshold.
+const DEFAULT_AUTO_COMPACT_TARGET_PERCENT: u32 = 20;
 /// Minimum domain messages to retain after head trimming (last user turn should survive if possible).
 const MIN_MESSAGES: usize = 1;
 /// When truncating tool output, keep at least this many bytes of prefix.
@@ -48,6 +53,22 @@ fn auto_compact_threshold_percent() -> u32 {
     DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
 }
 
+fn auto_compact_target_percent() -> u32 {
+    if let Ok(s) = std::env::var("OMIGA_AUTO_COMPACT_TARGET_PERCENT") {
+        if let Ok(n) = s.parse::<u32>() {
+            return n.clamp(10, 80);
+        }
+    }
+    if let Ok(s) = std::env::var("OMIGA_AUTO_COMPACT_TARGET_RATIO") {
+        if let Ok(v) = s.parse::<f32>() {
+            if v.is_finite() {
+                return ((v * 100.0).round() as i32).clamp(10, 80) as u32;
+            }
+        }
+    }
+    DEFAULT_AUTO_COMPACT_TARGET_PERCENT
+}
+
 /// Whether automatic compaction is enabled (default: on).
 pub fn is_auto_compact_enabled() -> bool {
     if env_truthy("OMIGA_DISABLE_AUTO_COMPACT") || env_truthy("DISABLE_AUTO_COMPACT") {
@@ -64,20 +85,39 @@ pub fn is_auto_compact_enabled() -> bool {
 
 /// Provider-aware default context window when `OMIGA_CONTEXT_WINDOW` is unset.
 pub fn context_window_tokens(cfg: &LlmConfig) -> u32 {
-    if let Ok(v) = std::env::var("OMIGA_CONTEXT_WINDOW") {
-        if let Ok(n) = v.parse::<u32>() {
-            if n >= 8_192 {
-                return n;
+    for key in [
+        "OMIGA_CONTEXT_WINDOW_TOKENS",
+        "OMIGA_CONTEXT_WINDOW",
+        "LLM_CONTEXT_WINDOW_TOKENS",
+        "LLM_CONTEXT_WINDOW",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            if let Ok(n) = v.parse::<u32>() {
+                if n >= 8_192 {
+                    return n;
+                }
             }
         }
     }
-    match cfg.provider {
+    configured_or_default_context_window_tokens(cfg)
+}
+
+fn configured_or_default_context_window_tokens(cfg: &LlmConfig) -> u32 {
+    if let Some(tokens) = cfg.context_window_tokens.filter(|n| *n >= 8_192) {
+        return tokens;
+    }
+    provider_default_context_window_tokens(&cfg.provider, &cfg.model)
+}
+
+fn provider_default_context_window_tokens(provider: &LlmProvider, model: &str) -> u32 {
+    let model_lc = model.to_ascii_lowercase();
+    match provider {
         LlmProvider::Anthropic => 200_000,
-        LlmProvider::OpenAi
-        | LlmProvider::Azure
-        | LlmProvider::Moonshot
-        | LlmProvider::Deepseek
-        | LlmProvider::Custom => 131_072,
+        LlmProvider::Deepseek if model_lc.contains("v4") => 1_000_000,
+        LlmProvider::OpenAi | LlmProvider::Azure | LlmProvider::Moonshot | LlmProvider::Custom => {
+            131_072
+        }
+        LlmProvider::Deepseek => 131_072,
         LlmProvider::Minimax | LlmProvider::Alibaba | LlmProvider::Zhipu => 128_000,
         LlmProvider::Google => 128_000,
     }
@@ -130,10 +170,24 @@ fn request_overhead_tokens(cfg: &LlmConfig, tools_enabled: bool) -> u32 {
 /// This is a *trigger* budget, not the absolute hard context limit: by default Omiga compacts
 /// around 80% of the provider context window so large requests do not fail during upload/streaming.
 pub fn messages_budget_tokens(cfg: &LlmConfig, tools_enabled: bool) -> u32 {
+    messages_budget_tokens_for_percent(cfg, tools_enabled, auto_compact_threshold_percent())
+}
+
+fn compaction_target_messages_budget_tokens(cfg: &LlmConfig) -> u32 {
+    let threshold = auto_compact_threshold_percent();
+    let target = auto_compact_target_percent().min(threshold.saturating_sub(5));
     let ctx = context_window_tokens(cfg);
-    let trigger_ctx = ctx
-        .saturating_mul(auto_compact_threshold_percent())
-        .saturating_div(100);
+    let target_ctx = ctx.saturating_mul(target).saturating_div(100);
+    // Target is the post-compaction chat-history size, not the hard request
+    // upload limit. Keep it intuitive: ~20% of the context window remains
+    // available for recent chat, while trigger budgeting still accounts for
+    // tools, output reserve, safety buffer, and provider overhead.
+    target_ctx.saturating_sub(system_prompt_tokens(cfg))
+}
+
+fn messages_budget_tokens_for_percent(cfg: &LlmConfig, tools_enabled: bool, percent: u32) -> u32 {
+    let ctx = context_window_tokens(cfg);
+    let trigger_ctx = ctx.saturating_mul(percent).saturating_div(100);
     let reserve_out = cfg.max_tokens;
     let overhead = request_overhead_tokens(cfg, tools_enabled);
     trigger_ctx
@@ -172,12 +226,7 @@ fn pop_head_message(messages: &mut Vec<Message>) -> bool {
     !take_head_message_block(messages).is_empty()
 }
 
-fn truncate_tool_results_for_budget(
-    messages: &mut [Message],
-    cfg: &LlmConfig,
-    tools_enabled: bool,
-) {
-    let budget = messages_budget_tokens(cfg, tools_enabled);
+fn truncate_tool_results_for_budget(messages: &mut [Message], budget: u32) {
     for _ in 0..256 {
         let api = SessionCodec::to_api_messages(messages);
         let est = estimate_tokens_api_messages(&api);
@@ -217,12 +266,7 @@ fn truncate_tool_results_for_budget(
     }
 }
 
-fn truncate_text_messages_for_budget(
-    messages: &mut [Message],
-    cfg: &LlmConfig,
-    tools_enabled: bool,
-) {
-    let budget = messages_budget_tokens(cfg, tools_enabled);
+fn truncate_text_messages_for_budget(messages: &mut [Message], budget: u32) {
     let api = SessionCodec::to_api_messages(messages);
     let est = estimate_tokens_api_messages(&api);
     if est <= budget {
@@ -259,10 +303,11 @@ pub fn compact_session_messages(
     }
     let api_before = SessionCodec::to_api_messages(messages);
     let before = estimate_tokens_api_messages(&api_before);
-    let budget = messages_budget_tokens(cfg, tools_enabled);
-    if before <= budget {
+    let trigger_budget = messages_budget_tokens(cfg, tools_enabled);
+    if before <= trigger_budget {
         return None;
     }
+    let target_budget = compaction_target_messages_budget_tokens(cfg);
 
     let initial_len = messages.len();
     let mut removed_blocks = 0usize;
@@ -270,7 +315,7 @@ pub fn compact_session_messages(
     while messages.len() > MIN_MESSAGES {
         let api = SessionCodec::to_api_messages(messages);
         let est = estimate_tokens_api_messages(&api);
-        if est <= budget {
+        if est <= target_budget {
             break;
         }
         let len_before = messages.len();
@@ -281,22 +326,25 @@ pub fn compact_session_messages(
         }
     }
 
-    truncate_tool_results_for_budget(messages, cfg, tools_enabled);
-    truncate_text_messages_for_budget(messages, cfg, tools_enabled);
+    truncate_tool_results_for_budget(messages, target_budget);
+    truncate_text_messages_for_budget(messages, target_budget);
 
     let api_after = SessionCodec::to_api_messages(messages);
     let mut after = estimate_tokens_api_messages(&api_after);
 
     if initial_len > messages.len() || after < before {
         let notice = format!(
-            "[Omiga: Earlier conversation was automatically removed or shortened near the {}% context threshold (window ~{} tokens). Estimated chat history: ~{} → ~{} tokens.]",
+            "[Omiga: Earlier conversation was automatically removed or shortened near the {}% context threshold and compacted toward the {}% target (window ~{} tokens). Estimated chat history: ~{} → ~{} tokens.]",
             auto_compact_threshold_percent(),
+            auto_compact_target_percent(),
             context_window_tokens(cfg),
             before,
             after
         );
         let notice_cost = rough_token_estimate_chars(notice.len());
-        if after.saturating_add(notice_cost) <= budget.saturating_add(SAFETY_BUFFER_TOKENS / 2) {
+        if after.saturating_add(notice_cost)
+            <= target_budget.saturating_add(SAFETY_BUFFER_TOKENS / 2)
+        {
             messages.insert(0, Message::User { content: notice });
             let api = SessionCodec::to_api_messages(messages);
             after = estimate_tokens_api_messages(&api);
@@ -323,16 +371,17 @@ pub fn preview_removed_messages_for_compaction(
         return None;
     }
     let before = estimate_tokens_api_messages(&SessionCodec::to_api_messages(messages));
-    let budget = messages_budget_tokens(cfg, tools_enabled);
-    if before <= budget {
+    let trigger_budget = messages_budget_tokens(cfg, tools_enabled);
+    if before <= trigger_budget {
         return None;
     }
+    let target_budget = compaction_target_messages_budget_tokens(cfg);
 
     let mut preview = messages.to_vec();
     let mut removed = Vec::new();
     while preview.len() > MIN_MESSAGES {
         let est = estimate_tokens_api_messages(&SessionCodec::to_api_messages(&preview));
-        if est <= budget {
+        if est <= target_budget {
             break;
         }
         let block = take_head_message_block(&mut preview);
@@ -364,18 +413,23 @@ pub async fn replace_session_messages(
     Ok(last_user_id)
 }
 
-/// Outcome when compaction persisted new message rows (IDs change — use for `conversation_rounds`).
+/// Outcome when compaction shortened the model-context copy.
 #[derive(Debug, Clone)]
 pub struct AutoCompactPersisted {
     pub log_line: String,
-    /// DB id of the latest user message after rewrite (current turn).
+    /// DB id of the latest user message for linking the current round.
     pub last_user_message_id: String,
 }
 
-/// Run compaction and persist to SQLite.
+/// Run compaction for the in-memory model context.
+///
+/// Important: this is intentionally non-destructive. Earlier versions rewrote the SQLite message
+/// rows with the compacted context, which made the chat UI lose old transcript entries and show only
+/// the auto-compact notice. The persisted transcript must remain intact; only `session.messages`
+/// should be shortened before conversion to provider API messages.
 pub async fn compact_session_and_persist(
-    repo: &SessionRepository,
-    session_id: &str,
+    _repo: &SessionRepository,
+    _session_id: &str,
     session: &mut crate::domain::session::Session,
     cfg: &LlmConfig,
     tools_enabled: bool,
@@ -384,12 +438,10 @@ pub async fn compact_session_and_persist(
     let Some(result) = compact_session_messages(&mut session.messages, cfg, tools_enabled) else {
         return Ok(None);
     };
-    let last_user = replace_session_messages(repo, session_id, &session.messages).await?;
     session.updated_at = chrono::Utc::now();
-    let _ = repo.touch_session(session_id).await;
-    let last_user_message_id = last_user.unwrap_or_else(|| fallback_user_message_id.to_string());
+    let last_user_message_id = fallback_user_message_id.to_string();
     let log_line = format!(
-        "Auto-compact: ~{} → ~{} tokens (trimmed {} head block(s)).",
+        "Auto-compact model context: ~{} → ~{} tokens (trimmed {} head block(s)); transcript preserved.",
         result.estimated_tokens_before, result.estimated_tokens_after, result.removed_head_blocks
     );
     tracing::info!(target: "omiga::auto_compact", "{}", log_line);
@@ -423,6 +475,53 @@ mod tests {
             .saturating_sub(system_prompt_tokens(&c));
         assert_eq!(b, expected);
         assert!(b < 131_072);
+    }
+
+    #[test]
+    fn configured_context_window_overrides_provider_default() {
+        let mut c = LlmConfig::new(LlmProvider::OpenAi, "k");
+        c.context_window_tokens = Some(1_000_000);
+
+        assert_eq!(configured_or_default_context_window_tokens(&c), 1_000_000);
+    }
+
+    #[test]
+    fn deepseek_v4_defaults_to_large_context_window() {
+        assert_eq!(
+            provider_default_context_window_tokens(&LlmProvider::Deepseek, "deepseek-v4-flash"),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn compaction_trims_toward_twenty_percent_target_after_trigger() {
+        let mut c = test_config();
+        c.context_window_tokens = Some(128_000);
+        c.system_prompt = None;
+        let mut msgs = vec![
+            Message::User {
+                content: "old context ".repeat(40_000),
+            },
+            Message::User {
+                content: "more old context ".repeat(40_000),
+            },
+            Message::User {
+                content: "latest request".into(),
+            },
+        ];
+
+        let result = compact_session_messages(&mut msgs, &c, false)
+            .expect("large transcript should compact");
+
+        assert!(result.estimated_tokens_before > messages_budget_tokens(&c, false));
+        assert!(
+            result.estimated_tokens_after
+                <= compaction_target_messages_budget_tokens(&c)
+                    .saturating_add(SAFETY_BUFFER_TOKENS / 2),
+            "after={} target={}",
+            result.estimated_tokens_after,
+            compaction_target_messages_budget_tokens(&c)
+        );
     }
 
     #[test]

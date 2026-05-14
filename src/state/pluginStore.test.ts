@@ -15,6 +15,7 @@ import {
   updateOperatorEnabledInCatalog,
   updatePluginEnabledInMarketplaces,
   updatePluginInstalledInMarketplaces,
+  updateRetrievalResourceEnabledInMarketplaces,
   usePluginStore,
   type OperatorSummary,
   type PluginMarketplaceEntry,
@@ -181,6 +182,71 @@ describe("local plugin catalog updates", () => {
       enabledAliases: [],
     });
   });
+
+  it("updates one retrieval route exposure without rebuilding unrelated plugins", () => {
+    const target = plugin({
+      id: "resource-ncbi@omiga-curated",
+      name: "resource-ncbi",
+      installed: true,
+      enabled: true,
+      retrieval: {
+        protocolVersion: 1,
+        resources: [
+          {
+            id: "geo",
+            category: "dataset",
+            label: "NCBI GEO",
+            description: "GEO datasets",
+            subcategories: [],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: true,
+            replacesBuiltin: true,
+            exposed: true,
+          },
+          {
+            id: "pubmed",
+            category: "literature",
+            label: "PubMed",
+            description: "PubMed abstracts",
+            subcategories: [],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: true,
+            replacesBuiltin: true,
+            exposed: true,
+          },
+        ],
+      },
+    });
+    const other = plugin({
+      id: "resource-embl-ebi@omiga-curated",
+      name: "resource-embl-ebi",
+      retrieval: { protocolVersion: 1, resources: [] },
+    });
+    const original = [marketplace("/marketplace.json", [target, other])];
+
+    const updated = updateRetrievalResourceEnabledInMarketplaces(
+      original,
+      "resource-ncbi@omiga-curated",
+      "dataset",
+      "geo",
+      false,
+    );
+
+    expect(updated).not.toBe(original);
+    expect(updated[0]).not.toBe(original[0]);
+    expect(updated[0].plugins[0].retrieval?.resources[0]).toMatchObject({
+      id: "geo",
+      exposed: false,
+    });
+    expect(updated[0].plugins[0].retrieval?.resources[1]).toBe(
+      target.retrieval?.resources[1],
+    );
+    expect(updated[0].plugins[1]).toBe(other);
+  });
 });
 
 describe("summarizeOperatorRunResult", () => {
@@ -213,6 +279,7 @@ describe("summarizeOperatorRunResult", () => {
           sourcePlugin: "operator-smoke@omiga-curated",
         },
         runDir: "/project/.omiga/runs/oprun_20260506_smoke",
+        exportDir: "/project/operator-results/write_text_report/oprun_20260506_smoke",
         runContext: {
           kind: "smoke",
           smokeTestId: "default",
@@ -248,6 +315,7 @@ describe("summarizeOperatorRunResult", () => {
       retryable: false,
       suggestedAction: "Inspect stderr.",
       stderrTail: "bad flag\n",
+      exportDir: "/project/operator-results/write_text_report/oprun_20260506_smoke",
       outputCount: 1,
       structuredOutputCount: 2,
       cacheKey: "sha256:cache-key",
@@ -269,6 +337,7 @@ describe("usePluginStore operator actions", () => {
       operatorRuns: [],
       retrievalStatuses: [],
       processPoolStatuses: [],
+      remoteMarketplaceChecks: [],
       isLoading: false,
       isMutating: false,
       error: null,
@@ -333,6 +402,155 @@ describe("usePluginStore operator actions", () => {
     });
     expect(usePluginStore.getState().marketplaces[0].plugins[1]).toBe(other);
     expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("passes force overwrite when syncing a plugin with local edits", async () => {
+    const target = plugin({
+      id: "ngs-alignment@omiga-curated",
+      name: "ngs-alignment",
+      installed: true,
+      enabled: true,
+      sync: {
+        state: "conflictRisk",
+        label: "Review sync",
+        message: "conflict",
+        changedCount: 1,
+        localModifiedCount: 1,
+        conflictCount: 1,
+      },
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "sync_omiga_plugin") {
+        return {
+          pluginId: target.id,
+          status: "forceSynced",
+          installedPath: "/plugins/ngs-alignment",
+          updated: ["plugin.json"],
+          added: [],
+          removed: [],
+          keptLocal: [],
+          conflicts: [],
+          message: "forced",
+        };
+      }
+      if (command === "list_omiga_plugin_marketplaces") {
+        return [marketplace("/marketplace.json", [target])];
+      }
+      if (command === "list_omiga_plugin_retrieval_statuses") return [];
+      if (command === "list_omiga_plugin_process_pool_statuses") return [];
+      if (command === "list_operators") {
+        return { registryPath: "/registry.json", operators: [], diagnostics: [] };
+      }
+      if (command === "list_operator_runs") return [];
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().syncPlugin(target, "/project", { force: true });
+
+    expect(invokeMock).toHaveBeenCalledWith("sync_omiga_plugin", {
+      pluginId: target.id,
+      marketplacePath: target.marketplacePath,
+      pluginName: target.name,
+      force: true,
+      projectRoot: "/project",
+    });
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("checks remote marketplaces without reloading the local catalog", async () => {
+    invokeMock.mockResolvedValueOnce([
+      {
+        name: "omiga-curated",
+        path: "/marketplace.json",
+        remote: { url: "https://raw.githubusercontent.com/org/repo/main/marketplace.json" },
+        state: "updateAvailable",
+        label: "Remote update available",
+        message: "Remote marketplace differs.",
+        localDigest: "sha256:local",
+        remoteDigest: "sha256:remote",
+        remotePluginCount: 1,
+        changedPlugins: ["ngs-alignment"],
+        checkedAt: "2026-05-12T00:00:00Z",
+      },
+    ]);
+
+    const result = await usePluginStore.getState().checkRemoteMarketplaces("/project");
+
+    expect(result[0].state).toBe("updateAvailable");
+    expect(invokeMock).toHaveBeenCalledWith("check_omiga_remote_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplaces",
+      expect.anything(),
+    );
+    expect(usePluginStore.getState().remoteMarketplaceChecks).toEqual(result);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("toggles one retrieval route and refreshes route diagnostics", async () => {
+    const target = plugin({
+      id: "resource-ncbi@omiga-curated",
+      name: "resource-ncbi",
+      installed: true,
+      enabled: true,
+      retrieval: {
+        protocolVersion: 1,
+        resources: [
+          {
+            id: "geo",
+            category: "dataset",
+            label: "NCBI GEO",
+            description: "GEO datasets",
+            subcategories: [],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: true,
+            replacesBuiltin: true,
+            exposed: true,
+          },
+        ],
+      },
+    });
+    usePluginStore.setState({
+      marketplaces: [marketplace("/marketplace.json", [target])],
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "set_omiga_retrieval_resource_enabled") return undefined;
+      if (command === "list_omiga_plugin_retrieval_statuses") return [];
+      if (command === "list_omiga_plugin_process_pool_statuses") return [];
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore
+      .getState()
+      .setRetrievalResourceEnabled("resource-ncbi@omiga-curated", "dataset", "geo", false, "/project");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      1,
+      "set_omiga_retrieval_resource_enabled",
+      {
+        pluginId: "resource-ncbi@omiga-curated",
+        category: "dataset",
+        resourceId: "geo",
+        enabled: false,
+        projectRoot: "/project",
+      },
+    );
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      2,
+      "list_omiga_plugin_retrieval_statuses",
+      { projectRoot: "/project" },
+    );
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      3,
+      "list_omiga_plugin_process_pool_statuses",
+      { projectRoot: "/project" },
+    );
+    expect(
+      usePluginStore.getState().marketplaces[0].plugins[0].retrieval?.resources[0],
+    ).toMatchObject({ exposed: false });
   });
 
   it("invokes smoke runs with run context and stores the returned summary", async () => {
@@ -575,7 +793,7 @@ describe("buildPluginDiagnostics", () => {
     const retrievalRoute: PluginRetrievalRouteStatus = {
       pluginId: "retrieval-protocol-example@local",
       category: "dataset",
-      sourceId: "example_dataset",
+      resourceId: "example_dataset",
       route: "dataset.example_dataset via retrieval-protocol-example",
       state: "degraded",
       quarantined: false,
@@ -586,7 +804,7 @@ describe("buildPluginDiagnostics", () => {
     const pooledProcess: PluginProcessPoolRouteStatus = {
       pluginId: "retrieval-protocol-example@local",
       category: "dataset",
-      sourceId: "example_dataset",
+      resourceId: "example_dataset",
       route: "dataset.example_dataset via retrieval-protocol-example",
       pluginRoot: "/plugins/retrieval-protocol-example",
       remainingMs: 30_000,
@@ -602,6 +820,24 @@ describe("buildPluginDiagnostics", () => {
           installedPath: "/plugins/retrieval-protocol-example",
           installed: true,
           enabled: true,
+          environments: [
+            {
+              id: "example-conda",
+              version: "0.1.0",
+              canonicalId: "retrieval-protocol-example@local:example-conda",
+              name: "Example conda",
+              description: "Example runtime profile",
+              manifestPath: "/plugins/retrieval-protocol-example/environments/example-conda/environment.yaml",
+              runtimeType: "conda",
+              runtimeFile: "/plugins/retrieval-protocol-example/environments/example-conda/conda.yaml",
+              runtimeFileKind: "conda.yaml|conda.yml",
+              installHint: "Install micromamba.",
+              checkCommand: ["python", "--version"],
+              availabilityStatus: "missing",
+              availabilityManager: null,
+              availabilityMessage: "No conda manager found.",
+            },
+          ],
         }),
         [retrievalRoute],
         [pooledProcess],
@@ -616,13 +852,18 @@ describe("buildPluginDiagnostics", () => {
       installed: true,
       enabled: true,
     });
+    expect(diagnostics.plugin.environments[0]).toMatchObject({
+      id: "example-conda",
+      runtimeType: "conda",
+      availabilityStatus: "missing",
+    });
     expect(diagnostics.retrievalRoutes).toEqual([retrievalRoute]);
     expect(diagnostics.pooledProcesses).toEqual([pooledProcess]);
     expect(JSON.stringify(diagnostics)).not.toContain("secret");
     expect(diagnostics.notes.join(" ")).toContain("No credential values");
   });
 
-  it("includes declared retrieval source summaries without process internals", () => {
+  it("includes declared retrieval resource summaries without process internals", () => {
     const diagnostics = JSON.parse(
       buildPluginDiagnostics(
         plugin({
@@ -630,7 +871,7 @@ describe("buildPluginDiagnostics", () => {
           name: "public-dataset-sources",
           retrieval: {
             protocolVersion: 1,
-            sources: [
+            resources: [
               {
                 id: "biosample",
                 category: "dataset",
@@ -649,7 +890,7 @@ describe("buildPluginDiagnostics", () => {
       ),
     );
 
-    expect(diagnostics.plugin.retrieval.sources[0]).toMatchObject({
+    expect(diagnostics.plugin.retrieval.resources[0]).toMatchObject({
       id: "biosample",
       category: "dataset",
       label: "NCBI BioSample",
@@ -665,7 +906,7 @@ describe("buildRetrievalRuntimeDiagnostics", () => {
     const route: PluginRetrievalRouteStatus = {
       pluginId: "retrieval-dataset-geo@omiga-curated",
       category: "dataset",
-      sourceId: "geo",
+      resourceId: "geo",
       route: "dataset.geo via retrieval-dataset-geo@omiga-curated",
       state: "quarantined",
       quarantined: true,
@@ -676,7 +917,7 @@ describe("buildRetrievalRuntimeDiagnostics", () => {
     const pooled: PluginProcessPoolRouteStatus = {
       pluginId: "retrieval-dataset-geo@omiga-curated",
       category: "dataset",
-      sourceId: "geo",
+      resourceId: "geo",
       route: "dataset.geo via retrieval-dataset-geo@omiga-curated",
       pluginRoot: "/plugins/retrieval-dataset-geo",
       remainingMs: 30_000,
@@ -695,7 +936,7 @@ describe("buildRetrievalRuntimeDiagnostics", () => {
             enabled: true,
             retrieval: {
               protocolVersion: 1,
-              sources: [
+              resources: [
                 {
                   id: "geo",
                   category: "dataset",

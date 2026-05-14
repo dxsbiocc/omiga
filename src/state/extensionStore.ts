@@ -11,17 +11,19 @@ import {
   type VscodeIconThemeDocument,
 } from "../utils/vscodeExtensions";
 import { extractErrorMessage } from "../utils/errorMessage";
+import {
+  getLocalStorageItem,
+  setLocalStorageItem,
+} from "../utils/browserStorage";
 
 const ICON_THEME_STORAGE_KEY = "omiga_vscode_icon_theme";
 
 function readStoredIconThemeId(): string {
-  if (typeof localStorage === "undefined") return DEFAULT_ICON_THEME_ID;
-  return localStorage.getItem(ICON_THEME_STORAGE_KEY) || DEFAULT_ICON_THEME_ID;
+  return getLocalStorageItem(ICON_THEME_STORAGE_KEY) || DEFAULT_ICON_THEME_ID;
 }
 
 function writeStoredIconThemeId(themeId: string): void {
-  if (typeof localStorage === "undefined") return;
-  localStorage.setItem(ICON_THEME_STORAGE_KEY, themeId);
+  setLocalStorageItem(ICON_THEME_STORAGE_KEY, themeId);
 }
 
 async function loadResolvedIconTheme(

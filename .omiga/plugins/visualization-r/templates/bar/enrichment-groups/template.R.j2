@@ -1,0 +1,275 @@
+#!/usr/bin/env Rscript
+# Template: bar/enrichment-groups
+# Purpose: Multi-group enrichment bar plot with significance bars, pathway
+#          labels, gene labels, count bubbles, and category strip blocks.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/bar/enrichment_groups
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   The source data.json is bundled as example.tsv.
+#
+# Input example:
+#   See example.tsv with index/ONTOLOGY/Description/p.adjust/geneID/Count columns.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template bar/enrichment-groups
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    index = arg_or(3, "index"),
+    ontology = arg_or(4, "ONTOLOGY"),
+    term = arg_or(5, "Description"),
+    pvalue = arg_or(6, "p.adjust"),
+    genes = arg_or(7, "geneID"),
+    count = arg_or(8, "Count")
+  ),
+  labels = list(
+    title = arg_or(9, ""),
+    x = arg_or(10, "-log10(p.adjust)"),
+    y = ""
+  ),
+  ontology_order = parse_csv_arg(11, "auto"),
+  style = list(
+    palette = parse_csv_arg(12, "#7bc4e2,#acd372,#fbb05b,#ed6ca4"),
+    pvalue_floor = parse_number_arg(13, 1e-8),
+    max_log10_pvalue = parse_number_arg(14, 8),
+    x_min = parse_number_arg(15, -1.6),
+    x_max = parse_number_arg(16, 8.6),
+    x_breaks = parse_csv_arg(17, "0,2,4,6,8"),
+    label_x = parse_number_arg(18, 0.05),
+    gene_label_x = parse_number_arg(19, 0.1),
+    count_x = parse_number_arg(20, -0.5),
+    strip_xmin = parse_number_arg(21, -1.5),
+    strip_xmax = parse_number_arg(22, -1.0),
+    term_label_size = parse_number_arg(23, 5),
+    gene_label_size = parse_number_arg(24, 3.5),
+    gene_label_max_chars = parse_integer_arg(25, 92),
+    count_label_size = parse_number_arg(26, 3.4),
+    count_size_min = parse_number_arg(27, 5),
+    count_size_max = parse_number_arg(28, 16),
+    bar_width = parse_number_arg(29, 0.62),
+    bar_alpha = parse_number_arg(30, 0.45),
+    strip_alpha = parse_number_arg(31, 0.95),
+    base_size = parse_number_arg(32, 12)
+  )
+)
+delimiter <- arg_or(33, "auto")
+width <- parse_number_arg(34, 10)
+height <- parse_number_arg(35, 9)
+dpi <- parse_integer_arg(36, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- c("#7bc4e2", "#acd372", "#fbb05b", "#ed6ca4")
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+ordered_values <- function(values, preferred_order) {
+  values <- unique(as.character(values))
+  if (length(preferred_order) == 0) return(values)
+  ordered <- preferred_order[preferred_order %in% values]
+  c(ordered, setdiff(values, ordered))
+}
+
+truncate_label <- function(value, max_chars) {
+  value <- as.character(value)
+  if (is.na(value)) return("")
+  if (max_chars <= 0 || nchar(value, type = "width") <= max_chars) return(value)
+  paste0(substr(value, 1, max(1, max_chars - 1)), "…")
+}
+
+prepare_data <- function(df, config) {
+  required <- c(config$columns$index, config$columns$ontology, config$columns$term, config$columns$pvalue, config$columns$genes, config$columns$count)
+  validate_columns(df, required, "bar/enrichment-groups input")
+  df <- ensure_numeric_columns(df, c(config$columns$index, config$columns$pvalue, config$columns$count), "bar/enrichment-groups input")
+
+  df$.index <- df[[config$columns$index]]
+  df$.ontology_raw <- as.character(df[[config$columns$ontology]])
+  df$.term_raw <- as.character(df[[config$columns$term]])
+  df$.gene_raw <- as.character(df[[config$columns$genes]])
+  df$.pvalue <- df[[config$columns$pvalue]]
+  df$.count <- df[[config$columns$count]]
+  df <- df[is.finite(df$.index) & is.finite(df$.pvalue) & is.finite(df$.count) & nzchar(df$.ontology_raw) & nzchar(df$.term_raw), , drop = FALSE]
+  if (!nrow(df)) stop("bar/enrichment-groups input has no plottable rows.", call. = FALSE)
+
+  df <- df[order(df$.index), , drop = FALSE]
+  ontologies <- ordered_values(df$.ontology_raw, config$ontology_order)
+  df$.ontology <- factor(df$.ontology_raw, levels = ontologies)
+  df$.log10_pvalue <- -log10(pmax(df$.pvalue, config$style$pvalue_floor))
+  df$.log10_pvalue <- pmin(df$.log10_pvalue, config$style$max_log10_pvalue)
+  df$.row <- rev(seq_len(nrow(df)))
+  df$.gene_label <- vapply(df$.gene_raw, truncate_label, character(1), max_chars = config$style$gene_label_max_chars)
+  df
+}
+
+group_blocks <- function(df, config) {
+  split_rows <- split(df, df$.ontology_raw)
+  split_rows <- split_rows[levels(df$.ontology)]
+  blocks <- do.call(rbind, lapply(names(split_rows), function(name) {
+    part <- split_rows[[name]]
+    if (is.null(part) || !nrow(part)) return(NULL)
+    data.frame(
+      .ontology = name,
+      .ymin = min(part$.row) - 0.45,
+      .ymax = max(part$.row) + 0.45,
+      .ymid = mean(range(part$.row)),
+      stringsAsFactors = FALSE
+    )
+  }))
+  blocks$.ontology <- factor(blocks$.ontology, levels = levels(df$.ontology))
+  blocks$.xmin <- config$style$strip_xmin
+  blocks$.xmax <- config$style$strip_xmax
+  blocks
+}
+
+enrichment_group_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    axis.text.y = ggplot2::element_blank(),
+    axis.title.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    axis.line.y = ggplot2::element_blank(),
+    axis.title.x = ggplot2::element_text(size = 12, face = "bold"),
+    axis.text.x = ggplot2::element_text(size = 10),
+    legend.title = ggplot2::element_blank(),
+    legend.position = "none",
+    plot.margin = ggplot2::margin(10, 18, 10, 10),
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    plot.title = ggplot2::element_text(hjust = 0.5, face = "bold")
+  )
+}
+
+make_plot <- function(df, config) {
+  palette <- extend_palette(levels(df$.ontology), config$style$palette)
+  blocks <- group_blocks(df, config)
+  x_breaks <- suppressWarnings(as.numeric(config$style$x_breaks))
+  x_breaks <- x_breaks[is.finite(x_breaks)]
+  if (!length(x_breaks)) x_breaks <- pretty(c(0, config$style$x_max), n = 5)
+
+  ggplot2::ggplot(df, ggplot2::aes(y = .row)) +
+    ggplot2::geom_rect(
+      data = blocks,
+      ggplot2::aes(xmin = .xmin, xmax = .xmax, ymin = .ymin, ymax = .ymax, fill = .ontology),
+      inherit.aes = FALSE,
+      alpha = config$style$strip_alpha,
+      color = NA
+    ) +
+    ggplot2::geom_text(
+      data = blocks,
+      ggplot2::aes(x = (.xmin + .xmax) / 2, y = .ymid, label = .ontology),
+      inherit.aes = FALSE,
+      fontface = "bold",
+      size = 3.6,
+      color = "#263238"
+    ) +
+    ggplot2::geom_col(
+      ggplot2::aes(x = .log10_pvalue, fill = .ontology),
+      orientation = "y",
+      width = config$style$bar_width,
+      alpha = config$style$bar_alpha,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      ggplot2::aes(x = config$style$label_x, label = .term_raw),
+      hjust = 0,
+      vjust = 0.35,
+      size = config$style$term_label_size,
+      fontface = "bold",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      ggplot2::aes(x = config$style$gene_label_x, label = .gene_label, colour = .ontology),
+      hjust = 0,
+      vjust = 2.4,
+      size = config$style$gene_label_size,
+      fontface = "italic",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(
+      ggplot2::aes(x = config$style$count_x, size = .count, fill = .ontology),
+      shape = 21,
+      colour = "white",
+      stroke = 0.4,
+      show.legend = TRUE
+    ) +
+    ggplot2::geom_text(
+      ggplot2::aes(x = config$style$count_x, label = .count),
+      size = config$style$count_label_size,
+      fontface = "bold",
+      color = "#263238",
+      show.legend = FALSE
+    ) +
+    ggplot2::annotate("segment", x = 0, xend = config$style$x_max, y = 0.35, yend = 0.35, linewidth = 1.1, color = "#263238") +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_colour_manual(values = palette, guide = "none") +
+    ggplot2::scale_size_continuous(name = "Count", range = c(config$style$count_size_min, config$style$count_size_max), guide = "none") +
+    ggplot2::scale_x_continuous(limits = c(config$style$x_min, config$style$x_max), breaks = x_breaks, expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(limits = c(0.25, max(df$.row) + 0.65), expand = c(0, 0)) +
+    ggplot2::coord_cartesian(clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    enrichment_group_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "ontologies", "min_pvalue", "max_log10_pvalue", "max_count"),
+      value = c("bar/enrichment-groups", nrow(plot_df), paste(levels(plot_df$.ontology), collapse = ","), min(plot_df$.pvalue, na.rm = TRUE), max(plot_df$.log10_pvalue, na.rm = TRUE), max(plot_df$.count, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/enrichment-groups", rows = nrow(plot_df), ontologies = paste(levels(plot_df$.ontology), collapse = ","), min_pvalue = min(plot_df$.pvalue, na.rm = TRUE), max_log10_pvalue = max(plot_df$.log10_pvalue, na.rm = TRUE), max_count = max(plot_df$.count, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

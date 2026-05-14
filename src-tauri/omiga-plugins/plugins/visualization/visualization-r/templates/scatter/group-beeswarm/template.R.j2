@@ -1,0 +1,233 @@
+#!/usr/bin/env Rscript
+# Template: scatter/group-beeswarm
+# Purpose: Grouped beeswarm-style differential scatter with category bands and labels.
+#
+# Migration note:
+#   This template directly implements the OmicsAgent scatter/beeswarm_group
+#   visual as editable ggplot2 code instead of carrying forward JSON DSL runtime.
+#   To avoid adding dependencies, it uses deterministic packed jitter rather than
+#   ggbeeswarm::geom_quasirandom. The original data.json has been converted to
+#   example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/group-beeswarm
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "cate"),
+    value = arg_or(4, "logFC"),
+    sign = arg_or(5, "sign"),
+    pvalue = arg_or(6, "adj.P.Val"),
+    label = arg_or(7, "symbol")
+  ),
+  levels = list(
+    categories = parse_csv_arg(8, ""),
+    signs = parse_csv_arg(9, "Down,Up")
+  ),
+  labels = list(title = arg_or(10, "Group Beeswarm"), y = arg_or(11, "log2FC")),
+  style = list(
+    sign_palette = parse_csv_arg(12, "#2dde98,#ff6c5f"),
+    tile_palette = parse_csv_arg(13, "#a8dbd9,#85c4c9,#68abb8,#4f90a6,#3b738f"),
+    label_colors = parse_csv_arg(14, "#595d7a,#595d7a,#595d7a,#c5c5c5,#c5c5c5"),
+    point_alpha = parse_number_arg(15, 0.5),
+    min_point_size = parse_number_arg(16, 1),
+    max_point_size = parse_number_arg(17, 4),
+    swarm_width = parse_number_arg(18, 0.4),
+    bins = parse_integer_arg(19, 90),
+    top_k = parse_integer_arg(20, 5),
+    tile_height = parse_number_arg(21, 1.5),
+    base_size = parse_number_arg(22, 12)
+  )
+)
+delimiter <- arg_or(23, "auto")
+width <- parse_number_arg(24, 8)
+height <- parse_number_arg(25, 6)
+dpi <- parse_integer_arg(26, 300)
+
+first_seen_levels <- function(x) unique(as.character(x))
+
+offset_sequence <- function(n, width) {
+  if (n <= 1) return(0)
+  raw <- seq_len(n) - (n + 1) / 2
+  spread <- max(abs(raw))
+  if (spread == 0) return(rep(0, n))
+  raw / spread * width
+}
+
+add_packed_jitter <- function(df, config, category_levels) {
+  value <- df[[config$columns$value]]
+  value_range <- diff(range(value, finite = TRUE))
+  bin_width <- if (value_range == 0) 1 else value_range / max(8, config$style$bins)
+  df$.bin <- floor((value - min(value, na.rm = TRUE)) / bin_width)
+  df$.category_index <- match(as.character(df[[config$columns$category]]), category_levels)
+  df$.swarm_offset <- 0
+  split_key <- paste(df$.category_index, df$.bin, sep = "\r")
+  for (key in unique(split_key)) {
+    idx <- which(split_key == key)
+    idx <- idx[order(df[[config$columns$value]][idx], seq_along(idx))]
+    df$.swarm_offset[idx] <- offset_sequence(length(idx), config$style$swarm_width)
+  }
+  df$.x <- df$.category_index + df$.swarm_offset
+  df$.neg_log10_p <- -log10(pmax(df[[config$columns$pvalue]], .Machine$double.xmin))
+  df
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$category, config$columns$value, config$columns$sign, config$columns$pvalue, config$columns$label), "scatter/group-beeswarm input")
+  df <- ensure_numeric_columns(df, c(config$columns$value, config$columns$pvalue), "scatter/group-beeswarm input")
+  df <- df[stats::complete.cases(df[, c(config$columns$category, config$columns$value, config$columns$sign, config$columns$pvalue, config$columns$label), drop = FALSE]), , drop = FALSE]
+  category_levels <- config$levels$categories
+  if (length(category_levels) == 0) category_levels <- first_seen_levels(df[[config$columns$category]])
+  sign_levels <- config$levels$signs
+  if (length(sign_levels) == 0) sign_levels <- first_seen_levels(df[[config$columns$sign]])
+  missing_categories <- setdiff(category_levels, unique(as.character(df[[config$columns$category]])))
+  if (length(missing_categories) > 0) {
+    stop(sprintf("scatter/group-beeswarm category_order contains missing category value(s): %s", paste(missing_categories, collapse = ", ")), call. = FALSE)
+  }
+  missing_signs <- setdiff(sign_levels, unique(as.character(df[[config$columns$sign]])))
+  if (length(missing_signs) > 0) {
+    stop(sprintf("scatter/group-beeswarm sign_order contains missing sign value(s): %s", paste(missing_signs, collapse = ", ")), call. = FALSE)
+  }
+  df <- df[as.character(df[[config$columns$category]]) %in% category_levels & as.character(df[[config$columns$sign]]) %in% sign_levels, , drop = FALSE]
+  df[[config$columns$category]] <- factor(as.character(df[[config$columns$category]]), levels = category_levels)
+  df[[config$columns$sign]] <- factor(as.character(df[[config$columns$sign]]), levels = sign_levels)
+  plot_df <- add_packed_jitter(df, config, category_levels)
+  tile_df <- data.frame(category = factor(category_levels, levels = category_levels), .category_index = seq_along(category_levels), stringsAsFactors = FALSE)
+  tile_df$.label_color <- seq_along(category_levels) > min(3, length(category_levels))
+  label_rows <- list()
+  for (category in category_levels) {
+    for (sign in sign_levels) {
+      subset <- plot_df[as.character(plot_df[[config$columns$category]]) == category & as.character(plot_df[[config$columns$sign]]) == sign, , drop = FALSE]
+      if (nrow(subset) == 0) next
+      subset <- subset[order(-abs(subset[[config$columns$value]]), subset[[config$columns$pvalue]]), , drop = FALSE]
+      label_rows[[length(label_rows) + 1]] <- head(subset, config$style$top_k)
+    }
+  }
+  label_df <- if (length(label_rows) == 0) plot_df[FALSE, , drop = FALSE] else do.call(rbind, label_rows)
+  label_df$.label_y <- label_df[[config$columns$value]] + ifelse(label_df[[config$columns$value]] >= 0, 0.45, -0.45)
+  label_df$.label_x <- label_df$.x + ifelse(label_df$.swarm_offset >= 0, 0.10, -0.10)
+  list(points = plot_df, tiles = tile_df, labels = label_df, category_levels = category_levels, sign_levels = sign_levels, config = config)
+}
+
+make_plot <- function(prepared, config) {
+  points <- prepared$points
+  tiles <- prepared$tiles
+  labels <- prepared$labels
+  category_levels <- prepared$category_levels
+  sign_levels <- prepared$sign_levels
+  sign_palette <- config$style$sign_palette
+  if (length(sign_palette) < length(sign_levels)) sign_palette <- rep(sign_palette, length.out = length(sign_levels))
+  sign_palette <- stats::setNames(sign_palette[seq_along(sign_levels)], sign_levels)
+  tile_palette <- config$style$tile_palette
+  if (length(tile_palette) < length(category_levels)) tile_palette <- rep(tile_palette, length.out = length(category_levels))
+  tile_palette <- stats::setNames(tile_palette[seq_along(category_levels)], category_levels)
+  label_colors <- config$style$label_colors
+  if (length(label_colors) < length(category_levels)) label_colors <- rep(label_colors, length.out = length(category_levels))
+  label_colors <- stats::setNames(label_colors[seq_along(category_levels)], category_levels)
+
+  ggplot2::ggplot() +
+    ggplot2::geom_tile(
+      data = tiles,
+      ggplot2::aes(x = .category_index, y = 0, fill = category),
+      height = config$style$tile_height,
+      width = 0.9,
+      colour = "black",
+      linewidth = 0.35,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(
+      data = points,
+      ggplot2::aes(x = .x, y = .data[[config$columns$value]], colour = .data[[config$columns$sign]], size = .neg_log10_p),
+      alpha = config$style$point_alpha
+    ) +
+    ggplot2::geom_text(
+      data = tiles,
+      ggplot2::aes(x = .category_index, y = 0, label = category, colour = category),
+      size = 4,
+      fontface = "bold",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_segment(
+      data = labels,
+      ggplot2::aes(x = .x, xend = .label_x, y = .data[[config$columns$value]], yend = .label_y),
+      linewidth = 0.25,
+      color = "grey45",
+      alpha = 0.7,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      data = labels,
+      ggplot2::aes(x = .label_x, y = .label_y, label = .data[[config$columns$label]]),
+      size = 2.8,
+      color = "grey20",
+      check_overlap = TRUE,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_colour_manual(values = c(sign_palette, label_colors), breaks = sign_levels, name = "Change") +
+    ggplot2::scale_fill_manual(values = tile_palette) +
+    ggplot2::scale_size_continuous(range = c(config$style$min_point_size, config$style$max_point_size), name = expression(-log[10](adj.P))) +
+    ggplot2::scale_x_continuous(breaks = seq_along(category_levels), labels = rep("", length(category_levels)), expand = ggplot2::expansion(mult = c(0.05, 0.05))) +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = config$labels$y) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.grid = ggplot2::element_blank(),
+      axis.title = ggplot2::element_text(size = 13, colour = "black", face = "bold"),
+      axis.line.y = ggplot2::element_line(colour = "black", linewidth = 0.7),
+      axis.line.x = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      legend.title = ggplot2::element_text(size = 12, face = "bold"),
+      legend.text = ggplot2::element_text(size = 11),
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5)
+    )
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, prepared$config), prepared, prepared$config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "categories", "signs", "labels"),
+      value = c("scatter/group-beeswarm", nrow(prepared$points), length(prepared$category_levels), paste(prepared$sign_levels, collapse = ","), nrow(prepared$labels))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/group-beeswarm", rows = nrow(prepared$points), categories = length(prepared$category_levels), signs = prepared$sign_levels, labels = nrow(prepared$labels)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

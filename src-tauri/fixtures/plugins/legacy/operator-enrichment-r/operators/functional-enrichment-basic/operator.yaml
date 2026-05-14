@@ -1,0 +1,123 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: omics_functional_enrichment_basic
+  version: 0.1.0
+  name: Basic Functional Enrichment
+  description: Run real ORA with clusterProfiler::enricher or ranked GSEA with fgsea against GMT or two-column TSV gene sets.
+  tags: [omics, enrichment, gene-sets, r, clusterProfiler, fgsea]
+interface:
+  inputs:
+    genes:
+      kind: file
+      required: true
+      description: Query gene list; first token/column of each non-comment line is used.
+    gene_sets:
+      kind: file
+      required: true
+      description: Gene sets in GMT or two-column TSV format. TSV columns should be term/gene or first/second columns.
+  params:
+    gene_sets_format:
+      kind: enum
+      enum: [auto, gmt, tsv]
+      default: auto
+    min_size:
+      kind: integer
+      default: 5
+      minimum: 1
+    max_size:
+      kind: integer
+      default: 500
+      minimum: 1
+    pvalue_threshold:
+      kind: number
+      default: 0.05
+      minimum: 0
+      maximum: 1
+    analysis_mode:
+      kind: enum
+      enum: [ora, gsea, auto]
+      default: ora
+      description: ORA uses clusterProfiler::enricher on an unranked query list; GSEA uses fgsea on a ranked gene table with a score column.
+    gene_column:
+      kind: string
+      default: auto
+      description: Gene column for ranked GSEA input. auto detects gene/symbol/id-style columns.
+    score_column:
+      kind: string
+      default: auto
+      description: Score column for ranked GSEA input. auto detects score/stat/log2FC-style columns.
+    display_top_n:
+      kind: integer
+      default: 20
+      minimum: 1
+      maximum: 100
+      description: Number of top terms shown in default display plots and top table.
+    plot_style:
+      kind: enum
+      enum: [auto, bar, dot]
+      default: auto
+      description: Default ORA display plot style. GSEA auto uses an enrichment curve for the top term.
+    gsea_weight:
+      kind: number
+      default: 1
+      minimum: 0
+      maximum: 2
+      description: Weight exponent passed to fgsea as gseaParam.
+  outputs:
+    results:
+      kind: file
+      glob: enrichment-results.tsv
+      required: true
+    top:
+      kind: file
+      glob: enrichment-top.tsv
+      required: true
+    plot:
+      kind: file
+      glob: enrichment-plot.svg
+      required: true
+    barplot:
+      kind: file
+      glob: enrichment-barplot.svg
+      required: true
+    dotplot:
+      kind: file
+      glob: enrichment-dotplot.svg
+      required: true
+    gsea_curve:
+      kind: file
+      glob: enrichment-gsea-curve.svg
+      required: false
+    summary:
+      kind: json
+      required: true
+runtime:
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 600s
+    exposed: true
+execution:
+  argv:
+    - Rscript
+    - ./scripts/functional_enrichment_basic.R
+    - ${inputs.genes}
+    - ${inputs.gene_sets}
+    - ${outdir}
+    - ${params.gene_sets_format}
+    - ${params.min_size}
+    - ${params.max_size}
+    - ${params.pvalue_threshold}
+    - ${params.analysis_mode}
+    - ${params.gene_column}
+    - ${params.score_column}
+    - ${params.display_top_n}
+    - ${params.plot_style}
+    - ${params.gsea_weight}

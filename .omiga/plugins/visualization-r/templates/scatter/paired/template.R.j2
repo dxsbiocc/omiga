@@ -1,0 +1,259 @@
+#!/usr/bin/env Rscript
+# Template: scatter/paired
+# Purpose: Paired scatter/line plot for matched samples across conditions.
+#
+# Migration note:
+#   This template migrates OmicsAgent scatter/paired from a private JSON
+#   ggplot2 + geom_signif DSL into direct, editable R/ggplot2 code. The
+#   original data.json has been converted to example.tsv. Paired significance
+#   brackets are computed with base R tests and drawn directly with ggplot2.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/paired
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default = TRUE) {
+  raw <- tolower(trimws(arg_or(index, if (isTRUE(default)) "true" else "false")))
+  if (raw %in% c("1", "true", "yes", "y", "on")) return(TRUE)
+  if (raw %in% c("0", "false", "no", "n", "off")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    condition = arg_or(3, "drug"),
+    value = arg_or(4, "auc"),
+    pair = arg_or(5, "cell_line")
+  ),
+  condition_order = parse_csv_arg(6, ""),
+  labels = list(
+    title = arg_or(7, "DepMap Cell Line"),
+    x = arg_or(8, ""),
+    y = arg_or(9, "AUC")
+  ),
+  style = list(
+    palette = parse_csv_arg(10, "#8F499C,#4185BE,#6DC067,#F6DB35,#F78822"),
+    line_color = arg_or(11, "#caccd1"),
+    line_width = parse_number_arg(12, 0.35),
+    line_alpha = parse_number_arg(13, 0.55),
+    point_size_outer = parse_number_arg(14, 4),
+    point_size_inner = parse_number_arg(15, 3),
+    point_alpha = parse_number_arg(16, 0.9),
+    point_stroke = parse_number_arg(17, 0.5),
+    point_spread = parse_number_arg(18, 0.16),
+    show_significance = parse_logical_arg(19, TRUE),
+    test = arg_or(20, "wilcox.test"),
+    alpha = parse_number_arg(21, 0.05),
+    max_brackets = parse_integer_arg(22, 3),
+    base_size = parse_number_arg(23, 12)
+  )
+)
+delimiter <- arg_or(24, "auto")
+width <- parse_number_arg(25, 4)
+height <- parse_number_arg(26, 4)
+dpi <- parse_integer_arg(27, 300)
+
+if (!config$style$test %in% c("wilcox.test", "t.test")) {
+  stop("test must be one of: wilcox.test, t.test", call. = FALSE)
+}
+
+first_seen <- function(x) unique(as.character(x))
+make_palette <- function(values, levels) {
+  if (!length(values)) values <- visualization_palette(length(levels))
+  if (length(values) < length(levels)) values <- rep(values, length.out = length(levels))
+  stats::setNames(values[seq_along(levels)], levels)
+}
+spread_sequence <- function(n, width) {
+  if (n <= 1 || width <= 0) return(rep(0, n))
+  raw <- seq_len(n) - (n + 1) / 2
+  raw / max(abs(raw)) * width
+}
+format_p_value <- function(p) {
+  if (is.na(p)) return("p = NA")
+  if (p < 0.001) return("p < 0.001")
+  sprintf("p = %.2g", p)
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$condition, config$columns$value, config$columns$pair), "scatter/paired input")
+  df <- ensure_numeric_columns(df, config$columns$value, "scatter/paired input")
+  df$.condition_raw <- as.character(df[[config$columns$condition]])
+  df$.pair <- as.character(df[[config$columns$pair]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.condition_raw) & nzchar(df$.pair), , drop = FALSE]
+  if (nrow(df) == 0) stop("scatter/paired input has no usable rows.", call. = FALSE)
+
+  conditions <- config$condition_order
+  if (length(conditions) == 0) conditions <- first_seen(df$.condition_raw)
+  conditions <- c(conditions[conditions %in% df$.condition_raw], setdiff(first_seen(df$.condition_raw), conditions))
+  if (length(conditions) < 2) stop("scatter/paired requires at least two conditions.", call. = FALSE)
+  df <- df[df$.condition_raw %in% conditions, , drop = FALSE]
+  df$.condition <- factor(df$.condition_raw, levels = conditions)
+
+  pair_levels <- first_seen(df$.pair)
+  pair_offsets <- stats::setNames(spread_sequence(length(pair_levels), config$style$point_spread), pair_levels)
+  df$.x <- as.numeric(df$.condition) + pair_offsets[df$.pair]
+  df$.pair_index <- match(df$.pair, pair_levels)
+  list(points = df, conditions = conditions, pair_levels = pair_levels)
+}
+
+line_data <- function(df) {
+  df <- df[order(df$.pair_index, as.numeric(df$.condition)), , drop = FALSE]
+  df
+}
+
+paired_p_value <- function(df, left_condition, right_condition, config) {
+  left <- df[df$.condition == left_condition, c(".pair", ".value"), drop = FALSE]
+  right <- df[df$.condition == right_condition, c(".pair", ".value"), drop = FALSE]
+  colnames(left) <- c(".pair", "x")
+  colnames(right) <- c(".pair", "y")
+  merged <- merge(left, right, by = ".pair", all = FALSE, sort = FALSE)
+  if (nrow(merged) < 2) return(NA_real_)
+  result <- try({
+    if (identical(config$style$test, "t.test")) {
+      stats::t.test(merged$x, merged$y, paired = TRUE)
+    } else {
+      stats::wilcox.test(merged$x, merged$y, paired = TRUE, exact = FALSE)
+    }
+  }, silent = TRUE)
+  if (inherits(result, "try-error") || is.null(result$p.value)) return(NA_real_)
+  as.numeric(result$p.value)
+}
+
+significance_data <- function(prepared, config) {
+  if (!isTRUE(config$style$show_significance)) return(data.frame())
+  conditions <- prepared$conditions
+  pairs <- utils::combn(conditions, 2, simplify = FALSE)
+  rows <- lapply(pairs, function(pair) {
+    p <- paired_p_value(prepared$points, pair[[1]], pair[[2]], config)
+    data.frame(group1 = pair[[1]], group2 = pair[[2]], p = p, stringsAsFactors = FALSE)
+  })
+  out <- do.call(rbind, rows)
+  out <- out[!is.na(out$p) & out$p < config$style$alpha, , drop = FALSE]
+  if (nrow(out) == 0) return(data.frame())
+  out <- utils::head(out[order(out$p), , drop = FALSE], config$style$max_brackets)
+  value_range <- diff(range(prepared$points$.value, na.rm = TRUE))
+  if (!is.finite(value_range) || value_range == 0) value_range <- 1
+  y_max <- max(prepared$points$.value, na.rm = TRUE)
+  out$x <- match(out$group1, conditions)
+  out$xend <- match(out$group2, conditions)
+  out$y <- y_max + value_range * (0.10 + (seq_len(nrow(out)) - 1) * 0.13)
+  out$tip_y <- out$y - value_range * 0.035
+  out$label <- vapply(out$p, format_p_value, character(1))
+  out
+}
+
+plot_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    plot.background = ggplot2::element_rect(fill = "white", colour = NA),
+    panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+    panel.grid.minor = ggplot2::element_blank(),
+    plot.title = ggplot2::element_text(size = 14, hjust = 0.5, face = "bold"),
+    legend.position = "none"
+  )
+}
+
+make_plot <- function(prepared, config) {
+  df <- prepared$points
+  conditions <- prepared$conditions
+  palette <- make_palette(config$style$palette, conditions)
+  lines <- line_data(df)
+  sig <- significance_data(prepared, config)
+  y_values <- c(df$.value, sig$y)
+  y_range <- range(y_values, na.rm = TRUE)
+  y_pad <- diff(range(df$.value, na.rm = TRUE)) * 0.08
+  if (!is.finite(y_pad) || y_pad == 0) y_pad <- 1
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .x, y = .value)) +
+    ggplot2::geom_line(
+      data = lines,
+      ggplot2::aes(group = .pair),
+      colour = config$style$line_color,
+      linewidth = config$style$line_width,
+      alpha = config$style$line_alpha,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(
+      size = config$style$point_size_outer,
+      colour = "white",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(
+      ggplot2::aes(fill = .condition),
+      size = config$style$point_size_inner,
+      shape = 21,
+      stroke = config$style$point_stroke,
+      alpha = config$style$point_alpha,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_x_continuous(breaks = seq_along(conditions), labels = conditions, limits = c(0.5, length(conditions) + 0.5), expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(limits = c(y_range[1] - y_pad, y_range[2] + y_pad), expand = ggplot2::expansion(mult = c(0.02, 0.02))) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    plot_theme(config)
+
+  if (nrow(sig) > 0) {
+    p <- p +
+      ggplot2::geom_segment(data = sig, ggplot2::aes(x = x, xend = x, y = tip_y, yend = y), inherit.aes = FALSE, linewidth = 0.35) +
+      ggplot2::geom_segment(data = sig, ggplot2::aes(x = x, xend = xend, y = y, yend = y), inherit.aes = FALSE, linewidth = 0.35) +
+      ggplot2::geom_segment(data = sig, ggplot2::aes(x = xend, xend = xend, y = y, yend = tip_y), inherit.aes = FALSE, linewidth = 0.35) +
+      ggplot2::geom_text(data = sig, ggplot2::aes(x = (x + xend) / 2, y = y, label = label), inherit.aes = FALSE, vjust = -0.3, size = config$style$base_size * 0.26)
+  }
+  p
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  complete_pairs <- length(unique(prepared$points$.pair))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "pairs", "conditions", "value_min", "value_max"),
+      value = c("scatter/paired", nrow(prepared$points), complete_pairs, length(prepared$conditions), min(prepared$points$.value), max(prepared$points$.value))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/paired", rows = nrow(prepared$points), pairs = complete_pairs, conditions = length(prepared$conditions), value_min = min(prepared$points$.value), value_max = max(prepared$points$.value)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

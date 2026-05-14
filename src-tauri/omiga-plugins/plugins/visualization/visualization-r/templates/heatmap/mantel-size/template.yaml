@@ -1,0 +1,169 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_heatmap_mantel_size
+  version: 0.1.0
+  name: Mantel Size
+  description: Mantel-style linked correlation heatmap with target-target squares and anchor-target links sized by absolute correlation and colored by p-value bins.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - heatmap
+    - correlation
+    - mantel
+    - linked-heatmap
+classification:
+  category: visualization/heatmap
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - heatmap
+    - correlation
+    - mantel
+    - linked-heatmap
+  stageInput:
+    - numeric_matrix
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Wide numeric CSV/TSV table with anchor columns plus target variables. See example.tsv converted from OmicsAgent heatmap/mantel_size data.json.
+  params:
+    anchor_columns:
+      kind: string
+      default: YAP1,WWTR1
+      description: Comma-separated anchor columns whose associations to target variables are drawn as curved links.
+    feature_column:
+      kind: string
+      default: ''
+      description: Optional row-label column excluded from numeric correlation. Leave empty if all columns are numeric.
+    method:
+      kind: enum
+      enum: [pearson, spearman, kendall]
+      default: pearson
+    triangle:
+      kind: enum
+      enum: [upper, lower, full]
+      default: upper
+    breaks:
+      kind: string
+      default: 0.5,0.6,0.7
+      description: Comma-separated absolute-correlation breakpoints for curved-link width bins.
+    pvalue_breaks:
+      kind: string
+      default: 0.001,0.01,0.05
+      description: Comma-separated p-value breakpoints for curved-link color bins.
+    title:
+      kind: string
+      default: Mantel Size
+    low_color:
+      kind: string
+      default: '#87c55f'
+    mid_color:
+      kind: string
+      default: '#ffffff'
+    high_color:
+      kind: string
+      default: '#fe88b1'
+    link_colors:
+      kind: string
+      default: '#1aafd0,#3be8b0,#6a67ce,#caccd1'
+      description: Comma-separated link colors for p-value bins.
+    base_size:
+      kind: number
+      default: 9
+    min_link_width:
+      kind: number
+      default: 0.2
+    max_link_width:
+      kind: number
+      default: 1.1
+    curve:
+      kind: number
+      default: 0.24
+    show_values:
+      kind: boolean
+      default: false
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 7
+    height:
+      kind: number
+      default: 5.5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - heatmap_mantel_size
+  - mantel_size
+  - linked_size_heatmap
+  - mantel_link_size
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.anchor_columns}
+    - ${params.feature_column}
+    - ${params.method}
+    - ${params.triangle}
+    - ${params.breaks}
+    - ${params.pvalue_breaks}
+    - ${params.title}
+    - ${params.low_color}
+    - ${params.mid_color}
+    - ${params.high_color}
+    - ${params.link_colors}
+    - ${params.base_size}
+    - ${params.min_link_width}
+    - ${params.max_link_width}
+    - ${params.curve}
+    - ${params.show_values}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

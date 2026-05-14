@@ -1,0 +1,190 @@
+#!/usr/bin/env Rscript
+# Template: bar/butterfly
+# Purpose: Two-sided butterfly/population-pyramid bar chart for comparing two
+#          groups across ordered categories.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/bar/butterfly
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   The source data.json is bundled as example.tsv.
+#
+# Input example:
+#   See example.tsv with Age/Sex/Count columns.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template bar/butterfly
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+parse_auto_number <- function(raw, fallback) {
+  if (is.null(raw) || !nzchar(raw) || tolower(raw) == "auto") return(fallback())
+  parsed <- suppressWarnings(as.numeric(raw))
+  if (is.na(parsed)) fallback() else parsed
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "Age"),
+    group = arg_or(4, "Sex"),
+    value = arg_or(5, "Count")
+  ),
+  labels = list(
+    title = arg_or(6, ""),
+    x = arg_or(7, ""),
+    y = arg_or(8, "")
+  ),
+  group_order = parse_csv_arg(9, "males,females"),
+  left_group_raw = arg_or(10, "auto"),
+  category_order = parse_csv_arg(11, "auto"),
+  style = list(
+    palette = parse_csv_arg(12, "#d7689d,#f3d337,#a0c443,#66b5ae,#5da4dc,#40769e"),
+    x_breaks = parse_csv_arg(13, "auto"),
+    x_limit_raw = arg_or(14, "auto"),
+    bar_width = parse_number_arg(15, 0.82),
+    bar_alpha = parse_number_arg(16, 0.95),
+    base_size = parse_number_arg(17, 12)
+  )
+)
+delimiter <- arg_or(18, "auto")
+width <- parse_number_arg(19, 8)
+height <- parse_number_arg(20, 6)
+dpi <- parse_integer_arg(21, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- c("#d7689d", "#f3d337", "#a0c443", "#66b5ae", "#5da4dc", "#40769e")
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+ordered_values <- function(values, preferred_order) {
+  values <- unique(as.character(values))
+  if (length(preferred_order) == 0) return(values)
+  ordered <- preferred_order[preferred_order %in% values]
+  c(ordered, setdiff(values, ordered))
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$category, config$columns$group, config$columns$value), "bar/butterfly input")
+  df <- ensure_numeric_columns(df, config$columns$value, "bar/butterfly input")
+  df$.category_raw <- as.character(df[[config$columns$category]])
+  df$.group_raw <- as.character(df[[config$columns$group]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.category_raw) & nzchar(df$.group_raw), , drop = FALSE]
+
+  groups <- ordered_values(df$.group_raw, config$group_order)
+  if (length(groups) != 2) {
+    stop("bar/butterfly requires exactly two groups in the group column.", call. = FALSE)
+  }
+  left_group <- if (tolower(config$left_group_raw) == "auto") groups[[1]] else config$left_group_raw
+  if (!left_group %in% groups) {
+    stop(sprintf("left_group `%s` is not present in the group column.", left_group), call. = FALSE)
+  }
+  categories <- ordered_values(df$.category_raw, config$category_order)
+  df$.group <- factor(df$.group_raw, levels = groups)
+  df$.category <- factor(df$.category_raw, levels = categories)
+  df$.signed_value <- ifelse(df$.group_raw == left_group, -abs(df$.value), abs(df$.value))
+  df$.side <- ifelse(df$.group_raw == left_group, "left", "right")
+  df[!is.na(df$.group) & !is.na(df$.category), , drop = FALSE]
+}
+
+axis_breaks <- function(df, config) {
+  limit <- parse_auto_number(config$style$x_limit_raw, function() {
+    max_abs <- max(abs(df$.signed_value), na.rm = TRUE)
+    pretty(c(0, max_abs), n = 4)[[length(pretty(c(0, max_abs), n = 4))]]
+  })
+  if (!is.finite(limit) || limit <= 0) limit <- max(abs(df$.signed_value), na.rm = TRUE)
+  parsed <- suppressWarnings(as.numeric(config$style$x_breaks))
+  parsed <- parsed[is.finite(parsed)]
+  if (length(parsed) == 0) parsed <- pretty(c(0, limit), n = 4)
+  parsed <- unique(abs(parsed))
+  parsed <- parsed[parsed <= limit]
+  if (!0 %in% parsed) parsed <- c(0, parsed)
+  breaks <- sort(unique(c(-rev(parsed[parsed > 0]), parsed)))
+  list(limit = limit, breaks = breaks, labels = abs(breaks))
+}
+
+butterfly_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    axis.ticks.y = ggplot2::element_blank(),
+    axis.line.y = ggplot2::element_blank(),
+    axis.title.y = ggplot2::element_blank(),
+    axis.text.y = ggplot2::element_text(size = 12, hjust = 0.5),
+    legend.position = "top",
+    legend.title = ggplot2::element_blank(),
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    plot.title = ggplot2::element_text(hjust = 0.5, face = "bold")
+  )
+}
+
+make_plot <- function(df, config) {
+  groups <- levels(df$.group)
+  palette <- extend_palette(groups, config$style$palette)
+  axis <- axis_breaks(df, config)
+  ggplot2::ggplot(df, ggplot2::aes(x = .signed_value, y = .category, fill = .group)) +
+    ggplot2::geom_col(width = config$style$bar_width, alpha = config$style$bar_alpha, show.legend = TRUE) +
+    ggplot2::geom_vline(xintercept = 0, color = "grey35", linewidth = 0.35) +
+    ggplot2::scale_fill_manual(values = palette) +
+    ggplot2::scale_x_continuous(limits = c(-axis$limit, axis$limit), breaks = axis$breaks, labels = axis$labels, expand = c(0.02, 0.02)) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y, fill = config$columns$group) +
+    butterfly_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  groups <- levels(plot_df$.group)
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "groups", "categories", "max_value"),
+      value = c("bar/butterfly", nrow(plot_df), paste(groups, collapse = ","), length(levels(plot_df$.category)), max(plot_df$.value, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/butterfly", rows = nrow(plot_df), groups = paste(groups, collapse = ","), categories = length(levels(plot_df$.category)), max_value = max(plot_df$.value, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

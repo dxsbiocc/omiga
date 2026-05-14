@@ -1,0 +1,125 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_line_survival
+  version: 0.1.0
+  name: Survival Curve Plot
+  description: Precomputed Kaplan-Meier style survival curve plot with optional confidence bands and censor marks.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - line
+    - survival
+classification:
+  category: visualization/line
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - line
+    - survival
+    - table
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Precomputed survival table. See this template's example.tsv for the expected shape.
+  params:
+    time_column:
+      kind: string
+      default: time
+    survival_column:
+      kind: string
+      default: survival
+    group_column:
+      kind: string
+      default: group
+    lower_column:
+      kind: string
+      default: lower
+      description: Optional lower confidence band column. Use an empty string to disable bands.
+    upper_column:
+      kind: string
+      default: upper
+      description: Optional upper confidence band column. Use an empty string to disable bands.
+    censor_column:
+      kind: string
+      default: censor
+      description: Optional censor marker column where values > 0 are drawn as marks.
+    title:
+      kind: string
+      default: Survival curve plot
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 7
+    height:
+      kind: number
+      default: 5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - survival
+  - survival_curve
+  - kaplan_meier
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.time_column}
+    - ${params.survival_column}
+    - ${params.group_column}
+    - ${params.lower_column}
+    - ${params.upper_column}
+    - ${params.censor_column}
+    - ${params.title}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

@@ -87,8 +87,10 @@ import {
 import {
   useUiStore,
   useChatComposerStore,
+  usePermissionStore,
   usePluginStore,
   type PermissionMode,
+  type ComputerUseMode,
   type SandboxBackend,
   type LocalVenvType,
 } from "../../state";
@@ -108,6 +110,10 @@ import {
   RSYNC_INSTALL_HELP_URL,
   RSYNC_SSH_WARN_STORAGE_KEY,
 } from "../../lib/rsyncSsh";
+import {
+  getLocalStorageItem,
+  setLocalStorageItem,
+} from "../../utils/browserStorage";
 import {
   buildComposerMentionChildPath,
   filterComposerMentionRows,
@@ -148,6 +154,14 @@ const SANDBOX_LABEL: Record<SandboxBackend, string> = {
 
 /** 与 SessionList「Language」二级菜单一致：离开一级行后再关闭子菜单的延迟（ms） */
 const ENV_SUBMENU_PARENT_LEAVE_MS = 200;
+export const COMPOSER_PROMPT_OVERLAY_POSITION = "absolute";
+export const COMPOSER_PROMPT_OVERLAY_BOTTOM = "100%";
+export const COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT = "min(42vh, 420px)";
+export const COMPOSER_PROMPT_OVERLAY_Z_INDEX = 18;
+export const COMPOSER_INPUT_JOINED_Z_INDEX =
+  COMPOSER_PROMPT_OVERLAY_Z_INDEX;
+export const COMPOSER_PROMPT_JOINED_BORDER_RADIUS = "24px 24px 0 0";
+export const COMPOSER_INPUT_JOINED_BORDER_RADIUS = "0 0 24px 24px";
 
 /** React StrictMode 下 effect 会双跑，避免同页两次 `invoke` + 弹窗 */
 let rsyncAvailabilityCheckStarted = false;
@@ -243,6 +257,27 @@ const PERMISSION_META: Record<PermissionMode, { label: string; hint: string }> =
       hint: "尽量减少权限提示（谨慎使用）。",
     },
   };
+
+const COMPUTER_USE_META: Record<
+  ComputerUseMode,
+  { label: string; menuLabel: string; hint: string }
+> = {
+  off: {
+    label: "Computer Off",
+    menuLabel: "关闭",
+    hint: "不允许 AI 观察或操作本机应用。",
+  },
+  task: {
+    label: "Computer Task",
+    menuLabel: "仅下一条消息",
+    hint: "仅下一条消息可使用本机截图与键鼠操作；发送后自动关闭。",
+  },
+  session: {
+    label: "Computer Session",
+    menuLabel: "当前会话",
+    hint: "当前会话后续消息持续允许 Computer Use，直到手动关闭。",
+  },
+};
 
 /** 解析 hex 相对亮度（0–1），非 hex 时返回 0.5 避免误判 */
 function hexRelativeLuminance(color: string): number {
@@ -733,6 +768,8 @@ export const ChatComposer = memo(function ChatComposer({
   const {
     permissionMode,
     setPermissionMode,
+    computerUseMode,
+    setComputerUseMode,
     composerAgentType,
     setComposerAgentType,
     composerAttachedPaths,
@@ -757,13 +794,21 @@ export const ChatComposer = memo(function ChatComposer({
   } = useChatComposerStore();
   const pluginMarketplaces = usePluginStore((s) => s.marketplaces);
   const loadPlugins = usePluginStore((s) => s.loadPlugins);
+  const hasPendingPermissionPrompt = usePermissionStore(
+    (s) => s.pendingRequest !== null,
+  );
 
   const permissionAccent = permissionModeAccent(theme, permissionMode);
+  const computerUseAccent =
+    computerUseMode === "off" ? mut : theme.palette.info.main;
 
   const [plusAnchor, setPlusAnchor] = useState<null | HTMLElement>(null);
   const [permissionAnchor, setPermissionAnchor] = useState<null | HTMLElement>(
     null,
   );
+  const [computerUseAnchor, setComputerUseAnchor] =
+    useState<null | HTMLElement>(null);
+  const [computerUseStopPending, setComputerUseStopPending] = useState(false);
   const [envAnchor, setEnvAnchor] = useState<null | HTMLElement>(null);
   const [sandboxMenuAnchor, setSandboxMenuAnchor] =
     useState<null | HTMLElement>(null);
@@ -777,6 +822,30 @@ export const ChatComposer = memo(function ChatComposer({
     { kind: string; label: string; name: string }[]
   >([]);
   const [localVenvsLoading, setLocalVenvsLoading] = useState(false);
+
+  const openComputerUseSettings = useCallback(() => {
+    setComputerUseAnchor(null);
+    setSettingsTabIndex(15);
+    setSettingsOpen(true);
+    setRightPanelMode("settings");
+  }, [setRightPanelMode, setSettingsOpen, setSettingsTabIndex]);
+
+  const stopComputerUseRun = useCallback(async () => {
+    if (!sessionId) return;
+    setComputerUseStopPending(true);
+    try {
+      await invoke("computer_use_stop_active_run", {
+        sessionId,
+        projectRoot: workspacePath || ".",
+      });
+      setComputerUseMode("off");
+      setComputerUseAnchor(null);
+    } catch (error) {
+      console.warn("Failed to stop Computer Use run", error);
+    } finally {
+      setComputerUseStopPending(false);
+    }
+  }, [sessionId, setComputerUseMode, workspacePath]);
 
   // 沙箱 / SSH 二级菜单：与 SessionList「Language」相同（定时器 + 嵌套 Menu + pointerEvents），避免 Popover 与一级 Menu 模态层事件死循环
   const sandboxSubmenuLeaveTimerRef = useRef<ReturnType<
@@ -935,10 +1004,7 @@ export const ChatComposer = memo(function ChatComposer({
       try {
         const ok = await invoke<boolean>("is_rsync_available");
         if (cancelled || ok) return;
-        if (
-          typeof localStorage !== "undefined" &&
-          localStorage.getItem(RSYNC_SSH_WARN_STORAGE_KEY) === "1"
-        ) {
+        if (getLocalStorageItem(RSYNC_SSH_WARN_STORAGE_KEY) === "1") {
           return;
         }
         const openDocs = await confirm(
@@ -950,9 +1016,7 @@ export const ChatComposer = memo(function ChatComposer({
             cancelLabel: "取消",
           },
         );
-        if (typeof localStorage !== "undefined") {
-          localStorage.setItem(RSYNC_SSH_WARN_STORAGE_KEY, "1");
-        }
+        setLocalStorageItem(RSYNC_SSH_WARN_STORAGE_KEY, "1");
         if (!cancelled && openDocs) {
           await openUrl(RSYNC_INSTALL_HELP_URL);
         }
@@ -1822,6 +1886,8 @@ export const ChatComposer = memo(function ChatComposer({
       : shortRepoLabel(workspacePath);
 
   const askUserBlocksInput = Boolean(askUserQuestion);
+  const hasFloatingComposerPrompt =
+    askUserBlocksInput || hasPendingPermissionPrompt;
 
   const placeholder = askUserBlocksInput
     ? "请先完成上方的选择题…"
@@ -1939,6 +2005,7 @@ export const ChatComposer = memo(function ChatComposer({
             backdropFilter: "blur(10px)",
             WebkitBackdropFilter: "blur(10px)",
             border: `1px solid ${pen.borderSubtle}`,
+            borderLeft: `3px solid ${alpha(accent, isDark ? 0.72 : 0.82)}`,
             boxShadow: `
               0 1px 2px ${edge(0.06)},
               0 6px 20px ${alpha(accent, 0.07)},
@@ -1950,20 +2017,7 @@ export const ChatComposer = memo(function ChatComposer({
             },
           }}
         >
-          {/* 主色强调条：队列锚点，与 File Manager 行选中态同系 */}
-          <Box
-            aria-hidden
-            sx={{
-              position: "absolute",
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 3,
-              background: `linear-gradient(180deg, ${alpha(accent, 0.95)} 0%, ${alpha(accent, 0.35)} 100%)`,
-              borderRadius: "0 4px 4px 0",
-            }}
-          />
-          <Stack sx={{ pl: 1.25 }}>
+          <Stack>
             <Stack
               direction="row"
               alignItems="center"
@@ -2283,48 +2337,85 @@ export const ChatComposer = memo(function ChatComposer({
           })}
         </Stack>
       ) : null}
-      <Paper
-        elevation={0}
-        sx={{
-          borderRadius: 3,
-          overflow: "hidden",
-          position: "relative",
-          bgcolor: composerBg,
-          backdropFilter: "blur(12px)",
-          WebkitBackdropFilter: "blur(12px)",
-          border: `1px solid ${edge(0.12)}`,
-          boxShadow: `
-            0 1px 2px ${edge(0.06)},
-            0 8px 24px ${alpha(accent, 0.08)},
-            inset 0 1px 0 ${edge(0.08)}
-          `,
-          transition:
-            "box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease",
-          "@media (prefers-reduced-motion: reduce)": {
-            transition: "none",
-          },
-          "&:focus-within": {
-            borderColor: alpha(accent, 0.45),
-            boxShadow: `
-              0 1px 2px ${edge(0.08)},
-              0 0 0 3px ${alpha(accent, 0.18)},
-              0 12px 32px ${alpha(accent, 0.12)}
-            `,
-          },
-        }}
-      >
-        {askUserQuestion ? (
-          <AskUserQuestionWizard
-            variant="composer"
-            resetKey={askUserQuestion.resetKey}
-            questions={askUserQuestion.questions}
-            selections={askUserQuestion.selections}
-            onSelectionsChange={askUserQuestion.onSelectionsChange}
-            onSubmit={askUserQuestion.onSubmit}
-          />
+      <Box sx={{ position: "relative", overflow: "visible" }}>
+        {hasFloatingComposerPrompt ? (
+          <Paper
+            elevation={0}
+            aria-live="polite"
+            sx={{
+              position: COMPOSER_PROMPT_OVERLAY_POSITION,
+              left: 0,
+              right: 0,
+              bottom: COMPOSER_PROMPT_OVERLAY_BOTTOM,
+              zIndex: COMPOSER_PROMPT_OVERLAY_Z_INDEX,
+              borderRadius: COMPOSER_PROMPT_JOINED_BORDER_RADIUS,
+              overflow: "hidden",
+              bgcolor: alpha(paper, isDark ? 0.98 : 0.99),
+              backdropFilter: "blur(14px)",
+              WebkitBackdropFilter: "blur(14px)",
+              border: `1px solid ${alpha(accent, isDark ? 0.26 : 0.18)}`,
+              borderBottom: 0,
+              boxShadow: `
+                0 -8px 28px ${alpha(theme.palette.common.black, isDark ? 0.3 : 0.12)},
+                0 0 0 1px ${alpha(accent, isDark ? 0.1 : 0.06)}
+              `,
+            }}
+          >
+            <Box
+              sx={{
+                maxHeight: COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT,
+                overflowY: "auto",
+                overscrollBehavior: "contain",
+              }}
+            >
+              {askUserQuestion ? (
+                <AskUserQuestionWizard
+                  variant="composer"
+                  resetKey={askUserQuestion.resetKey}
+                  questions={askUserQuestion.questions}
+                  selections={askUserQuestion.selections}
+                  onSelectionsChange={askUserQuestion.onSelectionsChange}
+                  onSubmit={askUserQuestion.onSubmit}
+                />
+              ) : null}
+              <PermissionPromptBar />
+            </Box>
+          </Paper>
         ) : null}
-        <PermissionPromptBar />
-        <Box
+        <Paper
+          elevation={0}
+          sx={{
+            borderRadius: hasFloatingComposerPrompt
+              ? COMPOSER_INPUT_JOINED_BORDER_RADIUS
+              : 3,
+            overflow: "hidden",
+            position: "relative",
+            zIndex: COMPOSER_INPUT_JOINED_Z_INDEX,
+            bgcolor: composerBg,
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+            border: `1px solid ${edge(0.12)}`,
+            boxShadow: `
+              0 1px 2px ${edge(0.06)},
+              0 8px 24px ${alpha(accent, 0.08)},
+              inset 0 1px 0 ${edge(0.08)}
+            `,
+            transition:
+              "box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease",
+            "@media (prefers-reduced-motion: reduce)": {
+              transition: "none",
+            },
+            "&:focus-within": {
+              borderColor: alpha(accent, 0.45),
+              boxShadow: `
+                0 1px 2px ${edge(0.08)},
+                0 0 0 3px ${alpha(accent, 0.18)},
+                0 12px 32px ${alpha(accent, 0.12)}
+              `,
+            },
+          }}
+        >
+          <Box
           ref={composerInputAnchorRef}
           onMouseDown={(event) => {
             if (event.target !== event.currentTarget || inputDisabled) return;
@@ -3437,6 +3528,195 @@ export const ChatComposer = memo(function ChatComposer({
             })}
           </Menu>
 
+          <Button
+            size="small"
+            variant="text"
+            color="inherit"
+            onClick={(e) => setComputerUseAnchor(e.currentTarget)}
+            startIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: computerUseAccent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <Laptop size={17} strokeWidth={2} color={computerUseAccent} />
+              </Box>
+            }
+            endIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: computerUseAccent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <ChevronDown
+                  size={18}
+                  strokeWidth={2}
+                  color={computerUseAccent}
+                />
+              </Box>
+            }
+            sx={{
+              textTransform: "none",
+              color: computerUseAccent,
+              ...composerLabelText,
+              borderRadius: 2.5,
+              px: 1,
+              minHeight: "var(--composer-toolbar-h)",
+              height: "var(--composer-toolbar-h)",
+              maxWidth: 220,
+              border: "1px solid transparent",
+              bgcolor:
+                computerUseMode === "off"
+                  ? "transparent"
+                  : alpha(computerUseAccent, isDark ? 0.14 : 0.1),
+              boxShadow: "none",
+              transition:
+                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease",
+              "@media (prefers-reduced-motion: reduce)": {
+                transition: "none",
+              },
+              "&:hover": {
+                bgcolor: alpha(computerUseAccent, 0.12),
+                borderColor: alpha(computerUseAccent, 0.28),
+                boxShadow: "none",
+              },
+            }}
+          >
+            <Typography
+              variant="body2"
+              noWrap
+              component="span"
+              sx={{ ...composerLabelText, color: "inherit" }}
+            >
+              {COMPUTER_USE_META[computerUseMode].label}
+            </Typography>
+          </Button>
+          <Menu
+            anchorEl={computerUseAnchor}
+            open={Boolean(computerUseAnchor)}
+            onClose={() => setComputerUseAnchor(null)}
+            slotProps={{ paper: { sx: { minWidth: 300, borderRadius: 2 } } }}
+          >
+            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
+              <Typography
+                variant="subtitle2"
+                component="span"
+                sx={{
+                  display: "inline-block",
+                  cursor: "default",
+                  ...composerLabelText,
+                  color: ink,
+                }}
+              >
+                Computer Use
+              </Typography>
+              <Typography
+                variant="caption"
+                component="div"
+                sx={{ mt: 0.4, color: mut, lineHeight: 1.4 }}
+              >
+                显式开启后，AI 才能在本机观察界面并通过受控工具操作应用。
+              </Typography>
+            </Box>
+            {(Object.keys(COMPUTER_USE_META) as ComputerUseMode[]).map(
+              (key) => {
+                const rowAccent =
+                  key === "off" ? mut : theme.palette.info.main;
+                return (
+                  <Tooltip
+                    key={key}
+                    title={COMPUTER_USE_META[key].hint}
+                    placement="left"
+                    enterDelay={200}
+                  >
+                    <MenuItem
+                      selected={computerUseMode === key}
+                      onClick={() => {
+                        setComputerUseMode(key);
+                        setComputerUseAnchor(null);
+                      }}
+                      sx={{
+                        "&.Mui-selected": {
+                          bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
+                          "&:hover": {
+                            bgcolor: alpha(rowAccent, isDark ? 0.26 : 0.16),
+                          },
+                        },
+                      }}
+                    >
+                      <ListItemIcon
+                        sx={{
+                          minWidth: 40,
+                          lineHeight: 0,
+                          color: rowAccent,
+                          "& svg": { display: "block" },
+                        }}
+                      >
+                        <Laptop size={20} strokeWidth={2} color={rowAccent} />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={COMPUTER_USE_META[key].menuLabel}
+                        secondary={COMPUTER_USE_META[key].hint}
+                        primaryTypographyProps={{
+                          sx: { ...composerLabelText, color: rowAccent },
+                        }}
+                        secondaryTypographyProps={{
+                          sx: { color: mut, fontSize: 12 },
+                        }}
+                      />
+                    </MenuItem>
+                  </Tooltip>
+                );
+              },
+            )}
+            <Divider />
+            <MenuItem onClick={openComputerUseSettings}>
+              <ListItemIcon sx={{ minWidth: 40, color: mut }}>
+                <Settings size={20} strokeWidth={2} />
+              </ListItemIcon>
+              <ListItemText
+                primary="设置与运行记录"
+                secondary="配置 allowed apps、审计日志和插件状态。"
+                primaryTypographyProps={{
+                  sx: { ...composerLabelText, color: ink },
+                }}
+                secondaryTypographyProps={{
+                  sx: { color: mut, fontSize: 12 },
+                }}
+              />
+            </MenuItem>
+            <MenuItem
+              disabled={!sessionId || computerUseStopPending}
+              onClick={() => void stopComputerUseRun()}
+            >
+              <ListItemIcon sx={{ minWidth: 40, color: errorMain }}>
+                <Square fontSize="small" />
+              </ListItemIcon>
+              <ListItemText
+                primary={
+                  computerUseStopPending ? "正在停止..." : "停止当前 Computer Use run"
+                }
+                secondary="立即在 Omiga core 标记停止，阻断后续本机动作。"
+                primaryTypographyProps={{
+                  sx: { ...composerLabelText, color: errorMain },
+                }}
+                secondaryTypographyProps={{
+                  sx: { color: mut, fontSize: 12 },
+                }}
+              />
+            </MenuItem>
+          </Menu>
+
           <Stack
             direction="row"
             alignItems="center"
@@ -3537,7 +3817,8 @@ export const ChatComposer = memo(function ChatComposer({
             )}
           </Stack>
         </Stack>
-      </Paper>
+        </Paper>
+      </Box>
 
       {/* Bottom: left = path + branch · right = worktree + remote/local */}
       <Stack

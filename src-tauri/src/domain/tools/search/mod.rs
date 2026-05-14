@@ -38,8 +38,8 @@ impl BuiltinDataSearchResult {
 
 pub const DESCRIPTION: &str = r#"Search across typed data-source categories and return formatted results. Web/literature/dataset/social return SerpAPI-style JSON; knowledge returns recall excerpts.
 
-- `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge`, `web`, `social`.
-- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Dataset sources: `auto`, `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`, `gtex`, `ncbi_datasets`, `arrayexpress`, `biosample`. Knowledge sources/scopes: `all`, `wiki`, `implicit`, `long_term`, `permanent`, `sources`. Social sources: `wechat` (opt-in).
+- `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge`, `web`, `social`; installed plugins can add more categories.
+- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Dataset sources: `auto`, `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`, `gtex`, `ncbi_datasets`, `arrayexpress`, `biosample`. Knowledge sources/scopes: `all`, `wiki`, `implicit`, `long_term`, `permanent`, `sources`. Social sources: `wechat` (opt-in). Installed plugins may expose additional sources.
 - `subcategory` is optional. Prefer `query(category="dataset", operation="search", …)` for structured dataset/database lookup; this dataset path remains as a compatibility search wrapper.
 - `source=auto` uses Settings → Search priority for web, PubMed for literature, and enabled dataset sources for dataset.
 - Results are returned as formatted JSON with a top-level `results` array and SerpAPI-style fields (`position`, `title`, `name`, `link`, `url`, `displayed_link`, `favicon`, `snippet`, `metadata`).
@@ -345,11 +345,11 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "category": {
                     "type": "string",
-                    "description": "Source category. Supports literature, dataset (alias: data), knowledge, web, social."
+                    "description": "Source category. Supports literature, dataset (alias: data), knowledge, web, social, and categories exposed by installed plugins."
                 },
                 "source": {
                     "type": "string",
-                    "description": "Source within the category. Defaults to auto. Examples: google, ddg, bing, tavily, pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar (opt-in), geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, ncbi_datasets, arrayexpress, biosample, wiki, implicit, long_term, sources, wechat (opt-in)."
+                    "description": "Source within the category. Defaults to auto. Examples: google, ddg, bing, tavily, pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar (opt-in), geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, ncbi_datasets, arrayexpress, biosample, wiki, implicit, long_term, sources, wechat (opt-in), plus sources exposed by installed plugins."
                 },
                 "subcategory": {
                     "type": "string",

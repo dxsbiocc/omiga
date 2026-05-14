@@ -1,0 +1,19 @@
+apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: r-base
+  version: 0.1.0
+  name: R visualization environment
+  description: System R runtime for visualization-r ggplot2 templates.
+  tags: [r, visualization, ggplot2]
+runtime:
+  type: system
+  command: Rscript
+requirements:
+  system: [Rscript]
+  rPackages: [ggplot2]
+  notes:
+    - Optional SVG export may require the svglite package if a template enables SVG output.
+diagnostics:
+  checkCommand: [Rscript, --version]
+  installHint: Install R/Rscript and ggplot2 before running visualization-r templates.

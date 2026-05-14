@@ -1,0 +1,160 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_bar_waffle
+  version: 0.1.0
+  name: Waffle Bar Plot
+  description: Faceted waffle chart for categorical counts or percentages, migrated from OmicsAgent bar/waffle.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - bar
+    - waffle
+    - proportion
+    - table
+classification:
+  category: visualization/bar
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - bar
+    - waffle
+    - proportion
+    - faceted
+    - table
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Input CSV/TSV table with category, count, and optional facet columns. See example.tsv for Symbol/Cancer_type/Gender/Count columns.
+  params:
+    fill_column:
+      kind: string
+      default: Symbol
+    count_column:
+      kind: string
+      default: Count
+    row_facet_column:
+      kind: string
+      default: Gender
+      description: Optional facet-row column. Use empty for a single row.
+    col_facet_column:
+      kind: string
+      default: Cancer_type
+      description: Optional facet-column column. Use empty for a single column.
+    title:
+      kind: string
+      default: Gene mutation in Pancancer
+    fill_label:
+      kind: string
+      default: Genes
+    palette:
+      kind: string
+      default: "#009392,#39b185,#9ccb86,#e9e29c,#eeb479,#e88471,#cf597e"
+      description: Comma-separated fill colors; interpolated when there are more categories.
+    n_rows:
+      kind: integer
+      default: 3
+      description: Number of tile rows per facet when flip=true.
+    unit_size:
+      kind: number
+      default: 1
+      description: Count represented by one waffle tile.
+    tile_color:
+      kind: string
+      default: white
+    tile_linewidth:
+      kind: number
+      default: 0.18
+    strip_fill:
+      kind: string
+      default: "#ffc6c4"
+    base_size:
+      kind: number
+      default: 12
+    flip:
+      kind: boolean
+      default: true
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 6
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - waffle
+  - waffle_bar
+  - bar_waffle
+  - faceted_waffle
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.fill_column}
+    - ${params.count_column}
+    - ${params.row_facet_column}
+    - ${params.col_facet_column}
+    - ${params.title}
+    - ${params.fill_label}
+    - ${params.palette}
+    - ${params.n_rows}
+    - ${params.unit_size}
+    - ${params.tile_color}
+    - ${params.tile_linewidth}
+    - ${params.strip_fill}
+    - ${params.base_size}
+    - ${params.flip}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

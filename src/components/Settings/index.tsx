@@ -64,6 +64,11 @@ import {
 } from "./searchMethodOrder";
 import { AgentScheduleLauncher } from "../AgentSchedule/AgentScheduleLauncher";
 import { AgentRolesPanel } from "../AgentRoles/AgentRolesPanel";
+import {
+  getLocalStorageItem,
+  removeLocalStorageItem,
+  setLocalStorageItem,
+} from "../../utils/browserStorage";
 
 interface SettingsProps {
   open: boolean;
@@ -632,6 +637,38 @@ const KNOWLEDGE_DATABASE_OPTIONS: QuerySourceOption[] = [
     available: true,
     badge: "无需 API",
   },
+  {
+    id: "reactome",
+    label: "Reactome",
+    helper: "通路、反应网络与富集分析",
+    defaultEnabled: false,
+    available: true,
+    badge: "无需 API",
+  },
+  {
+    id: "gene_ontology",
+    label: "Gene Ontology",
+    helper: "GO biological process / molecular function / cellular component",
+    defaultEnabled: false,
+    available: true,
+    badge: "无需 API",
+  },
+  {
+    id: "msigdb",
+    label: "MSigDB",
+    helper: "GSEA gene-set collections and signatures",
+    defaultEnabled: false,
+    available: true,
+    badge: "无需 API",
+  },
+  {
+    id: "kegg",
+    label: "KEGG",
+    helper: "KEGG pathways, modules, compounds, and ID mapping",
+    defaultEnabled: false,
+    available: true,
+    badge: "学术使用",
+  },
 ];
 
 const DEFAULT_QUERY_DATASET_TYPES = DATASET_TYPE_OPTIONS.filter(
@@ -1118,6 +1155,8 @@ export function Settings({
   const setColorMode = useColorModeStore((s) => s.setColorMode);
   const accentPreset = useColorModeStore((s) => s.accentPreset ?? "asana");
   const setAccentPreset = useColorModeStore((s) => s.setAccentPreset);
+  const appSkin = useColorModeStore((s) => s.appSkin);
+  const setAppSkin = useColorModeStore((s) => s.setAppSkin);
 
   // Provider selection
   const [_provider, setProvider] = useState("anthropic");
@@ -1333,7 +1372,7 @@ export function Settings({
   const loadSavedConfig = async () => {
     try {
       // Try to load from localStorage first for fast response
-      const stored = localStorage.getItem("omiga_llm_config");
+      const stored = getLocalStorageItem("omiga_llm_config");
       if (stored) {
         const config: LlmConfig = JSON.parse(stored);
         setProvider(config.provider);
@@ -1373,7 +1412,7 @@ export function Settings({
         knowledgeDatabaseOptionsForLoad,
       );
 
-      const rawWebKeys = localStorage.getItem(WEB_SEARCH_KEYS_STORAGE);
+      const rawWebKeys = getLocalStorageItem(WEB_SEARCH_KEYS_STORAGE);
       if (rawWebKeys) {
         try {
           const j = JSON.parse(rawWebKeys) as Record<string, unknown>;
@@ -1440,8 +1479,8 @@ export function Settings({
         }
       } else {
         const tavilyStored =
-          localStorage.getItem("omiga_tavily_search_api_key") ??
-          localStorage.getItem("omiga_brave_search_api_key");
+          getLocalStorageItem("omiga_tavily_search_api_key") ??
+          getLocalStorageItem("omiga_brave_search_api_key");
         if (tavilyStored !== null) {
           setTavilyApiKey(tavilyStored);
         }
@@ -1580,8 +1619,8 @@ export function Settings({
         }
       } else {
         const legacy = (
-          localStorage.getItem("omiga_tavily_search_api_key") ??
-          localStorage.getItem("omiga_brave_search_api_key") ??
+          getLocalStorageItem("omiga_tavily_search_api_key") ??
+          getLocalStorageItem("omiga_brave_search_api_key") ??
           ""
         ).trim();
         wsPayload = {
@@ -1834,7 +1873,7 @@ export function Settings({
         webSearchEngine: primaryPublicSearchEngine(webSearchMethods, webSearchEngine),
         webSearchMethods,
       });
-      localStorage.setItem(
+      setLocalStorageItem(
         WEB_SEARCH_KEYS_STORAGE,
         JSON.stringify({
           ...ws,
@@ -1846,8 +1885,8 @@ export function Settings({
           webSearchMethods,
         }),
       );
-      localStorage.removeItem("omiga_tavily_search_api_key");
-      localStorage.removeItem("omiga_brave_search_api_key");
+      removeLocalStorageItem("omiga_tavily_search_api_key");
+      removeLocalStorageItem("omiga_brave_search_api_key");
       setMessage({
         type: "success",
         text: "Search settings saved (method priority, proxy, and provider keys)",
@@ -3433,6 +3472,8 @@ export function Settings({
                 onColorModeChange={setColorMode}
                 accentPreset={accentPreset}
                 onAccentPresetChange={setAccentPreset}
+                appSkin={appSkin}
+                onAppSkinChange={setAppSkin}
               />
             )}
 

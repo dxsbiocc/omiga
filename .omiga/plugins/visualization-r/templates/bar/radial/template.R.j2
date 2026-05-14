@@ -1,0 +1,186 @@
+#!/usr/bin/env Rscript
+# Template: bar/radial
+# Purpose: Radial/polar bar chart for ordered categorical counts.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/bar/radial
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   The bundled example.tsv is converted from the source data.json.
+#
+# Input example:
+#   See example.tsv with type/n columns.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template bar/radial
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, if (default) "true" else "false"))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "type"),
+    value = arg_or(4, "n")
+  ),
+  labels = list(
+    title = arg_or(5, ""),
+    x = arg_or(6, ""),
+    y = arg_or(7, "")
+  ),
+  axis = list(
+    inner_radius = parse_number_arg(8, -500),
+    max_value = arg_or(9, "auto"),
+    ring_breaks = parse_csv_arg(10, "0,500,1000")
+  ),
+  style = list(
+    palette = parse_csv_arg(11, "#d7689d,#f3d337,#a0c443,#66b5ae,#5da4dc,#40769e"),
+    bar_width = parse_number_arg(12, 0.88),
+    ring_color = arg_or(13, "grey75"),
+    label_size = parse_number_arg(14, 4.2),
+    base_size = parse_number_arg(15, 12)
+  ),
+  value_labels = parse_logical_arg(16, FALSE)
+)
+delimiter <- arg_or(17, "auto")
+width <- parse_number_arg(18, 8)
+height <- parse_number_arg(19, 8)
+dpi <- parse_integer_arg(20, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- c("#d7689d", "#f3d337", "#a0c443", "#66b5ae", "#5da4dc", "#40769e")
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+parse_axis_max <- function(raw, values) {
+  if (is.null(raw) || !nzchar(raw) || tolower(raw) == "auto") {
+    max(values, na.rm = TRUE) * 1.05
+  } else {
+    parsed <- suppressWarnings(as.numeric(raw))
+    if (is.na(parsed)) max(values, na.rm = TRUE) * 1.05 else parsed
+  }
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$category, config$columns$value), "bar/radial input")
+  df <- ensure_numeric_columns(df, config$columns$value, "bar/radial input")
+  df$.category <- as.character(df[[config$columns$category]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.category), , drop = FALSE]
+  if (nrow(df) == 0) stop("bar/radial input has no finite rows.", call. = FALSE)
+  if (any(duplicated(df$.category))) {
+    stop("bar/radial input category values must be unique so each radial sector has one bar.", call. = FALSE)
+  }
+  df$.category <- factor(df$.category, levels = df$.category)
+  df$.index <- seq_len(nrow(df))
+  df
+}
+
+ring_data <- function(df, config, axis_max) {
+  breaks <- suppressWarnings(as.numeric(config$axis$ring_breaks))
+  breaks <- breaks[is.finite(breaks) & breaks >= 0 & breaks <= axis_max]
+  if (length(breaks) == 0) breaks <- pretty(c(0, axis_max), n = 3)
+  data.frame(yintercept = unique(breaks))
+}
+
+make_plot <- function(df, config) {
+  axis_max <- parse_axis_max(config$axis$max_value, df$.value)
+  axis_min <- min(config$axis$inner_radius, 0)
+  palette <- extend_palette(df$.category, config$style$palette)
+  rings <- ring_data(df, config, axis_max)
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .category, y = .value, fill = .category)) +
+    ggplot2::geom_hline(
+      data = rings,
+      ggplot2::aes(yintercept = yintercept),
+      inherit.aes = FALSE,
+      color = config$style$ring_color,
+      linetype = ifelse(rings$yintercept == 0, "solid", "dashed"),
+      linewidth = 0.5
+    ) +
+    ggplot2::geom_col(width = config$style$bar_width, color = "white", linewidth = 0.25, show.legend = FALSE) +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_y_continuous(limits = c(axis_min, axis_max), breaks = rings$yintercept, expand = c(0, 0)) +
+    ggplot2::coord_polar(start = 0, clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    ggplot2::theme_minimal(base_size = config$style$base_size) +
+    ggplot2::theme(
+      axis.text.y = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_text(size = config$style$label_size, color = "#111827"),
+      axis.title = ggplot2::element_blank(),
+      axis.line = ggplot2::element_blank(),
+      axis.ticks = ggplot2::element_blank(),
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold")
+    )
+
+  if (isTRUE(config$value_labels)) {
+    p <- p + ggplot2::geom_text(
+      ggplot2::aes(label = format(.value, trim = TRUE, big.mark = ","), y = .value + axis_max * 0.035),
+      size = config$style$label_size * 0.72,
+      color = "#111827",
+      show.legend = FALSE
+    )
+  }
+  p
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "max_value"),
+      value = c("bar/radial", nrow(plot_df), max(plot_df$.value, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/radial", rows = nrow(plot_df), max_value = max(plot_df$.value, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

@@ -175,6 +175,7 @@ pub async fn run_operator(
         kind: run_kind,
         smoke_test_id,
         smoke_test_name,
+        parent_execution_id: None,
     };
     let (raw, is_error) = operators::execute_operator_tool_call_with_context(
         &ctx,

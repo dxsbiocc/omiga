@@ -83,8 +83,12 @@ preflight:
 ```
 
 - `param` must reference an `interface.params` field.
+- Keep an operator preflight to **1–4 focused questions**. If a workflow needs more decisions, split it into another short ask round instead of showing a long form.
 - `askWhen.missing`, `askWhen.empty`, and `askWhen.values[]` decide when the chat path asks the question.
+- Any preflight-backed param also has an explicit ask state: callers may omit the param or set it to `ask` (or `{"state":"ask"}` / `{"status":"ask"}`) to force Omiga to ask the user before execution. Reserve `ask` for this sentinel on preflight params.
 - `options[].label` is what the user sees; `options[].value` is written back into `params.{param}`.
+- Applied answers are recorded as `metadata.preflight` and execution `paramSources`, so record viewers can distinguish user preflight choices from caller-supplied and default params.
+- `unit_authoring_validate` warns when preflight only asks about data/grouping and omits method, threshold, or filtering decisions that affect analysis semantics.
 - Keep defaults in `interface.params` when non-interactive callers should still run without a chat preflight.
 
 ## Smoke tests
@@ -171,7 +175,7 @@ The bundled `operator-smoke@omiga-curated` plugin includes `container_text_repor
 The bundled curated operator plugins keep one atomic operator per plugin (or a tightly scoped validation pair for smoke tests):
 
 - `operator-pca-r@omiga-curated` exposes `omics_pca_matrix@0.1.0` — base-R PCA for expression/count matrices, optional sample metadata grouping, PCA scatter, and scree defaults.
-- `operator-differential-expression-r@omiga-curated` exposes `omics_differential_expression_basic@0.1.0` — bulk RNA-seq differential expression over one or more group comparisons, auto-prioritizing DESeq2, edgeR, and limma/voom for counts, limma for quantitative matrices, and Wilcoxon/chi-square/t-test/Welch methods as explicit or fallback tests, with volcano/quadrant/beeswarm default displays.
+- `operator-differential-expression-r@omiga-curated` exposes `omics_differential_expression_basic@0.1.0` — bulk RNA-seq differential expression over one or more group comparisons, auto-prioritizing DESeq2, edgeR, and limma/voom for counts, and limma for quantitative matrices, with volcano/quadrant/beeswarm default displays.
 - `operator-enrichment-r@omiga-curated` exposes `omics_functional_enrichment_basic@0.1.0` — real ORA via `clusterProfiler::enricher` plus ranked GSEA via `fgsea` over GMT or two-column TSV gene sets, with bar/dot/curve default displays.
 - `operator-seqtk@omiga-curated` exposes `seqtk_sample_reads@0.1.0` — `seqtk sample` wrapper for FASTQ/FASTA subsampling on the active local/SSH environment.
 
@@ -216,7 +220,7 @@ Execution is structured argv, not an inline shell template. Plugin wrapper files
 execution:
   argv:
     - /bin/sh
-    - ./bin/write_text_report.sh
+    - ./scripts/write_text_report.sh
     - ${outdir}
     - ${params.message}
     - ${params.repeat}
@@ -239,8 +243,9 @@ Structured output fields are declared in `interface.outputs` without `glob` and 
 - Remote artifacts, logs, and provenance stay remote; results keep references and are read/verified in place.
 - Path-like input fingerprints are persisted in provenance. Local file inputs use `sha256` plus size/mtime; remote file inputs best-effort `sha256sum`/`shasum -a 256` on the selected execution surface and fall back to stat/reference metadata if checksum tooling is unavailable.
 - Operator outputs are collected only from `.omiga/runs/{run_id}/out` in the active session workspace or selected remote workspace.
+- After a successful run or cache hit, the run output directory is also copied to `operator-results/{operator_alias}/{run_id}` in the active session workspace; `exportDir` in provenance points to this user-facing copy.
 - Structured outputs are read only from `.omiga/runs/{run_id}/out/outputs.json` in that same workspace and are capped at 1 MiB.
-- Cache hit records are also written under the active workspace `.omiga/runs/{run_id}` and only reference prior artifacts inside that same execution surface.
+- Cache hit records are also written under the active workspace `.omiga/runs/{run_id}` and artifact refs continue to point at verified prior artifacts inside that same execution surface; each hit still gets its own `operator-results/.../{run_id}` export copy.
 - Run cleanup is workspace-scoped. The UI previews global or per-operator candidates, preserves the latest matching runs, and requires confirmation before deleting old/cache run directories under the active `.omiga/runs` root.
 
 ## Failure diagnostics
