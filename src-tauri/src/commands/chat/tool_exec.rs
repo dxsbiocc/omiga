@@ -129,6 +129,8 @@ pub(super) struct ToolExecutionRequest<'a> {
     pub local_venv_name: String,
     pub env_store: crate::domain::tools::env_store::EnvStore,
     pub computer_use_enabled: bool,
+    /// Optional session artifact registry for tracking file_write/file_edit operations.
+    pub artifact_registry: Option<Arc<crate::domain::session::artifacts::ArtifactRegistry>>,
 }
 
 #[derive(Clone)]
@@ -153,6 +155,7 @@ struct ToolExecutionShared {
     local_venv_name: String,
     env_store: crate::domain::tools::env_store::EnvStore,
     computer_use_enabled: bool,
+    artifact_registry: Option<Arc<crate::domain::session::artifacts::ArtifactRegistry>>,
 }
 
 struct SingleToolExecution {
@@ -189,6 +192,7 @@ pub(super) async fn execute_tool_calls(
         local_venv_name,
         env_store,
         computer_use_enabled,
+        artifact_registry,
     } = request;
 
     let cancel_flag = agent_runtime.map(|r| r.cancel_flag.clone());
@@ -214,6 +218,7 @@ pub(super) async fn execute_tool_calls(
         local_venv_name,
         env_store,
         computer_use_enabled,
+        artifact_registry,
     };
 
     // (tool_use_id, output, is_error)
@@ -380,21 +385,176 @@ pub(super) async fn execute_tool_calls(
     }
 
     // --- Sequential batch: stateful tools run one-by-one ---
+    // `active_skill_allowed_tools`: set when an inline skill with `allowed-tools` frontmatter
+    // executes; restricts subsequent tool calls in the same batch to that list.
+    let mut active_skill_allowed_tools: Option<Vec<String>> = None;
+
     for idx in sequential_indices {
         let (tool_use_id, tool_name, arguments) = &tool_calls[idx];
-        let res = execute_one_tool(SingleToolExecution {
-            tool_use_id: tool_use_id.clone(),
-            tool_name: tool_name.clone(),
-            arguments: arguments.clone(),
-            shared: shared.clone(),
-            agent_runtime: agent_runtime.cloned(),
-        })
-        .await;
+
+        // Enforce skill allowed-tools restriction for all tools except `skill` itself.
+        if let Some(ref allowed) = active_skill_allowed_tools {
+            let is_skill_tool = matches!(
+                tool_name.to_ascii_lowercase().as_str(),
+                "skill" | "listskills" | "list_skills"
+            );
+            if !is_skill_tool {
+                let canonical = canonical_permission_tool_name(tool_name);
+                let permitted = allowed.iter().any(|a| {
+                    canonical_permission_tool_name(a) == canonical || a == tool_name
+                });
+                if !permitted {
+                    let error_msg = format!(
+                        "Tool `{tool_name}` is blocked by the active skill's \
+                         `allowed-tools` restriction. Permitted tools: [{}]. \
+                         Complete the current skill context before using other tools.",
+                        allowed.join(", ")
+                    );
+                    let _ = app.emit(
+                        &format!("chat-stream-{message_id}"),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    ordered_results[idx] = Some((tool_use_id.clone(), error_msg, true));
+                    continue;
+                }
+            }
+        }
+
+        // --- Feature 1: per-call timeout for sequential tools ---
+        // Skills, bash, and agent tools are exempt: they routinely run for many minutes.
+        const SEQUENTIAL_TOOL_DEFAULT_TIMEOUT_SECS: u64 = 120;
+        let exempt_from_timeout = matches!(
+            tool_name.to_ascii_lowercase().as_str(),
+            "skill" | "bash" | "agent" | "task"
+        );
+        let res = if exempt_from_timeout {
+            execute_one_tool(SingleToolExecution {
+                tool_use_id: tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                arguments: arguments.clone(),
+                shared: shared.clone(),
+                agent_runtime: agent_runtime.cloned(),
+            })
+            .await
+        } else {
+            let timeout_dur =
+                std::time::Duration::from_secs(SEQUENTIAL_TOOL_DEFAULT_TIMEOUT_SECS);
+            match tokio::time::timeout(
+                timeout_dur,
+                execute_one_tool(SingleToolExecution {
+                    tool_use_id: tool_use_id.clone(),
+                    tool_name: tool_name.clone(),
+                    arguments: arguments.clone(),
+                    shared: shared.clone(),
+                    agent_runtime: agent_runtime.cloned(),
+                }),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    let error_msg = format!(
+                        "Tool `{tool_name}` timed out after {} seconds. \
+                         Use a longer-running background task or reduce scope.",
+                        SEQUENTIAL_TOOL_DEFAULT_TIMEOUT_SECS
+                    );
+                    let _ = app.emit(
+                        &format!("chat-stream-{message_id}"),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    (tool_use_id.clone(), error_msg, true)
+                }
+            }
+        };
+
+        // After a skill executes successfully, check whether it declared allowed-tools.
+        if matches!(tool_name.to_ascii_lowercase().as_str(), "skill") && !res.2 {
+            if let Some(filter) = extract_skill_allowed_tools(&res.1) {
+                active_skill_allowed_tools = Some(filter);
+            }
+        }
+
+        // --- Feature 2 Step C: record file artifacts ---
+        if !res.2 {
+            let tname_lower = tool_name.to_ascii_lowercase();
+            let is_write_tool = matches!(
+                tname_lower.as_str(),
+                "file_write" | "write_file"
+            );
+            let is_edit_tool = matches!(
+                tname_lower.as_str(),
+                "file_edit" | "edit_file" | "str_replace_editor"
+            );
+            if is_write_tool || is_edit_tool {
+                if let Some(ref registry) = shared.artifact_registry {
+                    if let Ok(args_val) =
+                        serde_json::from_str::<serde_json::Value>(arguments)
+                    {
+                        let path = args_val
+                            .get("path")
+                            .or_else(|| args_val.get("file_path"))
+                            .and_then(|v| v.as_str());
+                        if let Some(path) = path {
+                            let op = if is_write_tool { "write" } else { "edit" };
+                            registry.record(path, op);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Audit log: fire-and-forget record of sensitive tool executions.
+        if crate::domain::audit::should_audit(tool_name) {
+            let entry = crate::domain::audit::AuditEntry {
+                ts: chrono::Utc::now().to_rfc3339(),
+                session_id: session_id.to_string(),
+                tool: tool_name.clone(),
+                args_summary: crate::domain::audit::summarize_args(tool_name, arguments),
+                status: if res.2 { "error" } else { "ok" },
+                message: if res.2 {
+                    Some(res.1.chars().take(200).collect())
+                } else {
+                    None
+                },
+            };
+            tokio::spawn(crate::domain::audit::log(entry));
+        }
+
         ordered_results[idx] = Some(res);
     }
 
     results.extend(ordered_results.into_iter().flatten());
     results
+}
+
+/// Parse the `allowedTools` array from an inline skill's output JSON metadata header.
+///
+/// Skill output format (text, not Rust):
+/// `Launching skill: NAME\n\n{ "success": true, "allowedTools": ["bash", "file_read"], ... }\n\n---\n\n[body]`
+fn extract_skill_allowed_tools(output: &str) -> Option<Vec<String>> {
+    let json_start = output.find('{')?;
+    let separator = "\n\n---";
+    let json_end = output.find(separator).unwrap_or(output.len());
+    let json_str = output.get(json_start..json_end)?;
+    let val: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let arr = val.get("allowedTools")?.as_array()?;
+    let allowed: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    if allowed.is_empty() { None } else { Some(allowed) }
 }
 
 /// Execute a single tool call. Called from both the parallel and sequential paths.
@@ -429,6 +589,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
         local_venv_name,
         env_store,
         computer_use_enabled,
+        artifact_registry: _artifact_registry,
     } = shared;
     let tool_use_id = &tool_use_id;
     let tool_name = &tool_name;
@@ -1296,15 +1457,138 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                         }
 
                         // === INLINE EXECUTION MODE (default) ===
-                        // Original inline execution code continues...
-                        match skills::invoke_skill_with_cache(
+                        // Use invoke_skill_detailed_with_cache so we can inspect `status`
+                        // and route `needs_fork` skills to the forked sub-agent path.
+                        let skill_invoke_result = skills::invoke_skill_detailed_with_cache(
                             project_root,
                             &args.skill,
                             &args.args,
-                            &all_skills,
+                            Some(&all_skills),
                         )
-                        .await
-                        {
+                        .await;
+
+                        // If the skill declares `context: fork` and we have an agent runtime,
+                        // execute it as a forked sub-agent session.
+                        if let Ok(ref detail) = skill_invoke_result {
+                            if detail.status == "needs_fork" {
+                                if let Some(ar) = agent_runtime {
+                                    tracing::info!(
+                                        skill = %skill_display,
+                                        "Skill declares context:fork — routing to forked sub-agent"
+                                    );
+                                    let skill_content = detail
+                                        .skill_body
+                                        .clone()
+                                        .unwrap_or_else(|| detail.formatted_tool_result.clone());
+                                    let skill_allowed_tools = if detail.allowed_tools.is_empty() {
+                                        None
+                                    } else {
+                                        Some(detail.allowed_tools.clone())
+                                    };
+                                    match run_skill_forked(ForkedSkillRequest {
+                                        app: &app,
+                                        message_id,
+                                        session_id,
+                                        tool_results_dir,
+                                        project_root,
+                                        session_todos: session_todos.clone(),
+                                        session_agent_tasks: session_agent_tasks.clone(),
+                                        skill_name: &skill_display,
+                                        skill_args: &args.args,
+                                        skill_content: &skill_content,
+                                        allowed_tools: skill_allowed_tools,
+                                        runtime: ar,
+                                        subagent_execute_depth: subagent_depth.saturating_add(1),
+                                        web_search_api_keys: web_search_api_keys.clone(),
+                                        skill_cache: skill_cache.clone(),
+                                    })
+                                    .await
+                                    {
+                                        Ok(output_text) => {
+                                            let task_id = uuid::Uuid::new_v4().to_string();
+                                            let fork_result = serde_json::json!({
+                                                "success": true,
+                                                "commandName": skill_display,
+                                                "status": "forked",
+                                                "task_id": task_id,
+                                                "message": format!(
+                                                    "Skill '{}' executed as forked sub-agent. Output follows.",
+                                                    skill_display
+                                                ),
+                                                "output": output_text,
+                                            });
+                                            let fork_result_str =
+                                                serde_json::to_string_pretty(&fork_result)
+                                                    .unwrap_or_else(|_| output_text.clone());
+                                            tracing::info!(
+                                                skill = %skill_display,
+                                                output_len = fork_result_str.len(),
+                                                "Skill fork execution completed"
+                                            );
+                                            let display_output =
+                                                if fork_result_str.len() > PREVIEW_SIZE_BYTES {
+                                                    let prefix = truncate_utf8_prefix(
+                                                        &fork_result_str,
+                                                        PREVIEW_SIZE_BYTES,
+                                                    );
+                                                    format!(
+                                                        "{}\n\n[Output truncated... {} total characters]",
+                                                        prefix,
+                                                        fork_result_str.len()
+                                                    )
+                                                } else {
+                                                    fork_result_str.clone()
+                                                };
+                                            let _ = app.emit(
+                                                &format!("chat-stream-{}", message_id),
+                                                &StreamOutputItem::ToolResult {
+                                                    tool_use_id: tool_use_id.clone(),
+                                                    name: tool_name.clone(),
+                                                    input: arguments.clone(),
+                                                    output: display_output,
+                                                    is_error: false,
+                                                },
+                                            );
+                                            let model_output = process_tool_output_for_model(
+                                                fork_result_str,
+                                                tool_use_id,
+                                                tool_results_dir,
+                                            )
+                                            .await;
+                                            return (tool_use_id.clone(), model_output, false);
+                                        }
+                                        Err(e) => {
+                                            let error_msg =
+                                                format!("Skill fork execution failed: {}", e);
+                                            tracing::warn!(
+                                                skill = %skill_display,
+                                                error = %error_msg,
+                                                "Skill fork execution error"
+                                            );
+                                            let _ = app.emit(
+                                                &format!("chat-stream-{}", message_id),
+                                                &StreamOutputItem::ToolResult {
+                                                    tool_use_id: tool_use_id.clone(),
+                                                    name: tool_name.clone(),
+                                                    input: arguments.clone(),
+                                                    output: error_msg.clone(),
+                                                    is_error: true,
+                                                },
+                                            );
+                                            return (tool_use_id.clone(), error_msg, true);
+                                        }
+                                    }
+                                } else {
+                                    // No agent runtime — fall through to inline with a note
+                                    tracing::warn!(
+                                        skill = %skill_display,
+                                        "Skill declares context:fork but no agent runtime available; executing inline"
+                                    );
+                                }
+                            }
+                        }
+
+                        match skill_invoke_result.map(|d| d.formatted_tool_result) {
                             Ok(output_text) => {
                                 let is_error = false;
                                 tracing::info!(
@@ -1538,6 +1822,9 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             let web_use_proxy = crate::llm::config::load_web_use_proxy_setting();
             let web_search_engine = crate::llm::config::load_web_search_engine_setting();
             let web_search_methods = crate::llm::config::load_web_search_methods_setting();
+            let db_pool = app
+                .try_state::<OmigaAppState>()
+                .map(|s| s.repo.pool().clone());
             let base = ToolContext::new(project_root.to_path_buf())
                 .with_session_id(Some(session_id.to_string()))
                 .with_todos(session_todos.clone())
@@ -1553,7 +1840,8 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                 .with_sandbox_backend(sandbox_backend.clone())
                 .with_local_venv(local_venv_type.clone(), local_venv_name.clone())
                 .with_env_store(Some(env_store.clone()))
-                .with_skill_cache(skill_cache.clone());
+                .with_skill_cache(skill_cache.clone())
+                .with_db(db_pool);
             match &round_cancel {
                 Some(t) => base.with_cancel_token(t.clone()),
                 None => base,
@@ -2092,6 +2380,9 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             let web_use_proxy = crate::llm::config::load_web_use_proxy_setting();
             let web_search_engine = crate::llm::config::load_web_search_engine_setting();
             let web_search_methods = crate::llm::config::load_web_search_methods_setting();
+            let db_pool = app
+                .try_state::<OmigaAppState>()
+                .map(|s| s.repo.pool().clone());
             let base = ToolContext::new(project_root.to_path_buf())
                 .with_session_id(Some(session_id.to_string()))
                 .with_working_memory_context(working_memory_context)
@@ -2109,6 +2400,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                 .with_local_venv(local_venv_type.clone(), local_venv_name.clone())
                 .with_env_store(Some(env_store.clone()))
                 .with_skill_cache(skill_cache.clone())
+                .with_db(db_pool)
                 .with_background_shell(
                     crate::domain::background_shell::BackgroundShellHandle {
                         app: app.clone(),

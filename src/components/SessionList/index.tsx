@@ -41,6 +41,7 @@ import {
   Close as CloseIcon,
   GitHub as GitHubIcon,
   ChevronRight,
+  FileDownloadOutlined,
 } from "@mui/icons-material";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { OMIGA_GITHUB_RELEASES_URL } from "../../constants/appLinks";
@@ -320,6 +321,28 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     await renameSession(selectedSessionId, newName.trim());
     setRenameDialogOpen(false);
     setNewName("");
+  };
+
+  const handleExportMarkdown = async () => {
+    if (!selectedSessionId) return;
+    handleMenuClose();
+    try {
+      const markdown = await invokeIfTauri<string>("export_session_markdown", {
+        sessionId: selectedSessionId,
+      });
+      if (!markdown) return;
+      const blob = new Blob([markdown], { type: "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `session-${selectedSessionId}.md`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("[SessionList] export_session_markdown failed", e);
+    }
   };
 
   const handleUserMenuOpen = (event: React.MouseEvent<HTMLElement>) => {
@@ -684,6 +707,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
       {/* Top nav: icon + label (reference layout) */}
       <Stack spacing={0} sx={{ p: 1.5, pb: 1 }}>
         <Box
+          data-testid="new-session-btn"
           sx={navRowSx}
           onClick={() => {
             handleCreateClick();
@@ -733,7 +757,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
       </Box>
 
       {/* Session list */}
-      <Box sx={{ flex: 1, overflow: "auto", px: 1, pb: 1, minHeight: 0 }}>
+      <Box data-testid="session-list" sx={{ flex: 1, overflow: "auto", px: 1, pb: 1, minHeight: 0 }}>
         <Stack spacing={0.5}>
           {sessionRows.length === 0 ? (
             <Box
@@ -1106,6 +1130,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
 
       {/* Bottom local workspace menu */}
       <Box
+        data-testid="user-menu-trigger"
         onClick={handleUserMenuOpen}
         sx={{
           borderTop: 1,
@@ -1147,6 +1172,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         }}
       >
         <MenuItem
+          data-testid="menu-item-settings"
           onMouseEnter={closeLanguageSubmenuNow}
           onClick={() => handleOpenSettings()}
         >
@@ -1309,6 +1335,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         <MenuItem onClick={handleRenameClick}>
           <Edit fontSize="small" sx={{ mr: 1 }} />
           {t("rename")}
+        </MenuItem>
+        <MenuItem onClick={() => void handleExportMarkdown()}>
+          <FileDownloadOutlined fontSize="small" sx={{ mr: 1 }} />
+          {t("exportMarkdown")}
         </MenuItem>
         <MenuItem
           onClick={handleDelete}

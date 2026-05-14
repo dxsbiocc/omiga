@@ -5,6 +5,7 @@ use super::permissions::{
 use super::CommandResult;
 use crate::app_state::OmigaAppState;
 use crate::errors::{ChatError, OmigaError};
+use std::sync::Arc;
 use tauri::State;
 
 /// Submit answers for a blocked `ask_user_question` tool call (chat UI).
@@ -181,4 +182,113 @@ pub async fn cancel_session_rounds(
     .await;
 
     Ok(cancelled_round_ids)
+}
+
+/// Return the list of files the AI wrote or edited during a session.
+///
+/// The registry is in-memory only (cleared when the session is unloaded) and is
+/// populated by the sequential tool execution loop whenever `file_write` or
+/// `file_edit` completes successfully.
+#[tauri::command]
+pub async fn get_session_artifacts(
+    session_id: String,
+    app_state: State<'_, Arc<OmigaAppState>>,
+) -> Result<Vec<crate::domain::session::artifacts::ArtifactEntry>, String> {
+    let sessions = app_state.chat.sessions.read().await;
+    if let Some(runtime) = sessions.get(&session_id) {
+        Ok(runtime.artifact_registry.list())
+    } else {
+        Ok(vec![])
+    }
+}
+
+/// Export a session's messages as a Markdown string.
+///
+/// Fetches all messages for the given session from the database and formats
+/// them as Markdown. System messages are skipped. Tool results longer than
+/// 500 characters are truncated. The returned string can be saved as a `.md`
+/// file by the frontend.
+#[tauri::command]
+pub async fn export_session_markdown(
+    app_state: State<'_, OmigaAppState>,
+    session_id: String,
+) -> Result<String, String> {
+    let repo = &*app_state.repo;
+
+    let records = sqlx::query_as::<_, crate::domain::persistence::MessageRecord>(
+        r#"
+        SELECT id, session_id, role, content, tool_calls, tool_call_id,
+               token_usage_json, reasoning_content, follow_up_suggestions_json,
+               turn_summary, created_at
+        FROM messages
+        WHERE session_id = ?
+        ORDER BY created_at ASC, id ASC
+        "#,
+    )
+    .bind(&session_id)
+    .fetch_all(repo.pool())
+    .await
+    .map_err(|e| format!("Failed to load messages: {e}"))?;
+
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut md = format!(
+        "# Session Export\n\n> Exported from Omiga on {date}\n\n---\n\n"
+    );
+
+    for record in &records {
+        match record.role.as_str() {
+            "system" => continue,
+            "user" => {
+                // Wrap in a fenced block to prevent user content from injecting
+                // Markdown headings or HTML into the exported document structure.
+                md.push_str("## User\n\n```\n");
+                md.push_str(&record.content.replace("```", "` ` `"));
+                md.push_str("\n```\n\n");
+            }
+            "assistant" => {
+                md.push_str("## Assistant\n\n");
+                if !record.content.is_empty() {
+                    md.push_str(&record.content);
+                    md.push('\n');
+                }
+                if let Some(tc_json) = &record.tool_calls {
+                    if let Ok(calls) =
+                        serde_json::from_str::<Vec<serde_json::Value>>(tc_json)
+                    {
+                        for call in &calls {
+                            // Allowlist characters in tool names — they are internal identifiers.
+                            let raw_name = call
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown_tool");
+                            let name: String = raw_name
+                                .chars()
+                                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                                .collect();
+                            md.push_str(&format!("\n**Tool call:** `{name}`\n"));
+                        }
+                    }
+                }
+                md.push('\n');
+            }
+            "tool" => {
+                let output = &record.content;
+                let truncated = if output.chars().count() > 500 {
+                    let s: String = output.chars().take(500).collect();
+                    format!("{s}\n\n*[output truncated]*")
+                } else {
+                    output.clone()
+                };
+                // Tool output is already wrapped in a fenced code block — safe.
+                let safe = truncated.replace("```", "` ` `");
+                md.push_str("**Tool result:**\n\n```\n");
+                md.push_str(&safe);
+                md.push_str("\n```\n\n");
+            }
+            // Skip unknown roles entirely rather than interpolating them as headings.
+            _ => continue,
+        }
+    }
+
+    Ok(md)
 }

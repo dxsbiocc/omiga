@@ -190,6 +190,7 @@ mod tests {
             local_venv_type: "".to_string(),
             local_venv_name: "".to_string(),
             env_store: EnvStore::new(),
+            artifact_registry: crate::domain::session::artifacts::ArtifactRegistry::default(),
         };
         let mut map = HashMap::new();
         map.insert(session_id.to_string(), runtime);

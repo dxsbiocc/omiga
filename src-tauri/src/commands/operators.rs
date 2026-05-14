@@ -95,6 +95,25 @@ async fn build_operator_context(
         .with_timeout(timeout_secs)
 }
 
+/// Create or replace a user-defined script operator in `~/.omiga/user-operators/`.
+#[tauri::command]
+pub async fn save_user_script_operator(
+    id: String,
+    name: String,
+    description: String,
+    argv: Vec<String>,
+) -> CommandResult<String> {
+    let path = operators::save_user_script_operator(&id, &name, &description, &argv)
+        .map_err(crate::errors::AppError::Config)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Return the path to `~/.omiga/user-operators/` so the frontend can show it.
+#[tauri::command]
+pub async fn get_user_operators_dir() -> CommandResult<String> {
+    Ok(operators::user_operators_dir().to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn list_operators() -> CommandResult<OperatorCatalogResponse> {
     Ok(OperatorCatalogResponse {

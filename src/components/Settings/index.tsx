@@ -53,6 +53,7 @@ import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
 import { PluginsPanel } from "./PluginsPanel";
 import { ConnectorsPanel } from "./ConnectorsPanel";
+import { CronJobsPanel } from "./CronJobsPanel";
 import {
   DEFAULT_WEB_SEARCH_METHODS,
   moveItemToIndex,
@@ -119,12 +120,15 @@ const SETTINGS_SECTIONS: {
   },
   {
     header: "Agents",
-    items: [{ index: 11, label: "Orchestration" }],
+    items: [
+      { index: 11, label: "Orchestration" },
+      { index: 15, label: "Schedule" },
+    ],
   },
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 14;
+const SETTINGS_TAB_MAX = 15;
 
 function clampSettingsTab(i: number): number {
   const clamped = Math.min(
@@ -3582,6 +3586,8 @@ export function Settings({
                 )}
               </Box>
             )}
+
+            {activeTab === 15 && <CronJobsPanel />}
 
             {/* Status Message */}
             {message && isLlmTab && (
