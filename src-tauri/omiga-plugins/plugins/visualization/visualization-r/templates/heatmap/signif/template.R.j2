@@ -1,0 +1,242 @@
+#!/usr/bin/env Rscript
+# Template: heatmap/signif
+# Purpose: Correlation heatmap with significance markers and weak-correlation crosses.
+#
+# Migration note:
+#   This template directly implements the high-quality OmicsAgent heatmap/signif
+#   visual without carrying forward ggcor/linkET-specific JSON ggplot2 DSL runtime.
+#   Input data.json was converted to example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template heatmap/signif
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, as.character(default)))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(feature = arg_or(3, ""), variables = parse_csv_arg(4, "")),
+  method = arg_or(5, "spearman"),
+  alpha = parse_number_arg(6, 0.05),
+  mark_threshold = parse_number_arg(7, 0.3),
+  weak_threshold = parse_number_arg(8, 0.5),
+  labels = list(title = arg_or(9, "Signif Heatmap")),
+  style = list(
+    low = arg_or(10, "#1cc7d0"),
+    mid = arg_or(11, "#ffffff"),
+    high = arg_or(12, "#fbb05b"),
+    base_size = parse_number_arg(13, 10),
+    min_circle_size = parse_number_arg(14, 2),
+    max_circle_size = parse_number_arg(15, 8),
+    show_values = parse_logical_arg(16, FALSE)
+  )
+)
+delimiter <- arg_or(17, "auto")
+width <- parse_number_arg(18, 6)
+height <- parse_number_arg(19, 5.2)
+dpi <- parse_integer_arg(20, 300)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+prepare_data <- function(df, config) {
+  feature_col <- resolve_optional_column(df, config$columns$feature)
+  candidate_cols <- setdiff(colnames(df), feature_col %||% character())
+  if (length(config$columns$variables) > 0) {
+    missing <- setdiff(config$columns$variables, candidate_cols)
+    if (length(missing) > 0) {
+      stop(sprintf("heatmap/signif missing variable column(s): %s", paste(missing, collapse = ", ")), call. = FALSE)
+    }
+    candidate_cols <- config$columns$variables
+  }
+  converted <- lapply(df[candidate_cols], function(x) suppressWarnings(as.numeric(x)))
+  numeric_ok <- vapply(converted, function(x) !all(is.na(x)), logical(1))
+  numeric_cols <- candidate_cols[numeric_ok]
+  if (length(numeric_cols) < 2) {
+    stop("heatmap/signif input requires at least two numeric columns after exclusions.", call. = FALSE)
+  }
+  matrix_df <- as.data.frame(converted[numeric_ok], check.names = FALSE)
+  names(matrix_df) <- numeric_cols
+  bad_cols <- names(matrix_df)[vapply(matrix_df, function(x) any(is.na(x)), logical(1))]
+  if (length(bad_cols) > 0) {
+    stop(sprintf("heatmap/signif numeric column(s) contain non-numeric values: %s", paste(bad_cols, collapse = ", ")), call. = FALSE)
+  }
+  matrix_df
+}
+
+correlation_pvalue <- function(x, y, method) {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 3 || length(unique(x[ok])) < 2 || length(unique(y[ok])) < 2) return(NA_real_)
+  result <- try(suppressWarnings(stats::cor.test(x[ok], y[ok], method = method)), silent = TRUE)
+  if (inherits(result, "try-error") || is.null(result$p.value)) return(NA_real_)
+  as.numeric(result$p.value)
+}
+
+significance_label <- function(pvalue) {
+  ifelse(is.na(pvalue), "", ifelse(pvalue < 0.001, "***", ifelse(pvalue < 0.01, "**", ifelse(pvalue < 0.05, "*", ""))))
+}
+
+correlation_long <- function(matrix_df, config) {
+  method <- tolower(config$method)
+  if (!method %in% c("pearson", "spearman", "kendall")) stop(sprintf("Unsupported correlation method: %s", method), call. = FALSE)
+  cor_mat <- stats::cor(matrix_df, method = method, use = "pairwise.complete.obs")
+  variables <- colnames(cor_mat)
+  p_mat <- matrix(NA_real_, nrow = length(variables), ncol = length(variables), dimnames = list(variables, variables))
+  for (i in seq_along(variables)) {
+    for (j in seq_along(variables)) {
+      p_mat[i, j] <- if (i == j) 0 else correlation_pvalue(matrix_df[[variables[[i]]]], matrix_df[[variables[[j]]]], method)
+    }
+  }
+  out <- as.data.frame(as.table(cor_mat), stringsAsFactors = FALSE)
+  colnames(out) <- c("x", "y", "correlation")
+  out$pvalue <- as.vector(p_mat)
+  out$x_index <- match(out$x, variables)
+  out$y_index <- match(out$y, variables)
+  out$plot_y <- length(variables) - out$y_index + 1
+  out$abs_correlation <- abs(out$correlation)
+  out$value_label <- sprintf("%.2f", out$correlation)
+  out$star <- significance_label(out$pvalue)
+  out
+}
+
+make_plot <- function(df, config) {
+  plot_df <- correlation_long(df, config)
+  n_vars <- length(unique(plot_df$x))
+  lower_df <- plot_df[plot_df$y_index > plot_df$x_index, , drop = FALSE]
+  upper_df <- plot_df[plot_df$y_index < plot_df$x_index, , drop = FALSE]
+  diag_df <- plot_df[plot_df$y_index == plot_df$x_index, , drop = FALSE]
+  mark_df <- upper_df[!is.na(upper_df$pvalue) & upper_df$pvalue < config$alpha & upper_df$abs_correlation >= config$mark_threshold, , drop = FALSE]
+  weak_df <- lower_df[lower_df$abs_correlation < config$weak_threshold, , drop = FALSE]
+
+  p <- ggplot2::ggplot() +
+    ggplot2::geom_tile(
+      data = lower_df,
+      ggplot2::aes(x = x_index, y = plot_y, fill = correlation),
+      color = "white",
+      linewidth = 0.55,
+      width = 0.95,
+      height = 0.95
+    ) +
+    ggplot2::geom_point(
+      data = upper_df,
+      ggplot2::aes(x = x_index, y = plot_y, fill = correlation, size = abs_correlation),
+      shape = 21,
+      color = "grey25",
+      stroke = 0.35,
+      alpha = 0.96
+    ) +
+    ggplot2::geom_label(
+      data = diag_df,
+      ggplot2::aes(x = x_index, y = plot_y, label = x),
+      size = 2.8,
+      fontface = "bold",
+      label.size = 0,
+      fill = "grey96",
+      color = "grey20"
+    ) +
+    ggplot2::geom_text(
+      data = mark_df,
+      ggplot2::aes(x = x_index, y = plot_y, label = star),
+      color = "grey12",
+      fontface = "bold",
+      size = 3.4,
+      vjust = 0.45
+    ) +
+    ggplot2::geom_segment(
+      data = weak_df,
+      ggplot2::aes(x = x_index - 0.28, xend = x_index + 0.28, y = plot_y - 0.28, yend = plot_y + 0.28),
+      color = "white",
+      linewidth = 0.55,
+      alpha = 0.9
+    ) +
+    ggplot2::geom_segment(
+      data = weak_df,
+      ggplot2::aes(x = x_index - 0.28, xend = x_index + 0.28, y = plot_y + 0.28, yend = plot_y - 0.28),
+      color = "white",
+      linewidth = 0.55,
+      alpha = 0.9
+    ) +
+    ggplot2::scale_fill_gradientn(
+      colours = grDevices::colorRampPalette(c(config$style$low, config$style$mid, config$style$high))(50),
+      limits = c(-1, 1),
+      name = "Correlation"
+    ) +
+    ggplot2::scale_size_continuous(
+      range = c(config$style$min_circle_size, config$style$max_circle_size),
+      limits = c(0, 1),
+      name = "|r|"
+    ) +
+    ggplot2::scale_x_continuous(breaks = seq_len(n_vars), labels = rep("", n_vars), position = "top", expand = ggplot2::expansion(mult = 0.06)) +
+    ggplot2::scale_y_continuous(breaks = seq_len(n_vars), labels = rep("", n_vars), expand = ggplot2::expansion(mult = 0.06)) +
+    ggplot2::coord_equal(clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = NULL) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.key = ggplot2::element_rect(fill = "white", color = NA),
+      panel.grid = ggplot2::element_blank(),
+      axis.text = ggplot2::element_blank(),
+      axis.ticks = ggplot2::element_blank(),
+      legend.position = "right",
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5)
+    )
+
+  if (isTRUE(config$style$show_values)) {
+    p <- p + ggplot2::geom_text(data = lower_df, ggplot2::aes(x = x_index, y = plot_y, label = value_label), size = 2.1, color = "grey15")
+  }
+  p
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  matrix_df <- prepare_data(df, config)
+  plot_df <- correlation_long(matrix_df, config)
+  p <- customize_plot(make_plot(matrix_df, config), matrix_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  significant_pairs <- sum(!is.na(plot_df$pvalue) & plot_df$pvalue < config$alpha & plot_df$x_index < plot_df$y_index)
+  weak_pairs <- sum(plot_df$abs_correlation < config$weak_threshold & plot_df$x_index < plot_df$y_index)
+  write_tsv(
+    data.frame(
+      metric = c("template", "variables", "method", "significant_pairs", "weak_pairs"),
+      value = c("heatmap/signif", ncol(matrix_df), config$method, significant_pairs, weak_pairs)
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "heatmap/signif", variables = ncol(matrix_df), method = config$method, significant_pairs = significant_pairs, weak_pairs = weak_pairs))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

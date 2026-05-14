@@ -1,0 +1,197 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_distribution_differential_two_boxplot
+  version: 0.1.0
+  name: Two-Group Boxplot
+  description: Two-group differential-expression boxplot with grouped boxes and per-feature significance labels, migrated from OmicsAgent boxplot/differential_two.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - distribution
+  - boxplot
+  - differential
+  - two-group
+  - table
+classification:
+  category: visualization/distribution
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - distribution
+  - boxplot
+  - differential-expression
+  - two-group
+  - statistical-annotation
+  stageInput:
+  - table
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with feature/gene, group, and numeric value columns. See example.tsv converted from OmicsAgent data.json.
+  params:
+    feature_column:
+      kind: string
+      default: gene
+    group_column:
+      kind: string
+      default: group
+    value_column:
+      kind: string
+      default: exprs
+    title:
+      kind: string
+      default: ''
+    x_label:
+      kind: string
+      default: ''
+    y_label:
+      kind: string
+      default: Gene expression level
+    feature_order:
+      kind: string
+      default: auto
+      description: Optional comma-separated feature order.
+    group_order:
+      kind: string
+      default: Normal,Tumor
+      description: Comma-separated group order, or auto.
+    palette:
+      kind: string
+      default: '#d7689d,#f3d337,#a0c443,#66b5ae,#5da4dc,#40769e'
+      description: Comma-separated fill colors for groups.
+    box_alpha:
+      kind: number
+      default: 0.95
+    box_width:
+      kind: number
+      default: 0.68
+    dodge_width:
+      kind: number
+      default: 0.75
+    point_size:
+      kind: number
+      default: 1.2
+    point_alpha:
+      kind: number
+      default: 0.45
+    point_jitter_width:
+      kind: number
+      default: 0.1
+    bracket_text_size:
+      kind: number
+      default: 3.4
+    base_size:
+      kind: number
+      default: 12
+    show_points:
+      kind: boolean
+      default: false
+    show_significance:
+      kind: boolean
+      default: true
+    alpha:
+      kind: number
+      default: 0.05
+    test:
+      kind: enum
+      enum:
+      - wilcox.test
+      - t.test
+      default: wilcox.test
+    random_seed:
+      kind: integer
+      default: 7
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 6
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- differential_two_boxplot
+- two_group_boxplot
+- boxplot_differential_two
+- two_group_expression_boxplot
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.feature_column}
+  - ${params.group_column}
+  - ${params.value_column}
+  - ${params.title}
+  - ${params.x_label}
+  - ${params.y_label}
+  - ${params.feature_order}
+  - ${params.group_order}
+  - ${params.palette}
+  - ${params.box_alpha}
+  - ${params.box_width}
+  - ${params.dodge_width}
+  - ${params.point_size}
+  - ${params.point_alpha}
+  - ${params.point_jitter_width}
+  - ${params.bracket_text_size}
+  - ${params.base_size}
+  - ${params.show_points}
+  - ${params.show_significance}
+  - ${params.alpha}
+  - ${params.test}
+  - ${params.random_seed}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

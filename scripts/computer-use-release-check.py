@@ -41,6 +41,7 @@ TAURI_CONFIG = REPO_ROOT / "src-tauri" / "tauri.conf.json"
 TAURI_ENTITLEMENTS = REPO_ROOT / "src-tauri" / "Entitlements.plist"
 TAURI_INFO_PLIST = REPO_ROOT / "src-tauri" / "Info.plist"
 PLUGIN_MARKETPLACE = REPO_ROOT / "src-tauri" / "bundled_plugins" / "marketplace.json"
+CURATED_MARKETPLACE_ROOT = REPO_ROOT / "src-tauri" / "omiga-plugins"
 DEFAULT_INSTALLED_SIDECAR = (
     PLUGIN_ROOT / "bin" / "computer-use-sidecar"
 )
@@ -265,9 +266,25 @@ def check_plugin_packaging_config() -> str:
         if isinstance(tauri_config.get("bundle"), dict)
         else []
     )
+    resource_targets = set()
+    if isinstance(resources, list):
+        resource_targets.update(str(resource).rstrip("/") for resource in resources)
+    elif isinstance(resources, dict):
+        resource_targets.update(str(target).rstrip("/") for target in resources.values())
     require(
-        isinstance(resources, list) and "bundled_plugins" in resources,
+        "bundled_plugins" in resource_targets,
         "tauri bundle.resources must include bundled_plugins",
+    )
+    require(
+        any(
+            target == "omiga-plugins" or target.startswith("omiga-plugins/")
+            for target in resource_targets
+        ),
+        "tauri bundle.resources must include omiga-plugins marketplace resources",
+    )
+    require(
+        (CURATED_MARKETPLACE_ROOT / "marketplace.json").is_file(),
+        "repo-local omiga-plugins marketplace must be present for packaging",
     )
 
     marketplace = read_json(PLUGIN_MARKETPLACE)

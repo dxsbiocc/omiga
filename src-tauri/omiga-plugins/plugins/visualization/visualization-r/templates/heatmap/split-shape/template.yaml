@@ -1,0 +1,158 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_heatmap_split_shape
+  version: 0.1.0
+  name: Split Shape
+  description: Two-group correlation heatmap with lower-triangle rings for one group and upper-triangle stars for the other group.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - heatmap
+    - correlation
+    - two-group
+    - split-shape
+classification:
+  category: visualization/heatmap
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - heatmap
+    - correlation
+    - two-group
+    - split-shape
+  stageInput:
+    - numeric_matrix
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Wide numeric CSV/TSV table with exactly two groups. See example.tsv converted from OmicsAgent heatmap/two_shape data.json.
+  params:
+    group_column:
+      kind: string
+      default: group
+    group_order:
+      kind: string
+      default: Normal,Tumor
+      description: Two comma-separated group names. First group is lower-triangle rings; second group is upper-triangle stars. Empty uses sorted groups in the table.
+    variable_columns:
+      kind: string
+      default: ''
+      description: Optional comma-separated numeric columns to include and order; empty uses all numeric columns except group/feature columns.
+    feature_column:
+      kind: string
+      default: ''
+      description: Optional row-label column excluded from correlation. Leave empty if all remaining columns are numeric.
+    method:
+      kind: enum
+      enum: [pearson, spearman, kendall]
+      default: pearson
+    title:
+      kind: string
+      default: Split Shape
+    low_color:
+      kind: string
+      default: '#ed6ca4'
+    mid_color:
+      kind: string
+      default: '#ffffff'
+    high_color:
+      kind: string
+      default: '#7bc4e2'
+    base_size:
+      kind: number
+      default: 10
+    ring_size:
+      kind: number
+      default: 8.5
+    ring_hole_size:
+      kind: number
+      default: 4.2
+    star_size:
+      kind: number
+      default: 5.2
+    show_values:
+      kind: boolean
+      default: false
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 6
+    height:
+      kind: number
+      default: 5.2
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - heatmap_two_shape
+  - two_shape_heatmap
+  - split_shape_heatmap
+  - grouped_shape_heatmap
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.group_column}
+    - ${params.group_order}
+    - ${params.variable_columns}
+    - ${params.feature_column}
+    - ${params.method}
+    - ${params.title}
+    - ${params.low_color}
+    - ${params.mid_color}
+    - ${params.high_color}
+    - ${params.base_size}
+    - ${params.ring_size}
+    - ${params.ring_hole_size}
+    - ${params.star_size}
+    - ${params.show_values}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

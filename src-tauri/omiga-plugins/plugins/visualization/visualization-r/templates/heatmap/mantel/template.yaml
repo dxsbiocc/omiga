@@ -1,0 +1,189 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_heatmap_mantel
+  version: 0.1.0
+  name: Mantel Heatmap
+  description: Mantel-style linked correlation heatmap migrated from OmicsAgent heatmap/mantel with anchor-target curved links and upper-triangle target correlation heatmap.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - heatmap
+  - correlation
+  - mantel
+  - linked-heatmap
+classification:
+  category: visualization/heatmap
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - heatmap
+  - correlation
+  - mantel
+  - linked-heatmap
+  stageInput:
+  - numeric_matrix
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Wide numeric CSV/TSV table with anchor columns plus target variables. See this template's example.tsv converted from OmicsAgent data.json.
+  params:
+    anchor_columns:
+      kind: string
+      default: YAP1,WWTR1
+      description: Comma-separated anchor columns whose associations to target variables are drawn as curved links.
+    feature_column:
+      kind: string
+      default: ''
+      description: Optional row-label column excluded from numeric correlation. Leave empty if all columns are numeric.
+    method:
+      kind: enum
+      enum:
+      - pearson
+      - spearman
+      - kendall
+      default: spearman
+    triangle:
+      kind: enum
+      enum:
+      - upper
+      - lower
+      - full
+      default: upper
+    alpha:
+      kind: number
+      default: 0.05
+    breaks:
+      kind: string
+      default: 0.5,0.6,0.7
+      description: Comma-separated absolute-correlation breakpoints for curved-link width bins.
+    title:
+      kind: string
+      default: ''
+    marker:
+      kind: enum
+      enum:
+      - heart
+      - star
+      - circle
+      - square
+      - none
+      default: heart
+    low_color:
+      kind: string
+      default: '#2dde98'
+    mid_color:
+      kind: string
+      default: '#ffffffff'
+    high_color:
+      kind: string
+      default: '#ffc168'
+    ns_link_color:
+      kind: string
+      default: grey78
+    base_size:
+      kind: number
+      default: 10
+    marker_size:
+      kind: number
+      default: 3.1
+    min_link_width:
+      kind: number
+      default: 0.6
+    max_link_width:
+      kind: number
+      default: 1.5
+    curve:
+      kind: number
+      default: 0.22
+    show_values:
+      kind: boolean
+      default: false
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 6
+    height:
+      kind: number
+      default: 5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- mantel_heatmap
+- heatmap_mantel
+- linked_correlation_heatmap
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.anchor_columns}
+  - ${params.feature_column}
+  - ${params.method}
+  - ${params.triangle}
+  - ${params.alpha}
+  - ${params.breaks}
+  - ${params.title}
+  - ${params.marker}
+  - ${params.low_color}
+  - ${params.mid_color}
+  - ${params.high_color}
+  - ${params.ns_link_color}
+  - ${params.base_size}
+  - ${params.marker_size}
+  - ${params.min_link_width}
+  - ${params.max_link_width}
+  - ${params.curve}
+  - ${params.show_values}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

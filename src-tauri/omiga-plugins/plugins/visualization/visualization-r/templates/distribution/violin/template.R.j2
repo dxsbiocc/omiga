@@ -1,0 +1,54 @@
+#!/usr/bin/env Rscript
+# Template: distribution/violin
+# Purpose: Violin plot for comparing numeric distributions across groups.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template distribution/violin
+#
+# Personalization:
+#   This Rscript template emits plot-script.R and rerun.sh by default.
+#   For one-off customization, edit the emitted source artifact and rerun/render it.
+#   To save a reusable style, use scripts/promote_visual_template.py.
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_formats <- function(value) {
+  value <- arg_or(value, "png,pdf")
+}
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+
+config <- list(columns = list(group = arg_or(3, "group"), value = arg_or(4, "value")), labels = list(title = arg_or(5, "Violin Plot")), style = list(base_size = 12))
+delimiter <- arg_or(6, "auto"); width <- as.numeric(arg_or(7, "7")); height <- as.numeric(arg_or(8, "5")); dpi <- as.integer(arg_or(9, "300"))
+prepare_data <- function(df, config) { validate_columns(df, c(config$columns$group, config$columns$value), "distribution/violin input"); ensure_numeric_columns(df, config$columns$value, "distribution/violin input") }
+make_plot <- function(df, config) { ggplot2::ggplot(df, ggplot2::aes(x = .data[[config$columns$group]], y = .data[[config$columns$value]], fill = .data[[config$columns$group]])) + ggplot2::geom_violin(trim = FALSE, alpha = 0.72) + ggplot2::geom_boxplot(width = 0.14, outlier.alpha = 0.35) + ggplot2::labs(title = config$labels$title, x = config$columns$group, y = config$columns$value, fill = config$columns$group) + theme_visualization(base_size = config$style$base_size) }
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- make_plot(plot_df, config)
+  p <- customize_plot(p, plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows"), value = c("distribution/violin", nrow(plot_df))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "distribution/violin", rows = nrow(plot_df)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+
+main()

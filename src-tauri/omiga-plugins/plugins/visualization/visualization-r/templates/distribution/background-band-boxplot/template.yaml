@@ -1,0 +1,210 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_distribution_background_band_boxplot
+  version: 0.1.0
+  name: Band Boxplot
+  description: Differential grouped boxplot with gene/category background bands, jittered samples, and per-feature significance labels, migrated from OmicsAgent boxplot/differential_bg.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - distribution
+  - boxplot
+  - background-band
+  - differential
+  - table
+classification:
+  category: visualization/distribution
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - distribution
+  - boxplot
+  - background-band
+  - grouped-points
+  - statistical-annotation
+  stageInput:
+  - table
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with feature/category, group, and numeric value columns. See example.tsv converted from OmicsAgent data.json.
+  params:
+    feature_column:
+      kind: string
+      default: gene
+    group_column:
+      kind: string
+      default: group
+    value_column:
+      kind: string
+      default: exprs
+    title:
+      kind: string
+      default: ''
+    x_label:
+      kind: string
+      default: ''
+    y_label:
+      kind: string
+      default: Gene expression level
+    feature_order:
+      kind: string
+      default: auto
+      description: Optional comma-separated feature order.
+    group_order:
+      kind: string
+      default: Normal,Tumor
+      description: Comma-separated group order, or auto.
+    group_palette:
+      kind: string
+      default: '#8F499C,#4185BE,#6DC067,#F6DB35,#F78822'
+      description: Comma-separated outline/point colors for groups.
+    band_palette:
+      kind: string
+      default: '#8F499C,#4185BE,#6DC067,#F6DB35,#F78822'
+      description: Comma-separated background band colors for features.
+    band_alpha:
+      kind: number
+      default: 0.2
+    band_border_color:
+      kind: string
+      default: '#caccd1'
+    band_linetype:
+      kind: string
+      default: dashed
+    dodge_width:
+      kind: number
+      default: 0.7
+    box_width:
+      kind: number
+      default: 0.28
+    point_size:
+      kind: number
+      default: 1
+    point_alpha:
+      kind: number
+      default: 0.6
+    point_jitter_width:
+      kind: number
+      default: 0.15
+    bracket_text_size:
+      kind: number
+      default: 3.3
+    base_size:
+      kind: number
+      default: 12
+    show_points:
+      kind: boolean
+      default: true
+    show_significance:
+      kind: boolean
+      default: true
+    alpha:
+      kind: number
+      default: 0.05
+    test:
+      kind: enum
+      enum:
+      - wilcox.test
+      - t.test
+      default: wilcox.test
+    random_seed:
+      kind: integer
+      default: 7
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 6
+    height:
+      kind: number
+      default: 5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- background_band_boxplot
+- boxplot_background_band
+- differential_bg_boxplot
+- background_boxplot
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.feature_column}
+  - ${params.group_column}
+  - ${params.value_column}
+  - ${params.title}
+  - ${params.x_label}
+  - ${params.y_label}
+  - ${params.feature_order}
+  - ${params.group_order}
+  - ${params.group_palette}
+  - ${params.band_palette}
+  - ${params.band_alpha}
+  - ${params.band_border_color}
+  - ${params.band_linetype}
+  - ${params.dodge_width}
+  - ${params.box_width}
+  - ${params.point_size}
+  - ${params.point_alpha}
+  - ${params.point_jitter_width}
+  - ${params.bracket_text_size}
+  - ${params.base_size}
+  - ${params.show_points}
+  - ${params.show_significance}
+  - ${params.alpha}
+  - ${params.test}
+  - ${params.random_seed}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

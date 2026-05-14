@@ -465,20 +465,51 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval-plugins/basic")
     }
 
-    fn retrieval_plugin_root(plugin_name: &str) -> PathBuf {
-        match plugin_name {
-            "retrieval-dataset-gtex"
-            | "retrieval-dataset-cbioportal"
-            | "retrieval-literature-semantic-scholar"
-            | "retrieval-knowledge-uniprot" => Path::new(env!("CARGO_MANIFEST_DIR"))
+    #[derive(serde::Deserialize)]
+    struct CuratedMarketplace {
+        plugins: Vec<CuratedMarketplacePlugin>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CuratedMarketplacePlugin {
+        name: String,
+        source: CuratedMarketplaceSource,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CuratedMarketplaceSource {
+        path: Option<String>,
+    }
+
+    fn curated_marketplace_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("omiga-plugins")
+            .join("marketplace.json")
+    }
+
+    fn curated_plugin_root(plugin_name: &str) -> Option<PathBuf> {
+        let marketplace_path = curated_marketplace_path();
+        let raw = fs::read_to_string(&marketplace_path).ok()?;
+        let marketplace: CuratedMarketplace = serde_json::from_str(&raw).ok()?;
+        let entry = marketplace
+            .plugins
+            .into_iter()
+            .find(|entry| entry.name == plugin_name)?;
+        let source_path = entry.source.path?;
+        Some(
+            marketplace_path
                 .parent()
-                .expect("repo root")
-                .join(".omiga/plugins")
-                .join(plugin_name),
-            _ => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .unwrap_or_else(|| Path::new("."))
+                .join(source_path.trim_start_matches("./")),
+        )
+    }
+
+    fn retrieval_plugin_root(plugin_name: &str) -> PathBuf {
+        curated_plugin_root(plugin_name).unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/plugins/legacy")
-                .join(plugin_name),
-        }
+                .join(plugin_name)
+        })
     }
 
     fn retrieval_plugin_cases() -> Vec<(&'static str, Vec<&'static str>)> {

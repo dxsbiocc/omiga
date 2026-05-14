@@ -1,0 +1,253 @@
+#!/usr/bin/env Rscript
+# Template: distribution/differential-raincloud
+# Purpose: Two-group differential raincloud plot with half-density clouds,
+#          jittered samples, quantile bridges, and statistical annotations.
+#
+# Migration note:
+#   This template directly implements the high-quality OmicsAgent
+#   boxplot/raincloud_differential visual without carrying forward the
+#   private JSON ggplot2 DSL runtime.
+#
+# Input example:
+#   See example.tsv, converted from OmicsAgent data.json.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template distribution/differential-raincloud
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    group = arg_or(3, "gender"),
+    value = arg_or(4, "TP53")
+  ),
+  labels = list(
+    title = arg_or(5, ""),
+    x = "Group",
+    y = arg_or(6, "Gene expression level (TP53)")
+  ),
+  style = list(
+    group1 = "#a0c443",
+    group2 = "#5da4dc",
+    signif = "black",
+    ns = "grey80",
+    density_outline = "grey50",
+    point_outline = "grey40",
+    base_size = 12,
+    density_width = parse_number_arg(7, 0.42),
+    half_violin_nudge = parse_number_arg(8, 0.05),
+    jitter_width = parse_number_arg(9, 0.03),
+    quantile_point_size = parse_number_arg(10, 4)
+  ),
+  quantiles = seq(0.1, 0.9, by = 0.1),
+  random_seed = parse_integer_arg(11, 7)
+)
+delimiter <- arg_or(12, "auto")
+width <- parse_number_arg(13, 8)
+height <- parse_number_arg(14, 5)
+dpi <- parse_integer_arg(15, 300)
+
+format_p_value <- function(p) {
+  if (is.na(p)) return("NA")
+  if (p < 0.01) formatC(p, format = "e", digits = 2) else as.character(round(p, 4))
+}
+
+safe_test_p <- function(expr) {
+  result <- try(suppressWarnings(expr), silent = TRUE)
+  if (inherits(result, "try-error") || is.null(result$p.value)) return(NA_real_)
+  as.numeric(result$p.value)
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$group, config$columns$value), "distribution/differential-raincloud input")
+  df <- ensure_numeric_columns(df, config$columns$value, "distribution/differential-raincloud input")
+  group_values <- unique(as.character(df[[config$columns$group]]))
+  if (length(group_values) != 2) {
+    stop("distribution/differential-raincloud requires exactly two groups in the group column.", call. = FALSE)
+  }
+  df$.group <- factor(as.character(df[[config$columns$group]]), levels = group_values)
+  df$.value <- df[[config$columns$value]]
+  df$.x <- ifelse(df$.group == group_values[[1]], 1, 2)
+  set.seed(config$random_seed)
+  df$.x_jitter <- df$.x + stats::runif(nrow(df), -config$style$jitter_width, config$style$jitter_width)
+  stats::na.omit(df)
+}
+
+half_density_polygon <- function(values, x_center, side = "right", width = 0.42) {
+  values <- values[is.finite(values)]
+  if (length(unique(values)) < 2) return(data.frame(.x = numeric(), .value = numeric()))
+  dens <- stats::density(values, na.rm = TRUE, n = 256)
+  scaled <- if (max(dens$y) == 0) dens$y else dens$y / max(dens$y) * width
+  side_sign <- if (identical(side, "right")) 1 else -1
+  data.frame(
+    .x = c(rep(x_center, length(dens$x)), x_center + side_sign * rev(scaled)),
+    .value = c(dens$x, rev(dens$x))
+  )
+}
+
+build_density_data <- function(df, config) {
+  levels <- levels(df$.group)
+  left <- half_density_polygon(df$.value[df$.group == levels[[1]]], 1 - config$style$half_violin_nudge, "right", config$style$density_width)
+  right <- half_density_polygon(df$.value[df$.group == levels[[2]]], 2 + config$style$half_violin_nudge, "left", config$style$density_width)
+  left$.group <- levels[[1]]
+  right$.group <- levels[[2]]
+  rbind(left, right)
+}
+
+quantile_regression_pvalues <- function(df, probs) {
+  fallback <- safe_test_p(stats::wilcox.test(.value ~ .group, data = df))
+  if (!requireNamespace("quantreg", quietly = TRUE)) return(rep(fallback, length(probs)))
+  values <- numeric(length(probs))
+  df$.group_index <- ifelse(df$.group == levels(df$.group)[[1]], 0, 1)
+  for (i in seq_along(probs)) {
+    p <- try({
+      fit <- quantreg::rq(.value ~ .group_index, tau = probs[[i]], data = df)
+      coef <- summary(fit, se = "nid")$coefficients
+      as.numeric(coef[2, "Pr(>|t|)"])
+    }, silent = TRUE)
+    values[[i]] <- if (inherits(p, "try-error") || is.na(p)) fallback else p
+  }
+  values
+}
+
+build_quantile_data <- function(df, config) {
+  groups <- levels(df$.group)
+  probs <- config$quantiles
+  pvalues <- quantile_regression_pvalues(df, probs)
+  rows <- list()
+  for (prob_index in seq_along(probs)) {
+    prob <- probs[[prob_index]]
+    for (group_index in seq_along(groups)) {
+      group <- groups[[group_index]]
+      q <- stats::quantile(df$.value[df$.group == group], prob, na.rm = TRUE, names = FALSE)
+      x <- if (group_index == 1) 1 + config$style$half_violin_nudge * 2 else 2 - config$style$half_violin_nudge * 2
+      rows[[length(rows) + 1]] <- data.frame(
+        .prob = prob,
+        .group = group,
+        .x = x,
+        .q = q,
+        .signif = ifelse(!is.na(pvalues[[prob_index]]) && pvalues[[prob_index]] < 0.05, "P < 0.05", "NS")
+      )
+    }
+  }
+  do.call(rbind, rows)
+}
+
+build_annotation_data <- function(df) {
+  groups <- levels(df$.group)
+  group_values <- split(df$.value, df$.group)
+  ks_pvalue <- safe_test_p(stats::ks.test(group_values[[groups[[1]]]], group_values[[groups[[2]]]]))
+  wt_pvalue <- safe_test_p(stats::wilcox.test(group_values[[groups[[1]]]], group_values[[groups[[2]]]]))
+  y_max <- max(df$.value, na.rm = TRUE)
+  y_range <- diff(range(df$.value, na.rm = TRUE))
+  if (!is.finite(y_range) || y_range == 0) y_range <- 1
+  data.frame(
+    .x = c(1.3, 1.62),
+    .y = y_max + y_range * 0.04,
+    .label = c(
+      paste0("K-S Test\nP = ", format_p_value(ks_pvalue)),
+      paste0("Wilcoxon Test\nP = ", format_p_value(wt_pvalue))
+    )
+  )
+}
+
+differential_raincloud_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    axis.text.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    legend.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.grid.minor = ggplot2::element_blank(),
+    legend.position = "right"
+  )
+}
+
+make_plot <- function(df, config) {
+  density_df <- build_density_data(df, config)
+  quantile_df <- build_quantile_data(df, config)
+  annotation_df <- build_annotation_data(df)
+  group_palette <- stats::setNames(c(config$style$group1, config$style$group2), levels(df$.group))
+
+  ggplot2::ggplot() +
+    ggplot2::geom_polygon(
+      data = density_df,
+      ggplot2::aes(x = .x, y = .value, group = .group, fill = .group),
+      color = config$style$density_outline,
+      alpha = 0.72,
+      linewidth = 0.35
+    ) +
+    ggplot2::geom_point(
+      data = df,
+      ggplot2::aes(x = .x_jitter, y = .value, fill = .group),
+      shape = 21,
+      color = config$style$point_outline,
+      size = 2.1,
+      alpha = 0.74,
+      stroke = 0.25
+    ) +
+    ggplot2::geom_line(
+      data = quantile_df,
+      ggplot2::aes(x = .x, y = .q, group = .prob, color = .signif),
+      linewidth = 0.62
+    ) +
+    ggplot2::geom_point(
+      data = quantile_df,
+      ggplot2::aes(x = .x, y = .q, color = .signif),
+      size = config$style$quantile_point_size
+    ) +
+    ggplot2::geom_text(
+      data = annotation_df,
+      ggplot2::aes(x = .x, y = .y, label = .label),
+      inherit.aes = FALSE,
+      size = 3.2,
+      hjust = 0
+    ) +
+    ggplot2::scale_fill_manual(values = group_palette, name = config$columns$group) +
+    ggplot2::scale_color_manual(values = c("NS" = config$style$ns, "P < 0.05" = config$style$signif), name = "Quantile test") +
+    ggplot2::scale_x_continuous(breaks = c(1, 2), labels = levels(df$.group), limits = c(0.5, 2.5)) +
+    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.05, 0.14))) +
+    ggplot2::coord_flip(clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    differential_raincloud_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows", "groups"), value = c("distribution/differential-raincloud", nrow(plot_df), paste(levels(plot_df$.group), collapse = ","))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "distribution/differential-raincloud", rows = nrow(plot_df)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

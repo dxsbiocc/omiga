@@ -1,0 +1,234 @@
+#!/usr/bin/env Rscript
+# Template: distribution/vertical-raincloud
+# Purpose: Vertical raincloud plot with half-density clouds, compact boxplots,
+#          and jittered samples.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/boxplot/raincloud_vertical
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   It intentionally avoids the OmicsAgent build_ggplot JSON runtime and emulates
+#   gghalves-style half geometries with plain ggplot2 polygons/layers.
+#   The source data.json is bundled as example.tsv.
+#
+# Input example:
+#   See example.tsv with gene/expression columns.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template distribution/vertical-raincloud
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+parse_integer_csv_arg <- function(index, default) {
+  values <- suppressWarnings(as.integer(parse_csv_arg(index, default)))
+  values[!is.na(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    group = arg_or(3, "gene"),
+    value = arg_or(4, "expression")
+  ),
+  labels = list(
+    title = arg_or(5, ""),
+    x = arg_or(6, ""),
+    y = arg_or(7, "Gene expression level")
+  ),
+  group_order = parse_csv_arg(8, "auto"),
+  style = list(
+    palette = parse_csv_arg(9, "#009392,#39b185,#9ccb86,#e9e29c,#eeb479,#e88471,#cf597e"),
+    point_shapes = parse_integer_csv_arg(10, "21,22,23,24"),
+    density_width = parse_number_arg(11, 0.42),
+    density_nudge = parse_number_arg(12, 0.18),
+    box_width = parse_number_arg(13, 0.18),
+    box_nudge = parse_number_arg(14, -0.12),
+    jitter_width = parse_number_arg(15, 0.08),
+    jitter_nudge = parse_number_arg(16, -0.16),
+    point_size = parse_number_arg(17, 2),
+    point_alpha = parse_number_arg(18, 0.82),
+    base_size = parse_number_arg(19, 12)
+  ),
+  random_seed = parse_integer_arg(20, 7)
+)
+delimiter <- arg_or(21, "auto")
+width <- parse_number_arg(22, 6)
+height <- parse_number_arg(23, 5)
+dpi <- parse_integer_arg(24, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) {
+    palette <- c("#009392", "#39b185", "#9ccb86", "#e9e29c", "#eeb479", "#e88471", "#cf597e")
+  }
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+extend_shapes <- function(values, shapes) {
+  values <- unique(as.character(values))
+  if (length(shapes) == 0) shapes <- c(21L, 22L, 23L, 24L)
+  stats::setNames(rep(shapes, length.out = length(values)), values)
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$group, config$columns$value), "distribution/vertical-raincloud input")
+  df <- ensure_numeric_columns(df, config$columns$value, "distribution/vertical-raincloud input")
+  df$.group_raw <- as.character(df[[config$columns$group]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.group_raw), , drop = FALSE]
+  groups <- unique(df$.group_raw)
+  if (length(config$group_order) > 0) {
+    ordered <- config$group_order[config$group_order %in% groups]
+    groups <- c(ordered, setdiff(groups, ordered))
+  }
+  if (length(groups) < 2) {
+    stop("distribution/vertical-raincloud requires at least two groups.", call. = FALSE)
+  }
+  df$.group <- factor(df$.group_raw, levels = groups)
+  df <- df[!is.na(df$.group), , drop = FALSE]
+  df$.x <- as.numeric(df$.group)
+  set.seed(config$random_seed)
+  df$.x_jitter <- df$.x + config$style$jitter_nudge + stats::runif(nrow(df), -config$style$jitter_width, config$style$jitter_width)
+  df$.box_x <- df$.x + config$style$box_nudge
+  df
+}
+
+half_density_polygon <- function(values, x_center, width) {
+  values <- values[is.finite(values)]
+  if (length(unique(values)) < 2) {
+    return(data.frame(.x = numeric(), .value = numeric()))
+  }
+  dens <- stats::density(values, na.rm = TRUE, n = 256)
+  scaled <- if (max(dens$y) == 0) dens$y else dens$y / max(dens$y) * width
+  data.frame(
+    .x = c(rep(x_center, length(dens$x)), x_center + rev(scaled)),
+    .value = c(dens$x, rev(dens$x))
+  )
+}
+
+build_density_data <- function(df, config) {
+  rows <- list()
+  groups <- levels(df$.group)
+  for (i in seq_along(groups)) {
+    group <- groups[[i]]
+    values <- df$.value[df$.group == group]
+    poly <- half_density_polygon(values, i + config$style$density_nudge, config$style$density_width)
+    if (!nrow(poly)) next
+    poly$.group <- group
+    poly$.index <- i
+    rows[[length(rows) + 1]] <- poly
+  }
+  if (!length(rows)) return(data.frame(.x = numeric(), .value = numeric(), .group = character(), .index = integer()))
+  do.call(rbind, rows)
+}
+
+raincloud_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    legend.position = "none",
+    plot.title = ggplot2::element_text(hjust = 0.5, face = "bold")
+  )
+}
+
+make_plot <- function(df, config) {
+  groups <- levels(df$.group)
+  palette <- extend_palette(groups, config$style$palette)
+  shapes <- extend_shapes(groups, config$style$point_shapes)
+  density_df <- build_density_data(df, config)
+  y_range <- range(df$.value, na.rm = TRUE)
+  y_pad <- diff(y_range) * 0.06
+  if (!is.finite(y_pad) || y_pad == 0) y_pad <- 1
+
+  ggplot2::ggplot() +
+    ggplot2::geom_polygon(
+      data = density_df,
+      ggplot2::aes(x = .x, y = .value, group = .group, fill = .group),
+      color = "grey45",
+      linewidth = 0.25,
+      alpha = 0.72,
+      inherit.aes = FALSE
+    ) +
+    ggplot2::geom_boxplot(
+      data = df,
+      ggplot2::aes(x = .box_x, y = .value, group = .group, fill = .group),
+      width = config$style$box_width,
+      outlier.shape = NA,
+      alpha = 0.86,
+      color = "#111827",
+      linewidth = 0.35,
+      inherit.aes = FALSE
+    ) +
+    ggplot2::geom_point(
+      data = df,
+      ggplot2::aes(x = .x_jitter, y = .value, fill = .group, shape = .group),
+      color = "grey30",
+      stroke = 0.25,
+      size = config$style$point_size,
+      alpha = config$style$point_alpha,
+      inherit.aes = FALSE
+    ) +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_shape_manual(values = shapes, guide = "none") +
+    ggplot2::scale_x_continuous(breaks = seq_along(groups), labels = groups, limits = c(0.5, length(groups) + 0.75), expand = c(0.01, 0.01)) +
+    ggplot2::scale_y_continuous(limits = c(y_range[[1]] - y_pad, y_range[[2]] + y_pad), expand = ggplot2::expansion(mult = c(0.02, 0.04))) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    raincloud_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  groups <- levels(plot_df$.group)
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "groups", "min_value", "max_value"),
+      value = c("distribution/vertical-raincloud", nrow(plot_df), length(groups), min(plot_df$.value, na.rm = TRUE), max(plot_df$.value, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "distribution/vertical-raincloud", rows = nrow(plot_df), groups = length(groups), min_value = min(plot_df$.value, na.rm = TRUE), max_value = max(plot_df$.value, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

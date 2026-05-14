@@ -1,0 +1,194 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_distribution_paired_boxplot
+  version: 0.1.0
+  name: Paired Boxplot
+  description: Paired-sample boxplot with linking curves, overlaid points, and paired statistical annotation, migrated from OmicsAgent boxplot/paired.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - distribution
+    - boxplot
+    - paired
+    - statistical-annotation
+classification:
+  category: visualization/distribution
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - distribution
+    - boxplot
+    - paired
+    - patient-paired
+    - statistical-annotation
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with paired sample id, group, and numeric value columns. See example.tsv converted from OmicsAgent data.json.
+  params:
+    group_column:
+      kind: string
+      default: sample_type
+    value_column:
+      kind: string
+      default: BRCA1
+    pair_column:
+      kind: string
+      default: patient
+    title:
+      kind: string
+      default: TCGA-ACC
+    x_label:
+      kind: string
+      default: ""
+    y_label:
+      kind: string
+      default: Expression of BRCA1
+    group_order:
+      kind: string
+      default: Normal,Tumor
+      description: Comma-separated group order, or auto.
+    palette:
+      kind: string
+      default: "#69c5e4,#e66760"
+      description: Comma-separated fill/outline colors recycled if there are more groups.
+    box_alpha:
+      kind: number
+      default: 0.12
+    point_size:
+      kind: number
+      default: 3
+    point_alpha:
+      kind: number
+      default: 0.9
+    jitter_width:
+      kind: number
+      default: 0.07
+    pair_line_alpha:
+      kind: number
+      default: 0.45
+    pair_line_width:
+      kind: number
+      default: 0.35
+    curve:
+      kind: number
+      default: 0.22
+    bracket_text_size:
+      kind: number
+      default: 3.2
+    base_size:
+      kind: number
+      default: 12
+    show_paired_lines:
+      kind: boolean
+      default: true
+    show_significance:
+      kind: boolean
+      default: true
+    alpha:
+      kind: number
+      default: 0.05
+    max_brackets:
+      kind: integer
+      default: 3
+    test:
+      kind: enum
+      enum: [wilcox.test, t.test]
+      default: wilcox.test
+    random_seed:
+      kind: integer
+      default: 7
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 5.2
+    height:
+      kind: number
+      default: 6.2
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - paired_boxplot
+  - boxplot_paired
+  - paired_distribution
+  - paired_expression_boxplot
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.group_column}
+    - ${params.value_column}
+    - ${params.pair_column}
+    - ${params.title}
+    - ${params.x_label}
+    - ${params.y_label}
+    - ${params.group_order}
+    - ${params.palette}
+    - ${params.box_alpha}
+    - ${params.point_size}
+    - ${params.point_alpha}
+    - ${params.jitter_width}
+    - ${params.pair_line_alpha}
+    - ${params.pair_line_width}
+    - ${params.curve}
+    - ${params.bracket_text_size}
+    - ${params.base_size}
+    - ${params.show_paired_lines}
+    - ${params.show_significance}
+    - ${params.alpha}
+    - ${params.max_brackets}
+    - ${params.test}
+    - ${params.random_seed}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

@@ -1,0 +1,158 @@
+{
+  "name": "omiga-curated",
+  "interface": {
+    "displayName": "Omiga Curated Plugins"
+  },
+  "plugins": [
+    {
+      "name": "transcriptomics",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bioinformatics/transcriptomics"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Bioinformatics"
+    },
+    {
+      "name": "operator-seqtk",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bioinformatics/operator-seqtk"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Operator"
+    },
+    {
+      "name": "visualization-r",
+      "source": {
+        "source": "local",
+        "path": "./plugins/visualization/visualization-r"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Visualization"
+    },
+    {
+      "name": "resource-ncbi",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resources/resource-ncbi"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "resource-embl-ebi",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resources/resource-embl-ebi"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "resource-drugs",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resources/resource-drugs"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "resource-pathways",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resources/resource-pathways"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-dataset-gtex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resources/retrieval-dataset-gtex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-dataset-cbioportal",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resources/retrieval-dataset-cbioportal"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-literature-semantic-scholar",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resources/retrieval-literature-semantic-scholar"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-knowledge-uniprot",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resources/retrieval-knowledge-uniprot"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "ngs-alignment",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bioinformatics/ngs-alignment"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Bioinformatics"
+    }
+  ],
+  "remote": {
+    "provider": "github",
+    "url": "https://raw.githubusercontent.com/dxsbiocc/omiga-plugins/main/marketplace.json",
+    "repositoryUrl": "https://github.com/dxsbiocc/omiga-plugins",
+    "changelogUrl": "https://github.com/dxsbiocc/omiga-plugins/releases"
+  }
+}

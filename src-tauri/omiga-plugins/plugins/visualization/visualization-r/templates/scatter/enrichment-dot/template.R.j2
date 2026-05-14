@@ -1,0 +1,74 @@
+#!/usr/bin/env Rscript
+# Template: scatter/enrichment-dot
+# Purpose: Dot plot for ranked enrichment/result tables.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/enrichment-dot
+#
+# Personalization:
+#   Edit the emitted source when customization is needed.
+#   To save a reusable style, use scripts/promote_visual_template.py.
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+
+config <- list(
+  columns = list(term = arg_or(3, "term"), category = arg_or(4, "category"), size = arg_or(5, "gene_count"), x = arg_or(6, "ratio"), pvalue = arg_or(7, "p_adjust")),
+  top_n = as.integer(arg_or(8, "10")),
+  labels = list(title = arg_or(9, "Enrichment dot plot")),
+  style = list(base_size = 12)
+)
+delimiter <- arg_or(10, "auto"); width <- as.numeric(arg_or(11, "8")); height <- as.numeric(arg_or(12, "5.5")); dpi <- as.integer(arg_or(13, "300"))
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$term, config$columns$size, config$columns$x, config$columns$pvalue), "scatter/enrichment-dot input")
+  df <- ensure_numeric_columns(df, c(config$columns$size, config$columns$x, config$columns$pvalue), "scatter/enrichment-dot input")
+  df$.pvalue <- pmax(df[[config$columns$pvalue]], .Machine$double.xmin)
+  df$.neglog10 <- -log10(df$.pvalue)
+  df <- df[order(df$.pvalue, -df[[config$columns$size]]), , drop = FALSE]
+  df <- utils::head(df, config$top_n)
+  df$.term <- factor(df[[config$columns$term]], levels = rev(df[[config$columns$term]]))
+  df
+}
+
+make_plot <- function(df, config) {
+  category_col <- resolve_optional_column(df, config$columns$category)
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[[config$columns$x]], y = .term, size = .data[[config$columns$size]], color = .neglog10)) +
+    ggplot2::geom_point(alpha = 0.86) +
+    ggplot2::scale_color_gradient(low = "#93C5FD", high = "#DC2626") +
+    ggplot2::labs(title = config$labels$title, x = config$columns$x, y = NULL, size = config$columns$size, color = "-log10(p)") +
+    theme_visualization(base_size = config$style$base_size)
+  if (!is.null(category_col)) p <- p + ggplot2::facet_grid(stats::as.formula(paste(category_col, "~ .")), scales = "free_y", space = "free_y")
+  p
+}
+
+customize_plot <- function(p, df, config) p
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(plot_df, file.path(outdir, "top_terms.tsv"))
+  write_tsv(data.frame(metric = c("template", "terms"), value = c("scatter/enrichment-dot", nrow(plot_df))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "scatter/enrichment-dot", terms = nrow(plot_df)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+
+main()

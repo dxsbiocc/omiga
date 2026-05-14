@@ -1,0 +1,213 @@
+#!/usr/bin/env Rscript
+# Template: scatter/diagonal
+# Purpose: Diagonal comparison scatter plot for paired abundance/expression columns.
+#
+# Migration note:
+#   This template directly implements the high-quality OmicsAgent
+#   scatter/diagonal visual without carrying forward the private JSON ggplot2 DSL.
+#
+# Input example:
+#   See example.tsv, converted from OmicsAgent data.json.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/diagonal
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  raw <- arg_or(index, as.character(default))
+  if (tolower(raw) == "auto") return(default)
+  value <- suppressWarnings(as.numeric(raw))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_optional_number_arg <- function(index) {
+  raw <- arg_or(index, "auto")
+  if (!nzchar(raw) || tolower(raw) == "auto") return(NULL)
+  value <- suppressWarnings(as.numeric(raw))
+  if (is.na(value)) NULL else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, as.character(default)))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    x = arg_or(3, "WT"),
+    y = arg_or(4, "KO"),
+    group = arg_or(5, "group"),
+    label = arg_or(6, "symbol")
+  ),
+  labels = list(
+    title = arg_or(7, "Yap1-KO"),
+    x = arg_or(8, "WT"),
+    y = arg_or(9, "KO"),
+    up = arg_or(10, "Up"),
+    down = arg_or(11, "Down")
+  ),
+  style = list(
+    up = arg_or(12, "#a16928"),
+    none = arg_or(13, "#edeac2"),
+    down = arg_or(14, "#2887a1"),
+    label_text = arg_or(15, "#525e61"),
+    point_size = parse_number_arg(16, 3),
+    point_alpha = parse_number_arg(17, 0.5),
+    label_size = parse_number_arg(18, 3),
+    corner_label_size = parse_number_arg(19, 6),
+    base_size = parse_number_arg(20, 12)
+  ),
+  top_label_count = parse_integer_arg(21, 10),
+  pseudocount = parse_number_arg(22, 0),
+  limits = list(
+    xmin = parse_optional_number_arg(23),
+    xmax = parse_optional_number_arg(24),
+    ymin = parse_optional_number_arg(25),
+    ymax = parse_optional_number_arg(26)
+  ),
+  show_diagonal = parse_logical_arg(27, TRUE)
+)
+delimiter <- arg_or(28, "auto")
+width <- parse_number_arg(29, 8)
+height <- parse_number_arg(30, 6)
+dpi <- parse_integer_arg(31, 300)
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$x, config$columns$y, config$columns$group, config$columns$label), "scatter/diagonal input")
+  df <- ensure_numeric_columns(df, c(config$columns$x, config$columns$y), "scatter/diagonal input")
+  x_raw <- df[[config$columns$x]] + config$pseudocount
+  y_raw <- df[[config$columns$y]] + config$pseudocount
+  if (any(x_raw <= 0 | y_raw <= 0, na.rm = TRUE)) {
+    stop("scatter/diagonal requires positive x/y values after pseudocount before log2 transform.", call. = FALSE)
+  }
+  groups <- unique(as.character(df[[config$columns$group]]))
+  preferred <- c("Up", "None", "Down")
+  group_levels <- c(preferred[preferred %in% groups], setdiff(groups, preferred))
+  df$.x <- log2(x_raw)
+  df$.y <- log2(y_raw)
+  df$.group <- factor(as.character(df[[config$columns$group]]), levels = group_levels)
+  df$.label <- as.character(df[[config$columns$label]])
+  df$.log2fc <- log2(x_raw / y_raw)
+  stats::na.omit(df)
+}
+
+label_data <- function(df, config) {
+  candidates <- df[tolower(as.character(df$.group)) != "none", , drop = FALSE]
+  if (nrow(candidates) == 0 || config$top_label_count <= 0) return(candidates[0, , drop = FALSE])
+  pos <- candidates[candidates$.log2fc > 0, , drop = FALSE]
+  neg <- candidates[candidates$.log2fc <= 0, , drop = FALSE]
+  top_by_abs <- function(x) {
+    if (nrow(x) == 0) return(x)
+    x[order(abs(x$.log2fc), decreasing = TRUE), , drop = FALSE][seq_len(min(config$top_label_count, nrow(x))), , drop = FALSE]
+  }
+  rbind(top_by_abs(pos), top_by_abs(neg))
+}
+
+axis_limits <- function(df, config) {
+  xmin <- config$limits$xmin
+  xmax <- config$limits$xmax
+  ymin <- config$limits$ymin
+  ymax <- config$limits$ymax
+  both <- range(c(df$.x, df$.y), na.rm = TRUE)
+  pad <- diff(both) * 0.08
+  if (!is.finite(pad) || pad == 0) pad <- 1
+  if (is.null(xmin)) xmin <- both[[1]] - pad
+  if (is.null(xmax)) xmax <- both[[2]] + pad
+  if (is.null(ymin)) ymin <- both[[1]] - pad
+  if (is.null(ymax)) ymax <- both[[2]] + pad
+  list(x = c(xmin, xmax), y = c(ymin, ymax))
+}
+
+plot_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    legend.title = ggplot2::element_text(size = 12),
+    legend.position = "none"
+  )
+}
+
+make_plot <- function(df, config) {
+  labels <- label_data(df, config)
+  limits <- axis_limits(df, config)
+  palette <- c("Up" = config$style$up, "None" = config$style$none, "Down" = config$style$down)
+  extra_groups <- setdiff(levels(df$.group), names(palette))
+  if (length(extra_groups) > 0) {
+    palette <- c(palette, stats::setNames(visualization_palette(length(extra_groups)), extra_groups))
+  }
+  up_x <- limits$x[[1]] + diff(limits$x) * 0.08
+  up_y <- limits$y[[2]] - diff(limits$y) * 0.08
+  down_x <- limits$x[[2]] - diff(limits$x) * 0.08
+  down_y <- limits$y[[1]] + diff(limits$y) * 0.08
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .x, y = .y, colour = .group)) +
+    ggplot2::geom_point(size = config$style$point_size, alpha = config$style$point_alpha, show.legend = FALSE)
+  if (isTRUE(config$show_diagonal)) {
+    p <- p + ggplot2::geom_abline(slope = 1, intercept = 0, colour = "grey55", linewidth = 0.5, linetype = "dashed")
+  }
+  if (nrow(labels) > 0) {
+    if (requireNamespace("ggrepel", quietly = TRUE)) {
+      p <- p + ggrepel::geom_label_repel(
+        data = labels,
+        ggplot2::aes(label = .label),
+        max.overlaps = 2000,
+        size = config$style$label_size,
+        show.legend = FALSE,
+        min.segment.length = 0,
+        label.size = 0.18,
+        alpha = 0.9
+      )
+    } else {
+      p <- p + ggplot2::geom_label(
+        data = labels,
+        ggplot2::aes(label = .label),
+        size = config$style$label_size,
+        show.legend = FALSE,
+        alpha = 0.9
+      )
+    }
+  }
+  p +
+    ggplot2::annotate("label", x = up_x, y = up_y, label = config$labels$up, size = config$style$corner_label_size, fill = config$style$up, colour = config$style$label_text, alpha = 0.8) +
+    ggplot2::annotate("label", x = down_x, y = down_y, label = config$labels$down, size = config$style$corner_label_size, fill = config$style$down, colour = config$style$label_text, alpha = 0.8) +
+    ggplot2::scale_colour_manual(values = palette, drop = FALSE) +
+    ggplot2::coord_cartesian(xlim = limits$x, ylim = limits$y) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y, colour = config$columns$group) +
+    plot_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows", "labeled", "x_column", "y_column"), value = c("scatter/diagonal", nrow(plot_df), nrow(label_data(plot_df, config)), config$columns$x, config$columns$y)), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "scatter/diagonal", rows = nrow(plot_df), labeled = nrow(label_data(plot_df, config))))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

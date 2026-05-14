@@ -1,0 +1,162 @@
+{
+  "name": "resource-drugs",
+  "version": "0.1.0",
+  "description": "Aggregates public drug databases for quick drug, compound, labeling, clinical-trial, and repurposing retrieval.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/retrieval_drug_sources.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "chembl,pubchem,broad_repurposing_hub,openfda,clinicaltrials,dailymed",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "resource-drugs"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "resources": [
+      {
+        "id": "chembl",
+        "category": "drug",
+        "label": "ChEMBL",
+        "description": "Bioactive molecule records with drug-like properties via ChEMBL web services.",
+        "aliases": ["chembl_molecule", "chembl_compound"],
+        "subcategories": ["bioactive_molecules", "compound"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": ["Read-only public ChEMBL web services."],
+        "defaultEnabled": false,
+        "replacesBuiltin": false,
+        "parameters": [
+          { "name": "query", "type": "string", "description": "Molecule name, synonym, target, or ChEMBL query text." },
+          { "name": "limit", "type": "number", "description": "Maximum ChEMBL records to return." }
+        ]
+      },
+      {
+        "id": "pubchem",
+        "category": "drug",
+        "label": "PubChem",
+        "description": "Chemical compound identifiers and properties via PubChem PUG REST and NCBI E-utilities.",
+        "aliases": ["pubchem_compound", "cid", "pccompound"],
+        "subcategories": ["compound", "chemical_properties"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": ["pubmed_api_key", "pubmed_email", "pubmed_tool_name"],
+        "riskLevel": "low",
+        "riskNotes": ["Read-only public NCBI/PubChem APIs; optional NCBI credentials are projected only when configured."],
+        "defaultEnabled": false,
+        "replacesBuiltin": false,
+        "parameters": [
+          { "name": "query", "type": "string", "description": "Compound name, synonym, formula, or PubChem text query." },
+          { "name": "limit", "type": "number", "description": "Maximum PubChem CIDs to resolve." }
+        ]
+      },
+      {
+        "id": "broad_repurposing_hub",
+        "category": "drug",
+        "label": "Broad Repurposing Hub",
+        "description": "Drug repurposing annotations including clinical phase, mechanism of action, targets, disease area, and indication.",
+        "aliases": ["broad", "repurposing_hub", "drug_repurposing_hub"],
+        "subcategories": ["repurposing", "mechanism", "target"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": ["Read-only public Broad Repurposing Hub annotation table; Broad notes the data is for research use only."],
+        "defaultEnabled": false,
+        "replacesBuiltin": false,
+        "parameters": [
+          { "name": "query", "type": "string", "description": "Drug, target, mechanism of action, disease area, or indication text." },
+          { "name": "limit", "type": "number", "description": "Maximum matched table rows to return." }
+        ]
+      },
+      {
+        "id": "openfda",
+        "category": "drug",
+        "label": "openFDA",
+        "description": "FDA drug labeling, adverse event, and Drugs@FDA records via openFDA drug APIs.",
+        "aliases": ["open_fda", "fda_drug", "fda_label", "fda_event"],
+        "subcategories": ["labeling", "adverse_events", "approval"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": ["Read-only public openFDA APIs; openFDA data is unvalidated and not clinical advice."],
+        "defaultEnabled": false,
+        "replacesBuiltin": false,
+        "parameters": [
+          { "name": "query", "type": "string", "description": "Drug, label, sponsor, adverse-event, or application text." },
+          { "name": "endpoint", "type": "string", "description": "Optional openFDA drug API endpoint: label (default), event, or drugsfda." },
+          { "name": "limit", "type": "number", "description": "Maximum openFDA records to return." }
+        ]
+      },
+      {
+        "id": "clinicaltrials",
+        "category": "drug",
+        "label": "ClinicalTrials.gov",
+        "description": "Clinical study records and intervention metadata via the ClinicalTrials.gov API v2.",
+        "aliases": ["clinicaltrials_gov", "clinical_trials", "nct"],
+        "subcategories": ["clinical_trials", "intervention", "study"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": ["Read-only public ClinicalTrials.gov API v2."],
+        "defaultEnabled": false,
+        "replacesBuiltin": false,
+        "parameters": [
+          { "name": "query", "type": "string", "description": "Drug, intervention, condition, sponsor, or study keyword." },
+          { "name": "pageSize", "type": "number", "description": "Maximum studies to return." }
+        ]
+      },
+      {
+        "id": "dailymed",
+        "category": "drug",
+        "label": "DailyMed",
+        "description": "FDA Structured Product Labeling records via DailyMed web services.",
+        "aliases": ["daily_med", "spl", "drug_label"],
+        "subcategories": ["labeling", "spl"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": ["Read-only public DailyMed web services."],
+        "defaultEnabled": false,
+        "replacesBuiltin": false,
+        "parameters": [
+          { "name": "query", "type": "string", "description": "Drug name for SPL lookup." },
+          { "name": "pagesize", "type": "number", "description": "Maximum SPL records to return." }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "Drug Databases",
+    "shortDescription": "ChEMBL, PubChem, Broad Repurposing Hub, openFDA, ClinicalTrials.gov, and DailyMed retrieval",
+    "longDescription": "Aggregates six public drug data resources for fast search/query/fetch of drug-like molecules, chemical properties, drug repurposing annotations, FDA labels/events, clinical studies, and SPL labels.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Drug",
+      "Compound",
+      "Labeling",
+      "Clinical Trials",
+      "Repurposing",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#F97316",
+    "defaultPrompt": [
+      "Search ChEMBL, PubChem, openFDA, ClinicalTrials.gov, DailyMed, or Broad Repurposing Hub for aspirin.",
+      "Fetch a ChEMBL ID, PubChem CID, NCT ID, DailyMed setid, or openFDA record through the drug database plugin."
+    ]
+  }
+}

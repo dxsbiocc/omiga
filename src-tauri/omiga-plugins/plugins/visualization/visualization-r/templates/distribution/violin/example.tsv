@@ -1,0 +1,13 @@
+sample	group	value
+S01	Control	5.1
+S02	Control	5.4
+S03	Control	5.0
+S04	Control	5.8
+S05	Treatment	6.2
+S06	Treatment	6.7
+S07	Treatment	6.5
+S08	Treatment	7.0
+S09	Recovery	5.9
+S10	Recovery	6.0
+S11	Recovery	6.3
+S12	Recovery	6.1

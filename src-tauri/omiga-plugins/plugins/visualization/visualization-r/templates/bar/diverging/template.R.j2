@@ -1,0 +1,201 @@
+#!/usr/bin/env Rscript
+# Template: bar/diverging
+# Purpose: Two-sided diverging enrichment bar chart.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/bar/opposite
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   The bundled example.tsv is converted from the source data.json.
+#
+# Input example:
+#   See example.tsv with Description/p.adjust/Change columns.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template bar/diverging
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, if (default) "true" else "false"))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    label = arg_or(3, "Description"),
+    p_value = arg_or(4, "p.adjust"),
+    group = arg_or(5, "Change")
+  ),
+  labels = list(
+    title = arg_or(6, ""),
+    x = arg_or(7, "-log10(p.adjust)"),
+    fill = arg_or(8, "Correlation")
+  ),
+  group_order = parse_csv_arg(9, "Positive,Negative"),
+  positive_groups = parse_csv_arg(10, "Positive,Up,Activated,Enriched"),
+  style = list(
+    palette = parse_csv_arg(11, "#acd372,#ed6ca4"),
+    bar_alpha = parse_number_arg(12, 0.70),
+    bar_width = parse_number_arg(13, 0.72),
+    center_label_offset = parse_number_arg(14, 0.20),
+    center_label_size = parse_number_arg(15, 3.5),
+    base_size = parse_number_arg(16, 12)
+  ),
+  score = list(
+    max_score = parse_number_arg(17, 25),
+    zero_replacement = arg_or(18, "auto")
+  ),
+  show_center_labels = parse_logical_arg(19, TRUE)
+)
+delimiter <- arg_or(20, "auto")
+width <- parse_number_arg(21, 8)
+height <- parse_number_arg(22, 7)
+dpi <- parse_integer_arg(23, 300)
+
+safe_score <- function(p_values, config) {
+  p_values <- suppressWarnings(as.numeric(p_values))
+  replacement <- if (tolower(config$score$zero_replacement) == "auto") {
+    # Treat source zero p-values as the configured visual cap, matching the
+    # original OmicsAgent plot that clipped extreme enrichment to the axis limit.
+    10^-config$score$max_score
+  } else {
+    parsed <- suppressWarnings(as.numeric(config$score$zero_replacement))
+    if (is.na(parsed) || parsed <= 0) 10^-config$score$max_score else parsed
+  }
+  p_values[!is.finite(p_values) | p_values <= 0] <- replacement
+  pmin(-log10(p_values), config$score$max_score)
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$label, config$columns$p_value, config$columns$group), "bar/diverging input")
+  df <- ensure_numeric_columns(df, config$columns$p_value, "bar/diverging input")
+  df$.label <- as.character(df[[config$columns$label]])
+  df$.group_raw <- as.character(df[[config$columns$group]])
+  df$.p_value <- df[[config$columns$p_value]]
+  df <- df[nzchar(df$.label) & nzchar(df$.group_raw), , drop = FALSE]
+  groups <- unique(df$.group_raw)
+  if (length(config$group_order) > 0) {
+    ordered <- config$group_order[config$group_order %in% groups]
+    groups <- c(ordered, setdiff(groups, ordered))
+  }
+  if (length(groups) != 2) {
+    stop("bar/diverging requires exactly two groups.", call. = FALSE)
+  }
+  positive_group <- config$positive_groups[config$positive_groups %in% groups][1]
+  if (is.na(positive_group)) positive_group <- groups[[1]]
+  df$.group <- factor(df$.group_raw, levels = groups)
+  df$.score <- safe_score(df$.p_value, config)
+  df$.sign <- ifelse(as.character(df$.group) == positive_group, 1, -1)
+  df$.signed_score <- df$.score * df$.sign
+  # Put one group on each side, with strongest terms nearest the top within each side.
+  order_index <- order(df$.sign, df$.score, decreasing = FALSE)
+  df$.label_factor <- factor(df$.label, levels = df$.label[order_index])
+  df$.label_x <- ifelse(df$.sign > 0, -abs(config$style$center_label_offset), abs(config$style$center_label_offset))
+  df$.label_hjust <- ifelse(df$.sign > 0, 1, 0)
+  df
+}
+
+plot_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    axis.text.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    axis.line.y = ggplot2::element_blank(),
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    legend.position = "top",
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    legend.background = ggplot2::element_rect(fill = "white", color = NA),
+    plot.title = ggplot2::element_text(hjust = 0.5, face = "bold")
+  )
+}
+
+make_plot <- function(df, config) {
+  groups <- levels(df$.group)
+  palette <- config$style$palette
+  if (length(palette) < length(groups)) palette <- rep(palette, length.out = length(groups))
+  palette <- stats::setNames(palette[seq_along(groups)], groups)
+  max_abs <- max(abs(df$.signed_score), config$style$center_label_offset * 4, na.rm = TRUE)
+  axis_limit <- ceiling(max_abs / 5) * 5
+  breaks <- pretty(c(-axis_limit, axis_limit), n = 5)
+  breaks <- breaks[breaks >= -axis_limit & breaks <= axis_limit]
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .signed_score, y = .label_factor, fill = .group)) +
+    ggplot2::geom_vline(xintercept = 0, color = "grey45", linewidth = 0.45) +
+    ggplot2::geom_col(width = config$style$bar_width, alpha = config$style$bar_alpha, color = "white", linewidth = 0.25) +
+    ggplot2::scale_fill_manual(name = config$labels$fill, values = palette, drop = FALSE) +
+    ggplot2::scale_x_continuous(
+      limits = c(-axis_limit, axis_limit),
+      breaks = breaks,
+      labels = abs(breaks),
+      expand = ggplot2::expansion(mult = c(0.03, 0.03))
+    ) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = "") +
+    plot_theme(config)
+
+  if (isTRUE(config$show_center_labels)) {
+    p <- p + ggplot2::geom_text(
+      data = df,
+      ggplot2::aes(x = .label_x, y = .label_factor, label = .label, hjust = .label_hjust),
+      inherit.aes = FALSE,
+      color = "#111827",
+      size = config$style$center_label_size,
+      show.legend = FALSE
+    )
+  }
+  p
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "groups", "max_score"),
+      value = c("bar/diverging", nrow(plot_df), paste(levels(plot_df$.group), collapse = ","), max(plot_df$.score, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/diverging", rows = nrow(plot_df), groups = paste(levels(plot_df$.group), collapse = ","), max_score = max(plot_df$.score, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

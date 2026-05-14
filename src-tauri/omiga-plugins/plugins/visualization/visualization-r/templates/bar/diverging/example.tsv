@@ -1,0 +1,20 @@
+Description	p.adjust	Change
+Inositol phosphate metabolism	0.0002	Positive
+ErbB signaling pathway	0.0002	Positive
+Polycomb repressive complex	0	Positive
+Adherens junction	0.0002	Positive
+TGF-beta signaling pathway	0.0001	Positive
+Nucleocytoplasmic transport	6.1948e-06	Positive
+Neurotrophin signaling pathway	0	Positive
+ATP-dependent chromatin remodeling	7.8693e-06	Positive
+Ubiquitin mediated proteolysis	7.119e-09	Positive
+Cysteine and methionine metabolism	0.0377	Negative
+Tryptophan metabolism	0.0276	Negative
+Endocytosis	1.7841e-08	Positive
+Biosynthesis of amino acids	0.0072	Negative
+Glycine, serine and threonine metabolism	0.0013	Negative
+Cholesterol metabolism	0.0026	Negative
+Carbon metabolism	0.0002	Negative
+Cardiac muscle contraction	2.6638e-06	Negative
+Oxidative phosphorylation	1.4792e-12	Negative
+Thermogenesis	4.6901e-10	Negative

@@ -1,0 +1,172 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_dumbbell_horizontal
+  version: 0.1.0
+  name: Dumbbell
+  description: Two-group horizontal dumbbell comparison plot migrated from OmicsAgent scatter/dumbbell_horizontal with connector lines, open/filled points, percent labels, and inline group labels.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - scatter
+  - dumbbell
+  - comparison
+classification:
+  category: visualization/scatter
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - scatter
+  - dumbbell
+  - comparison
+  stageInput:
+  - table
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with category, numeric value, and exactly two groups. See this template's example.tsv.
+  params:
+    category_column:
+      kind: string
+      default: age_group
+    value_column:
+      kind: string
+      default: mean_prev
+    group_column:
+      kind: string
+      default: Sex
+    title:
+      kind: string
+      default: Mean Prevalence of obesity
+    x_label:
+      kind: string
+      default: ''
+    y_label:
+      kind: string
+      default: ''
+    group1_color:
+      kind: string
+      default: '#79ceb8'
+    group2_color:
+      kind: string
+      default: '#f784b6'
+    connector_color:
+      kind: string
+      default: '#cba7a2'
+    outer_fill:
+      kind: string
+      default: '#ffffff'
+    point_size_outer:
+      kind: number
+      default: 5
+    point_size_inner:
+      kind: number
+      default: 3
+    label_size:
+      kind: number
+      default: 3.6
+    legend_label_size:
+      kind: number
+      default: 5
+    text_hjust_offset:
+      kind: number
+      default: 0.2
+    base_size:
+      kind: number
+      default: 12
+    xmin:
+      kind: string
+      default: auto
+      description: Numeric lower x-axis limit, or auto.
+    xmax:
+      kind: string
+      default: auto
+      description: Numeric upper x-axis limit, or auto.
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 6
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- dumbbell_horizontal
+- horizontal_dumbbell
+- scatter_dumbbell_horizontal
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.category_column}
+  - ${params.value_column}
+  - ${params.group_column}
+  - ${params.title}
+  - ${params.x_label}
+  - ${params.y_label}
+  - ${params.group1_color}
+  - ${params.group2_color}
+  - ${params.connector_color}
+  - ${params.outer_fill}
+  - ${params.point_size_outer}
+  - ${params.point_size_inner}
+  - ${params.label_size}
+  - ${params.legend_label_size}
+  - ${params.text_hjust_offset}
+  - ${params.base_size}
+  - ${params.xmin}
+  - ${params.xmax}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

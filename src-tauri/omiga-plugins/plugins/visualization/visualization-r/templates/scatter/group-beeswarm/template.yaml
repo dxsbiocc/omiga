@@ -1,0 +1,179 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_group_beeswarm
+  version: 0.1.0
+  name: Group Beeswarm
+  description: Grouped beeswarm-style differential scatter with category tiles, significance colors, point sizes from adjusted p-values, and top-label annotations.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - beeswarm
+    - differential
+classification:
+  category: visualization/scatter
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - beeswarm
+    - differential
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table. See example.tsv converted from OmicsAgent scatter/beeswarm_group data.json.
+  params:
+    category_column:
+      kind: string
+      default: cate
+    value_column:
+      kind: string
+      default: logFC
+    sign_column:
+      kind: string
+      default: sign
+    pvalue_column:
+      kind: string
+      default: adj.P.Val
+      description: Adjusted p-value column mapped to point size as -log10(p).
+    label_column:
+      kind: string
+      default: symbol
+    category_order:
+      kind: string
+      default: ''
+      description: Optional comma-separated category order. Empty keeps first-seen order from the table.
+    sign_order:
+      kind: string
+      default: Down,Up
+      description: Optional comma-separated sign order for colors and legend.
+    title:
+      kind: string
+      default: Group Beeswarm
+    y_label:
+      kind: string
+      default: log2FC
+    sign_palette:
+      kind: string
+      default: '#2dde98,#ff6c5f'
+    tile_palette:
+      kind: string
+      default: '#a8dbd9,#85c4c9,#68abb8,#4f90a6,#3b738f'
+    label_colors:
+      kind: string
+      default: '#595d7a,#595d7a,#595d7a,#c5c5c5,#c5c5c5'
+    point_alpha:
+      kind: number
+      default: 0.5
+    min_point_size:
+      kind: number
+      default: 1
+    max_point_size:
+      kind: number
+      default: 4
+    swarm_width:
+      kind: number
+      default: 0.4
+    bins:
+      kind: integer
+      default: 90
+    top_k:
+      kind: integer
+      default: 5
+    tile_height:
+      kind: number
+      default: 1.5
+    base_size:
+      kind: number
+      default: 12
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 6
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - scatter_beeswarm_group
+  - beeswarm_group
+  - group_beeswarm
+  - grouped_beeswarm_scatter
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.category_column}
+    - ${params.value_column}
+    - ${params.sign_column}
+    - ${params.pvalue_column}
+    - ${params.label_column}
+    - ${params.category_order}
+    - ${params.sign_order}
+    - ${params.title}
+    - ${params.y_label}
+    - ${params.sign_palette}
+    - ${params.tile_palette}
+    - ${params.label_colors}
+    - ${params.point_alpha}
+    - ${params.min_point_size}
+    - ${params.max_point_size}
+    - ${params.swarm_width}
+    - ${params.bins}
+    - ${params.top_k}
+    - ${params.tile_height}
+    - ${params.base_size}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}
