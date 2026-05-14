@@ -119,6 +119,8 @@ pub struct SessionRuntimeState {
     /// Session-scoped environment cache — shared across all tool calls in this session.
     /// Created once per session; shutdown on session teardown.
     pub env_store: EnvStore,
+    /// File artifacts written or edited by AI tools during this session.
+    pub artifact_registry: crate::domain::session::artifacts::ArtifactRegistry,
 }
 
 /// Cancellation state for an active conversation round

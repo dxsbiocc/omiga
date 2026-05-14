@@ -43,6 +43,8 @@ import { PlanTodoList, type PlanTodoItem } from "./PlanTodoList";
 import { ReactStepList } from "./ReactStepList";
 import { ExecutionRecordBrowser } from "./ExecutionRecordBrowser";
 import { SelfEvolutionDraftBrowser } from "./SelfEvolutionDraftBrowser";
+import { TaskProgressSteps, useToolSteps } from "./TaskProgressSteps";
+import { SessionArtifactsPanel } from "./SessionArtifactsPanel";
 import { SchedulerPlanPanel } from "./SchedulerPlanPanel";
 import {
   RunningTaskCard,
@@ -692,6 +694,18 @@ export function TaskStatus() {
     }),
     [isConnecting, isStreaming, waitingFirstChunk, currentToolHint],
   );
+
+  const { steps: toolProgressSteps, totalDurationMs: toolProgressDurationMs } =
+    useToolSteps(executionSteps, executionStartedAt, isStreaming, executionEndedAt);
+  const toolTurnDone = executionEndedAt != null && toolProgressSteps.length > 0;
+  const showToolProgress =
+    toolProgressSteps.length >= 2 ||
+    (toolProgressSteps.length === 1 && toolProgressSteps[0].status === "running");
+  // When TaskProgressSteps is rendering tool steps, hide them from ReactStepList
+  // to avoid showing the same steps twice.
+  const reactStepListSteps = showToolProgress
+    ? executionSteps.filter((s) => !s.id.startsWith("tool-"))
+    : executionSteps;
 
   // 获取模式标签和图标
   const getModeInfo = () => {
@@ -2734,11 +2748,26 @@ export function TaskStatus() {
         {/* ReAct 模式：执行步骤 */}
         {hasExecution && activeMainTab === "execution" && (
           <Box sx={{ p: 1.5 }}>
+            {showToolProgress && (
+              <Box sx={{ mb: 1.25 }}>
+                <TaskProgressSteps
+                  steps={toolProgressSteps}
+                  collapsed={toolTurnDone}
+                  totalDurationMs={toolProgressDurationMs}
+                />
+              </Box>
+            )}
             <ReactStepList
-              steps={executionSteps}
+              steps={reactStepListSteps}
               elapsedLabel={elapsedLabel}
               surfaceContext={surfaceContext}
             />
+            {toolTurnDone && currentSession && (
+              <SessionArtifactsPanel
+                sessionId={currentSession.id}
+                refreshKey={executionEndedAt ?? 0}
+              />
+            )}
           </Box>
         )}
 

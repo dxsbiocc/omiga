@@ -253,7 +253,7 @@ struct SkillFrontmatter {
 pub struct SkillInvokeOutput {
     pub success: bool,
     pub command_name: String,
-    /// `inline` | `fork_unsupported` (forked sub-agent not implemented in Omiga).
+    /// `inline` | `needs_fork` | `fork_unsupported` (legacy).
     pub status: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
@@ -265,6 +265,10 @@ pub struct SkillInvokeOutput {
     pub agent: Option<String>,
     /// Full text passed to the model as the tool result (header + JSON + body).
     pub formatted_tool_result: String,
+    /// Raw skill body (with substitutions applied), present only when `status == "needs_fork"`.
+    /// The caller should use this as the `skill_content` argument to `run_skill_forked`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_body: Option<String>,
 }
 
 /// Where a skill was discovered from (for UI source labeling).
@@ -1235,26 +1239,26 @@ pub async fn invoke_skill_detailed_with_cache(
     let mut body_for_model = String::new();
     body_for_model.push_str(&format!("Launching skill: {command_name}\n\n"));
 
+    let mut fork_skill_body: Option<String> = None;
     let status = if is_fork {
-        let fork_note = "This skill is configured with `context: fork` (sub-agent in Claude Code). Omiga does not spawn forked agents yet — follow the skill text in this session.";
+        // Signal to the chat layer that this skill should be executed as a forked sub-agent.
+        // We store the processed skill body so the caller can pass it to `run_skill_forked`
+        // without re-reading and re-substituting.
         let meta = serde_json::json!({
             "success": true,
             "commandName": command_name,
-            "status": "fork_unsupported",
+            "status": "needs_fork",
             "allowedTools": if allowed_tools.is_empty() { serde_json::Value::Null } else { serde_json::to_value(&allowed_tools).unwrap() },
             "model": fm.model,
             "effort": fm.effort,
             "agent": fm.agent,
             "userInvocable": fm.user_invocable,
-            "_omiga": fork_note
         });
         body_for_model.push_str(&serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())?);
         body_for_model.push_str("\n\n---\n\n");
-        body_for_model.push_str("## Forked skill note (Omiga)\n\n");
-        body_for_model.push_str(fork_note);
-        body_for_model.push_str("\n\n---\n\n");
         body_for_model.push_str(&md);
-        "fork_unsupported"
+        fork_skill_body = Some(md.clone());
+        "needs_fork"
     } else {
         let meta = serde_json::json!({
             "success": true,
@@ -1291,6 +1295,7 @@ pub async fn invoke_skill_detailed_with_cache(
         effort: fm.effort.clone(),
         agent: fm.agent.clone(),
         formatted_tool_result: body_for_model,
+        skill_body: fork_skill_body,
     })
 }
 

@@ -24,6 +24,8 @@ pub const OPERATOR_KIND: &str = "Operator";
 pub const OPERATOR_TOOL_PREFIX: &str = "operator__";
 const OPERATOR_STATE_DIR_NAME: &str = ".omiga";
 const REGISTRY_RELATIVE_PATH: &str = "operators/registry.json";
+/// Directory for user-created script operators: `~/.omiga/user-operators/`
+const USER_OPERATORS_SUBDIR: &str = "user-operators";
 const RUNS_RELATIVE_PATH: &str = "runs";
 const OPERATOR_DEFAULT_MAX_ATTEMPTS: u32 = 2;
 const OPERATOR_MAX_MAX_ATTEMPTS: u32 = 5;
@@ -836,7 +838,102 @@ fn discover_operator_candidates_from_plugins<'a>(
 
 pub fn discover_operator_candidates() -> Vec<OperatorSpec> {
     let outcome = crate::domain::plugins::plugin_load_outcome();
-    discover_operator_candidates_from_plugins(outcome.plugins())
+    let mut candidates = discover_operator_candidates_from_plugins(outcome.plugins());
+    candidates.extend(discover_user_operator_candidates());
+    candidates
+}
+
+/// `~/.omiga/user-operators/` — where user-created script operators live.
+pub fn user_operators_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(OPERATOR_STATE_DIR_NAME)
+        .join(USER_OPERATORS_SUBDIR)
+}
+
+/// Scan `~/.omiga/user-operators/*.yaml` and load each as an OperatorSpec.
+fn discover_user_operator_candidates() -> Vec<OperatorSpec> {
+    let dir = user_operators_dir();
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "yaml" || ext == "yml")
+        })
+        .filter_map(|e| {
+            let path = e.path();
+            match load_operator_manifest(&path, "user", &dir) {
+                Ok(spec) => Some(spec),
+                Err(err) => {
+                    tracing::warn!("user operator {:?}: {}", path, err);
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Create or replace a user script operator YAML in `~/.omiga/user-operators/`.
+///
+/// `argv` is the command array, e.g. `["bash", "-c", "echo hello"]`.
+pub fn save_user_script_operator(
+    id: &str,
+    name: &str,
+    description: &str,
+    argv: &[String],
+) -> Result<PathBuf, String> {
+    if id.is_empty() {
+        return Err("operator id must not be empty".to_string());
+    }
+    if argv.is_empty() {
+        return Err("operator argv must not be empty".to_string());
+    }
+
+    let dir = user_operators_dir();
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("create user-operators dir: {e}"))?;
+
+    let argv_yaml = argv
+        .iter()
+        .map(|a| format!("    - {}", serde_yaml_escape(a)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let desc_line = if description.is_empty() {
+        String::new()
+    } else {
+        format!("\n  description: {}", serde_yaml_escape(description))
+    };
+
+    let content = format!(
+        "apiVersion: omiga.ai/operator/v1alpha1\nkind: Operator\nmetadata:\n  id: {id}\n  version: 0.1.0\n  name: {name}{desc_line}\nexecution:\n  argv:\n{argv_yaml}\ninterface:\n  inputs: {{}}\n  params: {{}}\n  outputs: {{}}\n",
+        id = serde_yaml_escape(id),
+        name = serde_yaml_escape(name),
+    );
+
+    let file_name = format!("{}.yaml", sanitize_id(id));
+    let path = dir.join(&file_name);
+    fs::write(&path, content).map_err(|e| format!("write user operator: {e}"))?;
+    tracing::info!("user operator saved: {:?}", path);
+    Ok(path)
+}
+
+fn sanitize_id(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+fn serde_yaml_escape(s: &str) -> String {
+    if s.contains(['"', '\'', '\n', ':', '#', '&', '*', '!', '|', '>', '{', '}', '[', ']', ',']) {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        s.to_string()
+    }
 }
 
 fn operator_manifest_diagnostics_from_plugins<'a>(

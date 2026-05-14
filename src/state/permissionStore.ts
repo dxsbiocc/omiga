@@ -32,6 +32,8 @@ export interface PermissionCheckResult {
   arguments?: Record<string, unknown>; // 原始参数
   /** 与后端 `check_tool` 一致的会话 id，批准时必须回传 */
   session_id?: string;
+  /** Human-readable description of the operation, e.g. "AI wants to run: rm -rf /tmp/build" */
+  plain_description?: string;
 }
 
 /** Rust `PermissionModeInput` 为 externally tagged enum，需序列化为 `{"Session":null}` 等形式 */

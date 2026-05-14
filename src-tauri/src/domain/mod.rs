@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod app_data_migration;
+pub mod audit;
 pub mod auto_compact;
 pub mod autopilot_state;
 pub mod background_shell;

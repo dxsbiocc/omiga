@@ -226,24 +226,41 @@ pub async fn search_entries(
                 }
             }
         }
-        let search_text = format!(
-            "{}\n{}\n{}",
-            entry.topic,
-            entry.summary,
-            entry.entities.join(" ")
-        );
-        let base_score = score_terms_against_text(&search_text, &query_terms);
-        if base_score <= 0.0 {
+        // Field-weighted scoring: topic matches are most important, entities are
+        // high-precision tags, summary contains the bulk of the substance.
+        let topic_score = score_terms_against_text(&entry.topic, &query_terms) * 3.0;
+        let summary_score = score_terms_against_text(&entry.summary, &query_terms) * 1.5;
+        let entity_score =
+            score_terms_against_text(&entry.entities.join(" "), &query_terms) * 2.0;
+
+        // Recency bonus: full +0.5 within 7 days, linear decay to 0 at 90 days.
+        // Falls back to last_reused_at, then created_at.
+        let recency_ts = entry
+            .last_reused_at
+            .as_deref()
+            .or(Some(entry.created_at.as_str()));
+        let recency_bonus_new = recency_ts
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            .map(|dt| {
+                let days_old = now
+                    .signed_duration_since(dt.with_timezone(&chrono::Utc))
+                    .num_days()
+                    .max(0) as f64;
+                (1.0 - (days_old / 90.0)).max(0.0) * 0.5
+            })
+            .unwrap_or(0.0);
+
+        let field_score = topic_score + summary_score + entity_score;
+        if field_score <= 0.0 {
             continue;
         }
-        // Blend TF-IDF with quality: confidence, stability, importance, reuse_probability
+        // Blend field-weighted TF-IDF score with quality signals.
         let quality = (entry.confidence as f64 * 0.35
             + entry.stability as f64 * 0.25
             + entry.importance as f64 * 0.25
             + entry.reuse_probability as f64 * 0.15)
             .clamp(0.3, 1.0);
-        let recency = recency_bonus(entry.last_reused_at.as_deref());
-        let score = base_score * quality + recency;
+        let score = field_score * quality + recency_bonus_new;
         matches.push(LongTermMatch {
             title: entry.topic.clone(),
             path: path.to_string_lossy().to_string(),
@@ -261,24 +278,6 @@ pub async fn search_entries(
     matches
 }
 
-/// Returns a small additive score bonus for recently reused memories.
-/// +0.15 if reused within 7 days, +0.08 if within 30 days, 0 otherwise.
-fn recency_bonus(last_reused_at: Option<&str>) -> f64 {
-    let Some(ts) = last_reused_at else { return 0.0 };
-    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else {
-        return 0.0;
-    };
-    let days = chrono::Utc::now()
-        .signed_duration_since(dt.with_timezone(&chrono::Utc))
-        .num_days();
-    if days < 7 {
-        0.15
-    } else if days < 30 {
-        0.08
-    } else {
-        0.0
-    }
-}
 
 /// Count entries that are stale: not reused in >90 days AND stability < 0.4.
 pub async fn count_stale_entries(root: &Path) -> usize {
@@ -1388,6 +1387,64 @@ mod tests {
             .count();
         assert_eq!(sess1_count, 1, "sessions must not be duplicated");
         assert_eq!(merged.source_sessions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn field_weighted_scoring_ranks_topic_match_higher() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // Entry A: query term appears in the topic (high-weight field).
+        let topic_match = LongTermMemoryEntry {
+            topic: "authentication scheme".to_string(),
+            summary: "Describes how user sessions are established.".to_string(),
+            kind: LongTermMemoryKind::ProjectExperience,
+            entities: vec!["auth".to_string()],
+            source_sessions: vec!["s1".to_string()],
+            confidence: 0.8,
+            stability: 0.7,
+            importance: 0.7,
+            reuse_probability: 0.7,
+            ..Default::default()
+        };
+        // Entry B: query term appears only in the summary (lower-weight field).
+        // Same quality scores to isolate field-weight effect.
+        let summary_match = LongTermMemoryEntry {
+            topic: "session management overview".to_string(),
+            summary: "The authentication scheme uses JWT tokens for stateless login.".to_string(),
+            kind: LongTermMemoryKind::ResearchInsight,
+            entities: vec!["jwt".to_string()],
+            source_sessions: vec!["s2".to_string()],
+            confidence: 0.8,
+            stability: 0.7,
+            importance: 0.7,
+            reuse_probability: 0.7,
+            ..Default::default()
+        };
+
+        // Write directly so we bypass the write-gate slug collision.
+        let path_a = temp.path().join("authentication-scheme.json");
+        let path_b = temp.path().join("session-management-overview.json");
+        tokio::fs::write(&path_a, serde_json::to_string_pretty(&topic_match).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path_b, serde_json::to_string_pretty(&summary_match).unwrap())
+            .await
+            .unwrap();
+
+        let results = search_entries(temp.path(), "authentication scheme", 5, false).await;
+        assert_eq!(results.len(), 2, "both entries should match");
+        assert_eq!(
+            results[0].title, "authentication scheme",
+            "topic match should rank first (got title '{}' with score {:.4} vs '{}' with score {:.4})",
+            results[0].title, results[0].score,
+            results[1].title, results[1].score,
+        );
+        assert!(
+            results[0].score > results[1].score,
+            "topic match score ({:.4}) must exceed summary-only match score ({:.4})",
+            results[0].score,
+            results[1].score
+        );
     }
 
     #[test]

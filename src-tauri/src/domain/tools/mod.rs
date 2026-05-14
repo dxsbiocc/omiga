@@ -11,9 +11,13 @@ pub mod agent;
 #[path = "interaction/ask_user_question.rs"]
 pub mod ask_user_question;
 pub mod bash;
+pub mod cron_create;
+pub mod cron_delete;
+pub mod cron_list;
 pub mod connector;
 #[path = "plan/enter_mode.rs"]
 pub mod enter_plan_mode;
+pub mod enter_worktree;
 pub mod env_store;
 #[path = "environment/profile_check.rs"]
 pub mod environment_profile_check;
@@ -29,8 +33,11 @@ pub mod execution_lineage_report;
 pub mod execution_record_detail;
 #[path = "execution/record_list.rs"]
 pub mod execution_record_list;
+pub mod monitor;
+pub mod push_notification;
 #[path = "plan/exit_mode.rs"]
 pub mod exit_plan_mode;
+pub mod exit_worktree;
 pub mod fetch;
 #[path = "file/edit.rs"]
 pub mod file_edit;
@@ -182,6 +189,14 @@ pub enum ToolKind {
     ExitPlanMode,
     #[serde(rename = "EnterPlanMode")]
     EnterPlanMode,
+    #[serde(rename = "EnterWorktree")]
+    EnterWorktree,
+    #[serde(rename = "ExitWorktree")]
+    ExitWorktree,
+    #[serde(rename = "Monitor")]
+    Monitor,
+    #[serde(rename = "PushNotification")]
+    PushNotification,
     #[serde(rename = "TaskStop")]
     TaskStop,
     #[serde(rename = "ToolSearch")]
@@ -198,6 +213,12 @@ pub enum ToolKind {
     TaskUpdate,
     Workflow,
     Recall,
+    #[serde(rename = "CronCreate")]
+    CronCreate,
+    #[serde(rename = "CronList")]
+    CronList,
+    #[serde(rename = "CronDelete")]
+    CronDelete,
 }
 
 impl fmt::Display for ToolKind {
@@ -260,6 +281,10 @@ impl fmt::Display for ToolKind {
             ToolKind::SendUserMessage => write!(f, "SendUserMessage"),
             ToolKind::ExitPlanMode => write!(f, "ExitPlanMode"),
             ToolKind::EnterPlanMode => write!(f, "EnterPlanMode"),
+            ToolKind::EnterWorktree => write!(f, "EnterWorktree"),
+            ToolKind::ExitWorktree => write!(f, "ExitWorktree"),
+            ToolKind::Monitor => write!(f, "Monitor"),
+            ToolKind::PushNotification => write!(f, "PushNotification"),
             ToolKind::TaskStop => write!(f, "TaskStop"),
             ToolKind::ToolSearch => write!(f, "ToolSearch"),
             ToolKind::TaskOutput => write!(f, "TaskOutput"),
@@ -269,6 +294,9 @@ impl fmt::Display for ToolKind {
             ToolKind::TaskUpdate => write!(f, "TaskUpdate"),
             ToolKind::Workflow => write!(f, "workflow"),
             ToolKind::Recall => write!(f, "recall"),
+            ToolKind::CronCreate => write!(f, "CronCreate"),
+            ToolKind::CronList => write!(f, "CronList"),
+            ToolKind::CronDelete => write!(f, "CronDelete"),
         }
     }
 }
@@ -334,6 +362,10 @@ pub enum Tool {
     SendUserMessage(send_user_message::SendUserMessageArgs),
     ExitPlanMode(exit_plan_mode::ExitPlanModeArgs),
     EnterPlanMode(enter_plan_mode::EnterPlanModeArgs),
+    EnterWorktree(enter_worktree::EnterWorktreeArgs),
+    ExitWorktree(exit_worktree::ExitWorktreeArgs),
+    Monitor(monitor::MonitorArgs),
+    PushNotification(push_notification::PushNotificationArgs),
     TaskStop(task_stop::TaskStopArgs),
     TaskOutput(task_output::TaskOutputArgs),
     ToolSearch(tool_search::ToolSearchArgs),
@@ -344,6 +376,9 @@ pub enum Tool {
     #[serde(rename = "workflow")]
     Workflow(workflow::WorkflowArgs),
     Recall(recall::RecallArgs),
+    CronCreate(cron_create::CronCreateArgs),
+    CronList(cron_list::CronListArgs),
+    CronDelete(cron_delete::CronDeleteArgs),
 }
 
 impl Tool {
@@ -397,6 +432,10 @@ impl Tool {
             Tool::SendUserMessage(_) => ToolKind::SendUserMessage,
             Tool::ExitPlanMode(_) => ToolKind::ExitPlanMode,
             Tool::EnterPlanMode(_) => ToolKind::EnterPlanMode,
+            Tool::EnterWorktree(_) => ToolKind::EnterWorktree,
+            Tool::ExitWorktree(_) => ToolKind::ExitWorktree,
+            Tool::Monitor(_) => ToolKind::Monitor,
+            Tool::PushNotification(_) => ToolKind::PushNotification,
             Tool::TaskStop(_) => ToolKind::TaskStop,
             Tool::TaskOutput(_) => ToolKind::TaskOutput,
             Tool::ToolSearch(_) => ToolKind::ToolSearch,
@@ -406,6 +445,9 @@ impl Tool {
             Tool::TaskUpdate(_) => ToolKind::TaskUpdate,
             Tool::Workflow(_) => ToolKind::Workflow,
             Tool::Recall(_) => ToolKind::Recall,
+            Tool::CronCreate(_) => ToolKind::CronCreate,
+            Tool::CronList(_) => ToolKind::CronList,
+            Tool::CronDelete(_) => ToolKind::CronDelete,
         }
     }
 
@@ -457,6 +499,10 @@ impl Tool {
             Tool::SendUserMessage(_) => "SendUserMessage",
             Tool::ExitPlanMode(_) => "ExitPlanMode",
             Tool::EnterPlanMode(_) => "EnterPlanMode",
+            Tool::EnterWorktree(_) => "EnterWorktree",
+            Tool::ExitWorktree(_) => "ExitWorktree",
+            Tool::Monitor(_) => "Monitor",
+            Tool::PushNotification(_) => "PushNotification",
             Tool::TaskStop(_) => "TaskStop",
             Tool::TaskOutput(_) => "TaskOutput",
             Tool::ToolSearch(_) => "ToolSearch",
@@ -466,6 +512,9 @@ impl Tool {
             Tool::TaskUpdate(_) => "TaskUpdate",
             Tool::Workflow(_) => "workflow",
             Tool::Recall(_) => "recall",
+            Tool::CronCreate(_) => "CronCreate",
+            Tool::CronList(_) => "CronList",
+            Tool::CronDelete(_) => "CronDelete",
         }
     }
 
@@ -525,6 +574,10 @@ impl Tool {
             Tool::SendUserMessage(_) => send_user_message::DESCRIPTION,
             Tool::ExitPlanMode(_) => exit_plan_mode::DESCRIPTION,
             Tool::EnterPlanMode(_) => enter_plan_mode::DESCRIPTION,
+            Tool::EnterWorktree(_) => enter_worktree::DESCRIPTION,
+            Tool::ExitWorktree(_) => exit_worktree::DESCRIPTION,
+            Tool::Monitor(_) => monitor::DESCRIPTION,
+            Tool::PushNotification(_) => push_notification::DESCRIPTION,
             Tool::TaskStop(_) => task_stop::DESCRIPTION,
             Tool::TaskOutput(_) => task_output::DESCRIPTION,
             Tool::ToolSearch(_) => tool_search::DESCRIPTION,
@@ -534,6 +587,9 @@ impl Tool {
             Tool::TaskUpdate(_) => task_update::DESCRIPTION,
             Tool::Workflow(_) => workflow::DESCRIPTION,
             Tool::Recall(_) => recall::DESCRIPTION,
+            Tool::CronCreate(_) => cron_create::DESCRIPTION,
+            Tool::CronList(_) => cron_list::DESCRIPTION,
+            Tool::CronDelete(_) => cron_delete::DESCRIPTION,
         }
     }
 
@@ -691,6 +747,14 @@ impl Tool {
             Tool::EnterPlanMode(args) => {
                 enter_plan_mode::EnterPlanModeTool::execute(ctx, args).await?
             }
+            Tool::EnterWorktree(args) => {
+                enter_worktree::EnterWorktreeTool::execute(ctx, args).await?
+            }
+            Tool::ExitWorktree(args) => exit_worktree::ExitWorktreeTool::execute(ctx, args).await?,
+            Tool::Monitor(args) => monitor::MonitorTool::execute(ctx, args).await?,
+            Tool::PushNotification(args) => {
+                push_notification::PushNotificationTool::execute(ctx, args).await?
+            }
             Tool::TaskStop(args) => task_stop::TaskStopTool::execute(ctx, args).await?,
             Tool::TaskOutput(args) => task_output::TaskOutputTool::execute(ctx, args).await?,
             Tool::ToolSearch(args) => tool_search::ToolSearchTool::execute(ctx, args).await?,
@@ -700,6 +764,9 @@ impl Tool {
             Tool::TaskUpdate(args) => task_update::TaskUpdateTool::execute(ctx, args).await?,
             Tool::Workflow(args) => workflow::WorkflowTool::execute(ctx, args).await?,
             Tool::Recall(args) => recall::RecallTool::execute(ctx, args).await?,
+            Tool::CronCreate(args) => cron_create::CronCreateTool::execute(ctx, args).await?,
+            Tool::CronList(args) => cron_list::CronListTool::execute(ctx, args).await?,
+            Tool::CronDelete(args) => cron_delete::CronDeleteTool::execute(ctx, args).await?,
         };
         Ok(result)
     }
@@ -986,6 +1053,30 @@ impl Tool {
                 })?;
                 Ok(Tool::EnterPlanMode(args))
             }
+            ToolKind::EnterWorktree => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid EnterWorktree arguments: {}", e),
+                })?;
+                Ok(Tool::EnterWorktree(args))
+            }
+            ToolKind::ExitWorktree => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid ExitWorktree arguments: {}", e),
+                })?;
+                Ok(Tool::ExitWorktree(args))
+            }
+            ToolKind::Monitor => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid Monitor arguments: {}", e),
+                })?;
+                Ok(Tool::Monitor(args))
+            }
+            ToolKind::PushNotification => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid PushNotification arguments: {}", e),
+                })?;
+                Ok(Tool::PushNotification(args))
+            }
             ToolKind::TaskStop => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid TaskStop arguments: {}", e),
@@ -1039,6 +1130,24 @@ impl Tool {
                     message: format!("Invalid recall arguments: {}", e),
                 })?;
                 Ok(Tool::Recall(args))
+            }
+            ToolKind::CronCreate => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid CronCreate arguments: {}", e),
+                })?;
+                Ok(Tool::CronCreate(args))
+            }
+            ToolKind::CronList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid CronList arguments: {}", e),
+                })?;
+                Ok(Tool::CronList(args))
+            }
+            ToolKind::CronDelete => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid CronDelete arguments: {}", e),
+                })?;
+                Ok(Tool::CronDelete(args))
             }
         }
     }
@@ -1116,6 +1225,10 @@ impl Tool {
             "SendUserMessage" | "Brief" | "send_user_message" => ToolKind::SendUserMessage,
             "ExitPlanMode" | "exit_plan_mode" => ToolKind::ExitPlanMode,
             "EnterPlanMode" | "enter_plan_mode" => ToolKind::EnterPlanMode,
+            "EnterWorktree" | "enter_worktree" => ToolKind::EnterWorktree,
+            "ExitWorktree" | "exit_worktree" => ToolKind::ExitWorktree,
+            "Monitor" | "monitor" => ToolKind::Monitor,
+            "PushNotification" | "push_notification" => ToolKind::PushNotification,
             "TaskStop" | "task_stop" | "KillShell" => ToolKind::TaskStop,
             "TaskOutput" | "task_output" => ToolKind::TaskOutput,
             "ToolSearch" | "tool_search" => ToolKind::ToolSearch,
@@ -1125,6 +1238,9 @@ impl Tool {
             "TaskUpdate" | "task_update" => ToolKind::TaskUpdate,
             "workflow" | "Workflow" => ToolKind::Workflow,
             "recall" | "Recall" => ToolKind::Recall,
+            "CronCreate" | "cron_create" => ToolKind::CronCreate,
+            "CronList" | "cron_list" => ToolKind::CronList,
+            "CronDelete" | "cron_delete" => ToolKind::CronDelete,
             _ => {
                 return Err(ToolError::UnknownTool {
                     name: tool_name.to_string(),
@@ -1486,6 +1602,8 @@ pub struct ToolContext {
     pub skill_cache: Option<Arc<std::sync::Mutex<crate::domain::skills::SkillCacheMap>>>,
     /// Task context string for `list_skills` relevance ranking (the user's current goal).
     pub skill_task_context: Option<String>,
+    /// Shared SQLite connection pool for tools that need direct DB access (e.g. cron tools).
+    pub db: Option<sqlx::SqlitePool>,
 }
 
 impl fmt::Debug for ToolContext {
@@ -1546,6 +1664,7 @@ impl ToolContext {
             env_store: None,
             skill_cache: None,
             skill_task_context: None,
+            db: None,
         }
     }
 
@@ -1704,6 +1823,12 @@ impl ToolContext {
         self.cancel = token;
         self
     }
+
+    /// Attach the shared SQLite pool so cron tools (and others) can persist to the app DB.
+    pub fn with_db(mut self, pool: Option<sqlx::SqlitePool>) -> Self {
+        self.db = pool;
+        self
+    }
 }
 
 /// Trait for individual tool implementations
@@ -1779,6 +1904,10 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         agent::schema(),
         exit_plan_mode::schema(),
         enter_plan_mode::schema(),
+        enter_worktree::schema(),
+        exit_worktree::schema(),
+        monitor::schema(),
+        push_notification::schema(),
         task_stop::schema(),
         task_output::schema(),
         tool_search::schema(),
@@ -1786,6 +1915,9 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         task_get::schema(),
         task_list::schema(),
         task_update::schema(),
+        cron_create::schema(),
+        cron_list::schema(),
+        cron_delete::schema(),
     ];
     v.push(recall::schema());
     if env_workflow_scripts_enabled() {
@@ -1863,6 +1995,13 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "visualization" => (3, 11),
         "enter_plan_mode" | "EnterPlanMode" => (3, 12),
         "exit_plan_mode" | "ExitPlanMode" => (3, 13),
+        "EnterWorktree" | "enter_worktree" => (3, 14),
+        "ExitWorktree" | "exit_worktree" => (3, 15),
+        "Monitor" | "monitor" => (3, 16),
+        "PushNotification" | "push_notification" => (3, 17),
+        "CronCreate" | "cron_create" => (3, 18),
+        "CronList" | "cron_list" => (3, 19),
+        "CronDelete" | "cron_delete" => (3, 20),
 
         // Shell is intentionally late: use it for terminal operations only
         // after dedicated tools are not appropriate.
