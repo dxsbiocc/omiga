@@ -1,8 +1,22 @@
 # Omiga
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+<p align="center">
+  <img src="docs/assets/omiga-logo.png" alt="Omiga" width="80" />
+</p>
 
-Omiga is a local-first desktop AI coding agent workbench built with **Tauri, React, and Rust**. It combines chat, repository context, file operations, terminal execution, web/search tools, memory, and multi-agent orchestration in one auditable desktop application.
+<p align="center">
+  <a href="https://github.com/omiga-app/omiga/releases"><img src="https://img.shields.io/badge/release-v2.0.0-blue?style=flat-square" alt="Release" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform" />
+  <img src="https://img.shields.io/badge/built%20with-Tauri%20%7C%20Rust%20%7C%20React-orange?style=flat-square" alt="Stack" />
+  <img src="https://img.shields.io/badge/tests-844%20Rust%20%7C%20307%20TS-brightgreen?style=flat-square" alt="Tests" />
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License" />
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+Omiga is a local-first desktop AI agent workbench built with **Tauri, React, and Rust**. It combines chat, repository context, file operations, terminal execution, web/search tools, memory, cron scheduling, and multi-agent orchestration in one auditable desktop application.
 
 **Current release:** `2.0.0`
 
