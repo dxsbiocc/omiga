@@ -26,7 +26,8 @@ impl ArtifactRegistry {
     /// exists in the list the existing entry's operation and timestamp are
     /// updated in place rather than appending a duplicate.
     pub fn record(&self, path: impl Into<String>, operation: impl Into<String>) {
-        if let Ok(mut v) = self.0.lock() {
+        // Recover from a poisoned mutex rather than silently dropping the record.
+        if let Ok(mut v) = self.0.lock().or_else(|e| Ok::<_, ()>(e.into_inner())) {
             let entry = ArtifactEntry {
                 path: path.into(),
                 operation: operation.into(),
@@ -43,6 +44,9 @@ impl ArtifactRegistry {
 
     /// Return all recorded artifacts (cloned snapshot).
     pub fn list(&self) -> Vec<ArtifactEntry> {
-        self.0.lock().map(|v| v.clone()).unwrap_or_default()
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
