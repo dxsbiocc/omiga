@@ -111,6 +111,10 @@ import {
   RSYNC_SSH_WARN_STORAGE_KEY,
 } from "../../lib/rsyncSsh";
 import {
+  getLocalStorageItem,
+  setLocalStorageItem,
+} from "../../utils/browserStorage";
+import {
   buildComposerMentionChildPath,
   filterComposerMentionRows,
   joinWorkspaceMentionDirectory,
@@ -1000,10 +1004,7 @@ export const ChatComposer = memo(function ChatComposer({
       try {
         const ok = await invoke<boolean>("is_rsync_available");
         if (cancelled || ok) return;
-        if (
-          typeof localStorage !== "undefined" &&
-          localStorage.getItem(RSYNC_SSH_WARN_STORAGE_KEY) === "1"
-        ) {
+        if (getLocalStorageItem(RSYNC_SSH_WARN_STORAGE_KEY) === "1") {
           return;
         }
         const openDocs = await confirm(
@@ -1015,9 +1016,7 @@ export const ChatComposer = memo(function ChatComposer({
             cancelLabel: "取消",
           },
         );
-        if (typeof localStorage !== "undefined") {
-          localStorage.setItem(RSYNC_SSH_WARN_STORAGE_KEY, "1");
-        }
+        setLocalStorageItem(RSYNC_SSH_WARN_STORAGE_KEY, "1");
         if (!cancelled && openDocs) {
           await openUrl(RSYNC_INSTALL_HELP_URL);
         }

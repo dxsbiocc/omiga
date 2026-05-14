@@ -11,7 +11,10 @@ Use `visualization-r` Templates for static R figures.
 ## Rules
 
 - Use Template units, not Operators, for plot styling.
+- For bundled visualization-r templates, call `template_execute` after selecting the unit with `unit_search` / `unit_describe`. Do not recreate the plot with ad-hoc `bash`, Python base64 wrappers, or manual `file_write` unless the user explicitly asks for custom code outside the template system.
 - `template.R.j2` is R source, not JSON-to-R DSL.
+- Do not copy bundled `example.tsv` files into Downloads or other global folders. `template_execute` stages template-owned examples into the current session workspace and keeps outputs under the current project/session run directory.
+- Normal template results are declared figure/source artifacts such as PNG, PDF, SVG, R script, and summary tables. Do not write extra JSON visualization wrappers unless the user specifically asks for JSON.
 - Keep params for stable inputs only; customize the emitted source when needed.
 - Source artifact form follows the user's intent: script, document, or code block are all valid when appropriate.
 - Promote a reusable style only on explicit user request.
@@ -20,7 +23,7 @@ Use `visualization-r` Templates for static R figures.
 ## Workflow
 
 1. Select a template by visual grammar/tags. Read `../../TEMPLATE_INDEX.md` only when a template list is needed.
-2. Run it with the user's table and params.
+2. Run it with the user's table and params through `template_execute`; if using a bundled example, pass the template example input rather than copying it yourself.
 3. Verify declared figure outputs are non-empty.
 4. For tweaks, edit the emitted source.
 5. If asked to save style, promote the source to a user/project preference template.

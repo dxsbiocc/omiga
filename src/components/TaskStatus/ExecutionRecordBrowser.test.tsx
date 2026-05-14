@@ -73,17 +73,22 @@ describe("ExecutionRecordBrowserView", () => {
       />,
     );
 
-    expect(html).toContain("ExecutionRecord Browser");
-    expect(html).toContain("只读运行历史");
-    expect(html).toContain("2 records");
-    expect(html).toContain("1 roots");
+    expect(html).toContain("运行记录");
+    expect(html).toContain("查看最近任务的结果和状态");
+    expect(html).toContain("1 次任务");
+    expect(html).toContain("1 个后台步骤");
+    expect(html).toContain("2 条历史记录");
     expect(html).toContain("bulk_de");
-    expect(html).toContain("child");
-    expect(html).toContain("Execution record detail");
-    expect(html).toContain("paramSources user_preflight: 1");
-    expect(html).toContain("1 answered question");
-    expect(html).toContain("table: 1");
-    expect(html).toContain("Children:");
+    expect(html).toContain("绘图模板");
+    expect(html).toContain("已成功");
+    expect(html).not.toContain("bulk_de_operator");
+    expect(html).toContain("表格 × 1");
+    expect(html).toContain("用户确认 1 项");
+    expect(html).not.toContain("这次任务");
+    expect(html).not.toContain("说明：");
+    expect(html).not.toContain("普通查看不需要关注");
+    expect(html).not.toContain("技术细节");
+    expect(html).not.toContain("execrec_child");
   });
 
   it("renders an empty read-only state", () => {
@@ -109,7 +114,8 @@ describe("ExecutionRecordBrowserView", () => {
       />,
     );
 
-    expect(html).toContain("0 records");
+    expect(html).toContain("0 次任务");
+    expect(html).toContain("0 条历史记录");
     expect(html).toContain("暂无 Operator / Template ExecutionRecord");
   });
 });

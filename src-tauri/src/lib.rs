@@ -132,6 +132,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::app_skin::set_app_icon_skin,
             commands::chat::send_message,
             commands::chat::research::list_available_agents,
             commands::chat::research::list_agent_roles,

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import {
   LAYOUT_LEFT_MAX,
   LAYOUT_LEFT_MIN,
@@ -7,6 +7,7 @@ import {
   LAYOUT_RIGHT_MAX,
   LAYOUT_RIGHT_MIN,
 } from "./constants";
+import { safeLocalStorage } from "../utils/browserStorage";
 
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
@@ -131,6 +132,7 @@ export const useUiStore = create<UiState>()(
     }),
     {
       name: "omiga-ui",
+      storage: createJSONStorage(() => safeLocalStorage),
       partialize: (s) => ({
         leftPanelWidth: s.leftPanelWidth,
         rightPanelWidth: s.rightPanelWidth,

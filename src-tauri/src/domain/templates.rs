@@ -754,6 +754,11 @@ async fn execute_rendered_template(
 ) -> Result<(String, bool, JsonValue), String> {
     let rendered = render_template_script(ctx, template, invocation)?;
     let interface = parse_template_operator_interface(template)?;
+    let (effective_invocation, staged_inputs) =
+        stage_template_owned_inputs(template, &interface, invocation, &rendered.render_root)?;
+    if !staged_inputs.is_empty() {
+        rewrite_rendered_template_script(template, &effective_invocation, &rendered)?;
+    }
     let runtime = serde_json::to_value(&template.spec.runtime).ok();
     let backing = describe_template_migration_target(template)
         .ok()
@@ -802,7 +807,7 @@ async fn execute_rendered_template(
             manifest_path: template.source.manifest_path.clone(),
         },
     };
-    let arguments = serde_json::to_string(invocation)
+    let arguments = serde_json::to_string(&effective_invocation)
         .map_err(|err| format!("serialize template invocation: {err}"))?;
     let run_context = crate::domain::operators::OperatorRunContext {
         kind: Some("template".to_string()),
@@ -822,16 +827,199 @@ async fn execute_rendered_template(
             Some(run_context),
         )
         .await;
-    Ok((
-        raw,
-        is_error,
-        serde_json::json!({
-            "executionMode": "renderedTemplate",
-            "renderRoot": rendered.render_root,
-            "renderedScript": rendered.rendered_script,
-            "templateEngine": template.spec.template.engine,
-        }),
-    ))
+    let mut metadata = serde_json::json!({
+        "executionMode": "renderedTemplate",
+        "renderRoot": rendered.render_root,
+        "renderedScript": rendered.rendered_script,
+        "templateEngine": template.spec.template.engine,
+    });
+    if !staged_inputs.is_empty() {
+        metadata["stagedTemplateInputs"] = JsonValue::Array(staged_inputs);
+    }
+    Ok((raw, is_error, metadata))
+}
+
+fn stage_template_owned_inputs(
+    template: &TemplateSpecWithSource,
+    interface: &crate::domain::operators::OperatorInterfaceSpec,
+    invocation: &crate::domain::operators::OperatorInvocation,
+    render_root: &Path,
+) -> Result<(crate::domain::operators::OperatorInvocation, Vec<JsonValue>), String> {
+    let Some(manifest_dir) = template.source.manifest_path.parent() else {
+        return Ok((invocation.clone(), Vec::new()));
+    };
+    let template_root = manifest_dir.canonicalize().map_err(|err| {
+        format!(
+            "canonicalize template manifest dir `{}`: {err}",
+            manifest_dir.display()
+        )
+    })?;
+    let stage_root = render_root.join("inputs");
+    let mut inputs = invocation.inputs.clone();
+    let mut staged = Vec::new();
+
+    for (name, field) in &interface.inputs {
+        if !matches!(
+            field.kind,
+            crate::domain::operators::OperatorFieldKind::File
+                | crate::domain::operators::OperatorFieldKind::FileArray
+                | crate::domain::operators::OperatorFieldKind::Directory
+                | crate::domain::operators::OperatorFieldKind::DirectoryArray
+        ) {
+            continue;
+        }
+
+        let Some(value) = inputs.get(name).cloned() else {
+            continue;
+        };
+        let staged_value = if matches!(
+            field.kind,
+            crate::domain::operators::OperatorFieldKind::FileArray
+                | crate::domain::operators::OperatorFieldKind::DirectoryArray
+        ) {
+            match value {
+                JsonValue::Array(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for item in items {
+                        if let Some(raw) = item.as_str() {
+                            if let Some(path) = stage_template_owned_path(
+                                name,
+                                raw,
+                                manifest_dir,
+                                &template_root,
+                                &stage_root,
+                                &mut staged,
+                            )? {
+                                out.push(JsonValue::String(path));
+                                continue;
+                            }
+                        }
+                        out.push(item);
+                    }
+                    JsonValue::Array(out)
+                }
+                other => other,
+            }
+        } else if let Some(raw) = value.as_str() {
+            stage_template_owned_path(
+                name,
+                raw,
+                manifest_dir,
+                &template_root,
+                &stage_root,
+                &mut staged,
+            )?
+            .map(JsonValue::String)
+            .unwrap_or(value)
+        } else {
+            value
+        };
+        inputs.insert(name.clone(), staged_value);
+    }
+
+    if staged.is_empty() {
+        return Ok((invocation.clone(), staged));
+    }
+
+    let mut effective = invocation.clone();
+    effective.inputs = inputs;
+    Ok((effective, staged))
+}
+
+fn stage_template_owned_path(
+    input_name: &str,
+    raw_path: &str,
+    manifest_dir: &Path,
+    template_root: &Path,
+    stage_root: &Path,
+    staged: &mut Vec<JsonValue>,
+) -> Result<Option<String>, String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let candidate = PathBuf::from(trimmed);
+    let source = if candidate.is_absolute() {
+        candidate
+    } else {
+        manifest_dir.join(candidate)
+    };
+    let Ok(canonical_source) = source.canonicalize() else {
+        return Ok(None);
+    };
+    if !canonical_source.starts_with(template_root) {
+        return Ok(None);
+    }
+    let relative = canonical_source
+        .strip_prefix(template_root)
+        .map_err(|err| {
+            format!(
+                "derive template-owned input path `{}` relative to `{}`: {err}",
+                canonical_source.display(),
+                template_root.display()
+            )
+        })?;
+    let safe_relative = safe_template_owned_relative_path(relative)?;
+    let target = stage_root.join(safe_relative);
+    copy_template_owned_path(&canonical_source, &target)?;
+    staged.push(serde_json::json!({
+        "input": input_name,
+        "source": canonical_source,
+        "staged": target,
+    }));
+    Ok(Some(target.to_string_lossy().into_owned()))
+}
+
+fn safe_template_owned_relative_path(relative: &Path) -> Result<PathBuf, String> {
+    let mut out = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            other => {
+                return Err(format!(
+                    "template-owned input path contains unsafe component `{other:?}`"
+                ));
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err("template-owned input path resolved to the template directory".to_string());
+    }
+    Ok(out)
+}
+
+fn copy_template_owned_path(source: &Path, target: &Path) -> Result<(), String> {
+    if source.is_dir() {
+        fs::create_dir_all(target)
+            .map_err(|err| format!("create staged input dir `{}`: {err}", target.display()))?;
+        for entry in fs::read_dir(source)
+            .map_err(|err| format!("read template-owned dir `{}`: {err}", source.display()))?
+        {
+            let entry = entry.map_err(|err| {
+                format!(
+                    "read template-owned dir entry `{}`: {err}",
+                    source.display()
+                )
+            })?;
+            copy_template_owned_path(&entry.path(), &target.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if !source.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("create staged input parent `{}`: {err}", parent.display()))?;
+    }
+    fs::copy(source, target).map_err(|err| {
+        format!(
+            "stage template-owned input `{}` to `{}`: {err}",
+            source.display(),
+            target.display()
+        )
+    })?;
+    Ok(())
 }
 
 struct RenderedTemplateScript {
@@ -878,6 +1066,23 @@ fn render_template_script(
     Ok(RenderedTemplateScript {
         render_root,
         rendered_script,
+    })
+}
+
+fn rewrite_rendered_template_script(
+    template: &TemplateSpecWithSource,
+    invocation: &crate::domain::operators::OperatorInvocation,
+    rendered: &RenderedTemplateScript,
+) -> Result<(), String> {
+    let source = resolve_template_entry_path(template)?;
+    let raw = fs::read_to_string(&source)
+        .map_err(|err| format!("read template entry `{}`: {err}", source.display()))?;
+    let rendered_text = render_template_text(&raw, template, invocation)?;
+    fs::write(&rendered.rendered_script, rendered_text).map_err(|err| {
+        format!(
+            "rewrite rendered template script `{}`: {err}",
+            rendered.rendered_script.display()
+        )
     })
 }
 
@@ -2481,6 +2686,106 @@ execution:
             metadata["environment"]["canonicalId"],
             "demo@local/environment/r-bioc"
         );
+    }
+
+    #[tokio::test]
+    async fn rendered_template_stages_manifest_example_inputs_before_project_root_validation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("plugin");
+        let project_root = tmp.path().join("project");
+        let template_dir = plugin_root.join("templates").join("demo");
+        fs::create_dir_all(&template_dir).expect("template dir");
+        fs::create_dir_all(&project_root).expect("project dir");
+        fs::write(template_dir.join("example.tsv"), "gene\tvalue\nFCN3\t42\n").expect("example");
+        fs::write(
+            template_dir.join("run.sh"),
+            r#"#!/bin/sh
+set -eu
+table="$1"
+outdir="$2"
+mkdir -p "$outdir"
+cp "$table" "$outdir/report.tsv"
+printf '{"ok":true}\n' > "$outdir/outputs.json"
+"#,
+        )
+        .expect("script");
+        fs::write(
+            template_dir.join("template.yaml"),
+            r#"apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: rendered_example_demo
+  version: 0.1.0
+  name: Rendered Example Demo
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+  outputs:
+    report:
+      kind: file
+      required: true
+      glob: report.tsv
+    ok:
+      kind: boolean
+      required: true
+template:
+  engine: jinja2
+  entry: ./run.sh
+execution:
+  interpreter: /bin/sh
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+"#,
+        )
+        .expect("manifest");
+        let template = load_template_manifest(
+            &template_dir.join("template.yaml"),
+            "demo@local",
+            plugin_root,
+        )
+        .expect("template");
+        let example_path = template_dir.join("example.tsv");
+        let invocation = crate::domain::operators::OperatorInvocation {
+            inputs: BTreeMap::from([("table".to_string(), json!(example_path.to_string_lossy()))]),
+            params: BTreeMap::new(),
+            resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(&project_root);
+
+        let (raw, is_error, metadata) =
+            execute_rendered_template(&ctx, &template, &invocation, None)
+                .await
+                .expect("rendered template");
+
+        assert!(!is_error, "{raw}");
+        let parsed: JsonValue = serde_json::from_str(&raw).expect("operator result json");
+        assert_eq!(parsed["status"], "succeeded");
+        let effective_table = parsed["effectiveInputs"]["table"]
+            .as_str()
+            .expect("effective staged table");
+        let canonical_project_root = project_root.canonicalize().expect("canonical project root");
+        assert!(
+            Path::new(effective_table).starts_with(
+                canonical_project_root
+                    .join(".omiga")
+                    .join("template-renders")
+            ),
+            "staged example should stay under project root: {effective_table}"
+        );
+        assert_ne!(effective_table, example_path.to_string_lossy());
+        let report = parsed["outputs"]["report"][0]["path"]
+            .as_str()
+            .expect("report path");
+        assert_eq!(
+            fs::read_to_string(report).expect("report"),
+            "gene\tvalue\nFCN3\t42\n"
+        );
+        assert_eq!(metadata["executionMode"], "renderedTemplate");
+        assert_eq!(metadata["stagedTemplateInputs"][0]["input"], "table");
     }
 
     #[tokio::test]

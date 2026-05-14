@@ -33,7 +33,9 @@ export { useWorkspaceStore } from "./workspaceStore";
 export { useUiStore, type UiState } from "./uiStore";
 export { useLocaleStore, type AppLocale } from "./localeStore";
 export {
+  APP_SKIN_IDS,
   useColorModeStore,
+  type AppSkinId,
   type ColorModePreference,
 } from "./themeStore";
 export type { AccentPresetId } from "../theme/accentPresets";

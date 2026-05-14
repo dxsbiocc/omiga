@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { safeLocalStorage } from "../utils/browserStorage";
 
 export interface NotebookViewerState {
   /** Virtualize long notebooks (TanStack Virtual) */
@@ -30,6 +31,7 @@ export const useNotebookViewerStore = create<NotebookViewerState>()(
     }),
     {
       name: "omiga-notebook-viewer",
+      storage: createJSONStorage(() => safeLocalStorage),
       partialize: (s) => ({
         virtualizeCells: s.virtualizeCells,
         htmlSandboxAllowScripts: s.htmlSandboxAllowScripts,

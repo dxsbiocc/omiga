@@ -5,6 +5,7 @@
 //! - Delegates to domain layer
 //! - Returns structured errors for frontend handling
 
+pub mod app_skin;
 pub mod blackboard;
 pub mod chat;
 pub mod citation;

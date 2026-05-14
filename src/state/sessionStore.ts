@@ -3,6 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { notifyProviderChanged } from "../utils/providerEvents";
 import { invokeIfTauri } from "../utils/tauriRuntime";
 import {
+  getLocalStorageItem,
+  setLocalStorageItem,
+} from "../utils/browserStorage";
+import {
   useChatComposerStore,
   DEFAULT_SESSION_CONFIG,
   normalizeSessionConfig,
@@ -62,9 +66,8 @@ function msgCacheInvalidate(sessionId: string) {
 const PENDING_PROJECT_PATH_KEY = "omiga.pendingProjectPathSessions";
 
 function readPendingProjectPathIds(): Set<string> {
-  if (typeof localStorage === "undefined") return new Set();
   try {
-    const raw = localStorage.getItem(PENDING_PROJECT_PATH_KEY);
+    const raw = getLocalStorageItem(PENDING_PROJECT_PATH_KEY);
     if (!raw) return new Set();
     const arr = JSON.parse(raw) as unknown;
     if (!Array.isArray(arr)) return new Set();
@@ -75,8 +78,7 @@ function readPendingProjectPathIds(): Set<string> {
 }
 
 function persistPendingProjectPathIds(ids: Set<string>) {
-  if (typeof localStorage === "undefined") return;
-  localStorage.setItem(PENDING_PROJECT_PATH_KEY, JSON.stringify([...ids]));
+  setLocalStorageItem(PENDING_PROJECT_PATH_KEY, JSON.stringify([...ids]));
 }
 
 /** Legacy auto titles — replaced after the first user message. */

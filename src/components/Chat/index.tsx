@@ -145,7 +145,6 @@ import { ResearchGoalAuditDetailsDialog } from "./ResearchGoalAuditDetailsDialog
 import { SshDirectoryTreeDialog } from "./SshDirectoryTreeDialog";
 import { ReviewerVerdictList } from "../ReviewerVerdictList";
 import { buildPendingExecutionFeedback } from "../../utils/pendingExecutionFeedback";
-import { parseNextStepSuggestionsFromMarkdown } from "../../utils/parseAssistantNextSteps";
 import { extractSuggestionTooltipMarkdown } from "../../utils/suggestionTooltip";
 import {
   aggregateReviewerVerdicts,
@@ -4164,31 +4163,20 @@ export function Chat({ sessionId }: ChatProps) {
     alt: string;
   }>({ open: false, src: "", alt: "" });
 
-  const composerSuggestionBundle = useMemo(() => {
+  const composerSuggestions = useMemo(() => {
     const last = messages[messages.length - 1];
     if (
       last?.role === "assistant" &&
       last.followUpSuggestions &&
       last.followUpSuggestions.length > 0
     ) {
-      return {
-        rows: last.followUpSuggestions.map((s) => ({
-          label: compactSuggestionLabel(s.label, s.prompt),
-          text: s.prompt,
-        })),
-        source: "llm" as const,
-      };
+      return last.followUpSuggestions.map((s) => ({
+        label: compactSuggestionLabel(s.label, s.prompt),
+        text: s.prompt,
+      }));
     }
-    if (last?.role === "assistant" && last.content) {
-      const fromMd = parseNextStepSuggestionsFromMarkdown(last.content);
-      if (fromMd.length > 0) {
-        return { rows: fromMd, source: "markdown" as const };
-      }
-    }
-    return { rows: [], source: "none" as const };
+    return [];
   }, [messages]);
-  const composerSuggestions = composerSuggestionBundle.rows;
-  const suggestionSource = composerSuggestionBundle.source;
   const stickyTurnSummary = useMemo(() => {
     const last = messages[messages.length - 1];
     if (last?.role === "assistant" && last.turnSummary?.trim()) {
@@ -7826,11 +7814,7 @@ export function Chat({ sessionId }: ChatProps) {
                       fontWeight: 500,
                     }}
                   >
-                    {suggestionSource === "llm"
-                      ? "由独立模型根据上文生成，点击填入输入框"
-                      : suggestionSource === "markdown"
-                        ? "由助手正文「下一步建议」小节解析，点击填入输入框"
-                        : ""}
+                    由独立模型根据上文生成，点击填入输入框
                   </Typography>
                   <Stack
                     direction="row"

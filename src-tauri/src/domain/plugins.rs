@@ -498,6 +498,8 @@ pub struct PluginCapabilitySummary {
     pub mcp_servers: Vec<String>,
     pub apps: Vec<String>,
     pub retrieval_routes: Vec<String>,
+    pub template_count: usize,
+    pub template_groups: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -640,6 +642,17 @@ fn plugin_capability_parts(plugin: &PluginCapabilitySummary) -> Vec<String> {
             backtick_list(&plugin.retrieval_routes)
         ));
     }
+    if plugin.template_count > 0 {
+        let groups = if plugin.template_groups.is_empty() {
+            String::new()
+        } else {
+            format!("; groups: {}", backtick_list(&plugin.template_groups))
+        };
+        capabilities.push(format!(
+            "templates: {} via `unit_search` / `unit_describe` / `template_execute`{}",
+            plugin.template_count, groups
+        ));
+    }
     capabilities
 }
 
@@ -683,6 +696,7 @@ pub fn format_plugins_system_section(outcome: &PluginLoadOutcome) -> Option<Stri
     lines.push("### How to use plugins".to_string());
     lines.push(
         "- Plugins are not invoked directly; use their underlying skills, MCP tools, or explicitly available app tools.\n\
+         - Template plugins expose Template units. Discover them with `unit_search` / `unit_describe`, then run bundled templates with `template_execute`; do not rebuild template logic with ad-hoc shell/file writes unless the user explicitly asks for custom code.\n\
          - Retrieval plugin routes are local Search / Query / Fetch routes, not MCP tool names. If a plugin lists `retrieval routes: category.source`, call `search`, `query`, or `fetch` with that category/source.\n\
          - If the user explicitly names a plugin, prefer capabilities associated with that plugin for that turn.\n\
          - If a plugin contributes skills, those skills also appear in the Skills list and should be loaded with `skill_view` / `skill` before use.\n\
@@ -2554,6 +2568,7 @@ fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<Plugin
     let mut mcp_servers = plugin.mcp_servers.keys().cloned().collect::<Vec<_>>();
     mcp_servers.sort();
     let retrieval_routes = plugin_retrieval_route_names(plugin.retrieval.as_ref());
+    let (template_count, template_groups) = plugin_template_capability_summary(plugin);
     let summary = PluginCapabilitySummary {
         id: plugin.id.clone(),
         display_name: plugin
@@ -2566,13 +2581,43 @@ fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<Plugin
         mcp_servers,
         apps: plugin.apps.clone(),
         retrieval_routes,
+        template_count,
+        template_groups,
     };
 
     (summary.has_skills
         || !summary.mcp_servers.is_empty()
         || !summary.apps.is_empty()
-        || !summary.retrieval_routes.is_empty())
-    .then_some(summary)
+        || !summary.retrieval_routes.is_empty()
+        || summary.template_count > 0)
+        .then_some(summary)
+}
+
+fn plugin_template_capability_summary(plugin: &LoadedPlugin) -> (usize, Vec<String>) {
+    let mut count = 0usize;
+    let mut groups = BTreeSet::new();
+    for manifest_path in crate::domain::templates::discover_template_manifest_paths(&plugin.root) {
+        let Ok(template) = crate::domain::templates::load_template_manifest(
+            &manifest_path,
+            plugin.id.clone(),
+            plugin.root.clone(),
+        ) else {
+            continue;
+        };
+        count += 1;
+        let Some(category) = template.spec.classification.category.as_deref() else {
+            continue;
+        };
+        let group = category
+            .strip_prefix("visualization/")
+            .or_else(|| category.strip_prefix("omics/"))
+            .unwrap_or(category)
+            .trim();
+        if !group.is_empty() {
+            groups.insert(group.to_string());
+        }
+    }
+    (count, groups.into_iter().take(8).collect())
 }
 
 fn load_configured_plugin(
@@ -5187,6 +5232,63 @@ mod tests {
         assert!(section.contains("MCP servers: `sample`"));
         assert!(section.contains("app connector refs: `calendar`"));
         assert!(section.contains("Do not assume VS Code extension UI/runtime behavior"));
+    }
+
+    #[test]
+    fn template_plugins_are_visible_as_template_execute_capabilities() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("template-plugin");
+        let template_dir = plugin_root.join("templates").join("scatter");
+        fs::create_dir_all(&template_dir).expect("template dir");
+        fs::write(
+            plugin_root.join("plugin.json"),
+            r#"{
+              "name": "template-plugin",
+              "version": "0.1.0",
+              "description": "Template-only visualization plugin",
+              "templates": "./templates"
+            }"#,
+        )
+        .expect("plugin manifest");
+        fs::write(template_dir.join("run.sh"), "#!/bin/sh\n").expect("script");
+        fs::write(
+            template_dir.join("template.yaml"),
+            r#"apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_demo
+  version: 0.1.0
+  name: Demo Plot
+classification:
+  category: visualization/scatter
+template:
+  engine: static
+  entry: ./run.sh
+"#,
+        )
+        .expect("template manifest");
+        let manifest = load_plugin_manifest(&plugin_root).expect("plugin manifest");
+        let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
+            id: "template-plugin@market".to_string(),
+            manifest_name: Some(manifest.name.clone()),
+            display_name: Some("Template Plugin".to_string()),
+            description: manifest.description.clone(),
+            root: plugin_root,
+            enabled: true,
+            skill_roots: vec![],
+            mcp_servers: HashMap::new(),
+            apps: vec![],
+            retrieval: None,
+            error: None,
+        }]);
+
+        let section = format_plugins_system_section(&outcome).expect("plugins section");
+
+        assert!(section.contains("- `Template Plugin`: Template-only visualization plugin"));
+        assert!(section
+            .contains("templates: 1 via `unit_search` / `unit_describe` / `template_execute`"));
+        assert!(section.contains("groups: `scatter`"));
+        assert!(section.contains("Template plugins expose Template units"));
     }
 
     #[test]

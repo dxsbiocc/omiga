@@ -5,7 +5,8 @@
  * larger visual scale so small in-app placements remain readable.
  */
 
-import omigaLogoUrl from "../assets/omiga-logo.svg";
+import { appSkinAssetFor } from "../assets/appSkins";
+import { useColorModeStore } from "../state/themeStore";
 
 interface OmigaLogoProps {
   size?: number;
@@ -20,13 +21,15 @@ export function OmigaLogo({
   style,
   className,
 }: OmigaLogoProps) {
+  const appSkin = useColorModeStore((s) => s.appSkin);
+  const logoSrc = appSkinAssetFor(appSkin).logoSrc;
   const transform = style?.transform
     ? `${style.transform} scale(1.12)`
     : "scale(1.12)";
 
   return (
     <img
-      src={omigaLogoUrl}
+      src={logoSrc}
       width={size}
       height={size}
       alt="Omiga"

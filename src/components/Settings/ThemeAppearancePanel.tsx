@@ -12,7 +12,12 @@ import {
   LightMode,
   SettingsBrightness,
 } from "@mui/icons-material";
-import type { ColorModePreference } from "../../state/themeStore";
+import { APP_SKIN_ASSETS } from "../../assets/appSkins";
+import {
+  APP_SKIN_IDS,
+  type AppSkinId,
+  type ColorModePreference,
+} from "../../state/themeStore";
 import {
   ACCENT_PRESET_IDS,
   ACCENT_PRESET_META,
@@ -26,6 +31,8 @@ export interface ThemeAppearancePanelProps {
   onColorModeChange: (mode: ColorModePreference) => void;
   accentPreset: AccentPresetId;
   onAccentPresetChange: (preset: AccentPresetId) => void;
+  appSkin: AppSkinId;
+  onAppSkinChange: (skin: AppSkinId) => void;
 }
 
 const MODE_ORDER: ColorModePreference[] = ["light", "dark", "system"];
@@ -86,6 +93,8 @@ export function ThemeAppearancePanel({
   onColorModeChange,
   accentPreset,
   onAccentPresetChange,
+  appSkin,
+  onAppSkinChange,
 }: ThemeAppearancePanelProps) {
   const theme = useTheme();
   const isDark = theme.palette.mode === "dark";
@@ -182,6 +191,159 @@ export function ThemeAppearancePanel({
                     <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.45 }}>
                       {MODE_HINTS[mode]}
                     </Typography>
+                  </Stack>
+                </Box>
+              </Grid>
+            );
+          })}
+        </Grid>
+      </Box>
+
+      <Box>
+        <Typography
+          variant="overline"
+          sx={{ letterSpacing: "0.12em", color: "text.secondary", fontWeight: 700 }}
+        >
+          Skin
+        </Typography>
+        <Typography variant="h6" sx={{ mt: 0.5, mb: 0.5, fontWeight: 700 }}>
+          App icon
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2, lineHeight: 1.65 }}>
+          Keep the current icon or switch to the new candidate. Saved locally and applied to the app chrome.
+        </Typography>
+
+        <Grid container spacing={1.5}>
+          {APP_SKIN_IDS.map((id) => {
+            const asset = APP_SKIN_ASSETS[id];
+            const selected = appSkin === id;
+            return (
+              <Grid item xs={12} sm={6} key={id}>
+                <Box
+                  component="button"
+                  type="button"
+                  onClick={() => onAppSkinChange(id)}
+                  aria-pressed={selected}
+                  aria-label={`${asset.label} app icon`}
+                  sx={{
+                    width: "100%",
+                    minHeight: 136,
+                    cursor: "pointer",
+                    textAlign: "left",
+                    border: "none",
+                    p: 0,
+                    borderRadius: 3,
+                    overflow: "hidden",
+                    position: "relative",
+                    background: isDark
+                      ? `linear-gradient(135deg, ${alpha(
+                          theme.palette.primary.main,
+                          0.3,
+                        )}, ${alpha("#111827", 0.92)})`
+                      : `linear-gradient(135deg, ${alpha(
+                          theme.palette.primary.main,
+                          0.16,
+                        )}, ${alpha("#ffffff", 0.98)})`,
+                    boxShadow: themePickCardShadow(theme, isDark, selected, false),
+                    transform: "translateZ(0)",
+                    transition: pickCardTransition,
+                    "@media (prefers-reduced-motion: reduce)": {
+                      transition: "none",
+                      "&:hover": { transform: "none" },
+                    },
+                    "&:hover": {
+                      transform: "translateY(-3px)",
+                      boxShadow: themePickCardShadow(theme, isDark, selected, true),
+                    },
+                    "&:active": {
+                      transform: "translateY(-1px)",
+                      transitionDuration: "0.12s",
+                    },
+                    "&:focus-visible": {
+                      outline: `2px solid ${theme.palette.primary.main}`,
+                      outlineOffset: 2,
+                    },
+                  }}
+                >
+                  <Stack
+                    direction="row"
+                    alignItems="center"
+                    spacing={1.75}
+                    sx={{
+                      ...glassPanelSx(isDark),
+                      p: 1.75,
+                      minHeight: 136,
+                      pr: selected ? 8.5 : 1.75,
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        width: 76,
+                        height: 76,
+                        borderRadius: 2.5,
+                        flexShrink: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        bgcolor: isDark
+                          ? alpha("#fff", 0.08)
+                          : alpha("#0f172a", 0.04),
+                        border: "1px solid",
+                        borderColor: isDark
+                          ? alpha("#fff", 0.12)
+                          : alpha("#0f172a", 0.08),
+                      }}
+                    >
+                      <Box
+                        component="img"
+                        src={asset.logoSrc}
+                        alt=""
+                        sx={{
+                          display: "block",
+                          width: 60,
+                          height: 60,
+                          objectFit: "contain",
+                        }}
+                      />
+                    </Box>
+                    <Box sx={{ minWidth: 0, flex: 1, textAlign: "left" }}>
+                      <Typography
+                        variant="subtitle1"
+                        fontWeight={800}
+                        color="text.primary"
+                        sx={{ textAlign: "left" }}
+                      >
+                        {asset.label}
+                      </Typography>
+                      <Typography
+                        variant="body2"
+                        color="text.secondary"
+                        sx={{ mt: 0.35, lineHeight: 1.5, textAlign: "left" }}
+                      >
+                        {asset.description}
+                      </Typography>
+                    </Box>
+                    {selected && (
+                      <Box
+                        sx={{
+                          position: "absolute",
+                          top: 12,
+                          right: 12,
+                          zIndex: 1,
+                          px: 1.25,
+                          py: 0.35,
+                          borderRadius: 10,
+                          bgcolor: alpha(theme.palette.primary.main, 0.16),
+                          color: "primary.main",
+                          typography: "caption",
+                          fontWeight: 800,
+                          letterSpacing: "0.04em",
+                          textTransform: "uppercase",
+                        }}
+                      >
+                        Active
+                      </Box>
+                    )}
                   </Stack>
                 </Box>
               </Grid>

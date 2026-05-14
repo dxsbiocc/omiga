@@ -60,135 +60,6 @@ fn clamp_label(s: &str) -> String {
     }
 }
 
-fn normalize_inline_markdown(raw: &str) -> String {
-    raw.replace("**", "")
-        .replace('`', "")
-        .replace(['[', ']'], "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim_matches(|ch: char| {
-            ch.is_ascii_punctuation() || matches!(ch, '。' | '，' | '、' | '：' | ':' | '-')
-        })
-        .trim()
-        .to_string()
-}
-
-fn first_context_label(raw: &str) -> Option<String> {
-    let candidates = raw
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| {
-            !line.starts_with('|')
-                && !line.starts_with("```")
-                && !line.starts_with("---")
-                && !line.starts_with("http://")
-                && !line.starts_with("https://")
-        })
-        .filter_map(|line| {
-            let without_heading = line
-                .trim_start_matches('#')
-                .trim_start_matches(|ch: char| {
-                    ch.is_ascii_digit() || matches!(ch, '.' | '、' | ')' | '）' | '-' | '*' | '•')
-                })
-                .trim();
-            let cleaned = normalize_inline_markdown(without_heading);
-            (cleaned.chars().count() >= 4).then_some(cleaned)
-        })
-        .collect::<Vec<_>>();
-
-    candidates.into_iter().find_map(|candidate| {
-        let chars = candidate.chars().take(24).collect::<String>();
-        (!chars.is_empty()).then_some(chars)
-    })
-}
-
-fn looks_like_code_or_config(raw: &str) -> bool {
-    let total = raw.chars().count().max(1);
-    let fenced = raw.matches("```").count() >= 2;
-    let code_markers = [
-        "function ",
-        "const ",
-        "let ",
-        "use ",
-        "SELECT ",
-        "{",
-        "}",
-        "</",
-    ]
-    .iter()
-    .filter(|marker| raw.contains(**marker))
-    .count();
-    fenced && code_markers >= 3 && raw.lines().count() > 8 && total < 2_000
-}
-
-fn rich_reply_has_follow_up_value(raw: &str) -> bool {
-    let chars = raw.chars().count();
-    if chars < 120 || looks_like_code_or_config(raw) {
-        return false;
-    }
-    let cues = [
-        "研究",
-        "文献",
-        "机制",
-        "实验",
-        "数据",
-        "分析",
-        "应用",
-        "展望",
-        "局限",
-        "验证",
-        "方法",
-        "PMID",
-        "DOI",
-        "参考文献",
-        "下一步",
-        "需要我",
-    ];
-    let cue_count = cues.iter().filter(|cue| raw.contains(**cue)).count();
-    let structured =
-        raw.contains('\n') && (raw.contains("##") || raw.contains('|') || raw.contains("1."));
-    cue_count >= 2 || (structured && cue_count >= 1)
-}
-
-pub fn fallback_follow_up_suggestions(raw: &str) -> Vec<FollowUpSuggestion> {
-    if !rich_reply_has_follow_up_value(raw) {
-        return Vec::new();
-    }
-    let context = first_context_label(raw).unwrap_or_else(|| "上文分析".to_string());
-    let mut items = vec![
-        FollowUpSuggestion {
-            label: "深入检索".to_string(),
-            prompt: format!(
-                "请围绕「{context}」中最关键的一条机制或方向做更深入的检索分析，并补充可追溯文献或数据来源。"
-            ),
-        },
-        FollowUpSuggestion {
-            label: "整理表格".to_string(),
-            prompt: format!(
-                "请把「{context}」的核心结论整理成对比表，突出研究对象、方法、证据强度和局限。"
-            ),
-        },
-    ];
-    if raw.contains("实验") || raw.contains("验证") || raw.contains("技术方案") {
-        items.push(FollowUpSuggestion {
-            label: "设计验证".to_string(),
-            prompt: format!(
-                "请基于「{context}」设计一个可执行的验证方案，列出样本、指标、对照、步骤和预期结果。"
-            ),
-        });
-    } else {
-        items.push(FollowUpSuggestion {
-            label: "展开局限".to_string(),
-            prompt: format!(
-                "请继续分析「{context}」目前结论的主要局限、不确定性，以及下一步最值得补充的信息。"
-            ),
-        });
-    }
-    items
-}
-
 pub fn parse_follow_up_suggestions_json(raw: &str) -> Vec<FollowUpSuggestion> {
     let Some(slice) = extract_json_array_slice(raw) else {
         return vec![];
@@ -268,12 +139,7 @@ pub async fn generate_follow_up_suggestions(
     )
     .await
     .map_err(|_| ApiError::Timeout)??;
-    let parsed = parse_follow_up_suggestions_json(&raw);
-    if parsed.is_empty() {
-        Ok(fallback_follow_up_suggestions(&body))
-    } else {
-        Ok(parsed)
-    }
+    Ok(parse_follow_up_suggestions_json(&raw))
 }
 
 #[cfg(test)]
@@ -354,7 +220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_model_output_returns_contextual_fallback_for_research_reply() {
+    async fn empty_model_output_returns_no_suggestions() {
         let calls = Arc::new(AtomicUsize::new(0));
         let client = StaticClient {
             config: LlmConfig::new(LlmProvider::OpenAi, "test-key"),
@@ -376,14 +242,6 @@ mod tests {
             .expect("suggestions");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(suggestions.len(), 3);
-        assert_eq!(suggestions[0].label, "深入检索");
-        assert!(suggestions[0].prompt.contains("QS群体感应研究分析"));
-    }
-
-    #[test]
-    fn fallback_does_not_create_generic_chips_for_short_final_answers() {
-        let suggestions = fallback_follow_up_suggestions("答案是 42。");
         assert!(suggestions.is_empty());
     }
 }

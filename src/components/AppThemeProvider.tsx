@@ -8,7 +8,10 @@ import {
   getAccentSwatchGradient,
 } from "../theme/accentPresets";
 import { useColorModeStore } from "../state/themeStore";
-import { getCurrentWindowIfTauri } from "../utils/tauriRuntime";
+import {
+  getCurrentWindowIfTauri,
+  invokeIfTauri,
+} from "../utils/tauriRuntime";
 
 function useSystemPrefersDark(): boolean {
   const [dark, setDark] = useState(() => {
@@ -37,6 +40,7 @@ function resolvePaletteMode(
 export function AppThemeProvider({ children }: { children: ReactNode }) {
   const colorMode = useColorModeStore((s) => s.colorMode);
   const accentPreset = useColorModeStore((s) => s.accentPreset ?? "asana");
+  const appSkin = useColorModeStore((s) => s.appSkin);
   const systemDark = useSystemPrefersDark();
   const resolvedMode = resolvePaletteMode(colorMode, systemDark);
 
@@ -66,6 +70,10 @@ export function AppThemeProvider({ children }: { children: ReactNode }) {
       });
     });
   }, [resolvedMode]);
+
+  useEffect(() => {
+    void invokeIfTauri("set_app_icon_skin", { skin: appSkin });
+  }, [appSkin]);
 
   return (
     <ThemeProvider theme={muiTheme}>

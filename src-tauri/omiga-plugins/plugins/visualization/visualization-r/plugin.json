@@ -19,7 +19,7 @@
     ],
     "brandColor": "#7C3AED",
     "defaultPrompt": [
-      "Use visualization-r to create an editable static figure."
+      "Use visualization-r by selecting a Template unit with unit_search/unit_describe and running it with template_execute. Keep inputs and outputs inside the current session/project workspace; do not build ad-hoc shell/base64/JSON visualization wrappers unless explicitly requested."
     ]
   },
   "environments": "./environments"

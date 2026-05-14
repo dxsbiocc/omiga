@@ -99,6 +99,15 @@ function summarizeShellCommand(command: string): string {
   return firstLine.length > 72 ? `${firstLine.slice(0, 72)}…` : firstLine;
 }
 
+function summarizeArgsFallback(args: AnyArgs): string | undefined {
+  if (!args || Object.keys(args).length === 0) return undefined;
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    return String(args);
+  }
+}
+
 export function inferIntent(
   toolNameRaw: string,
   args: AnyArgs,
@@ -195,6 +204,8 @@ export function inferIntent(
   if (toolName === "bash" || toolName === "Bash") {
     const cmd = firstString(args?.command) ?? firstString(args?.cmd) ?? "";
     const cmdTrim = cmd.trim();
+    const commandDetail =
+      cmdTrim || summarizeArgsFallback(args) || "未收到命令内容；请拒绝并让 Agent 重新发起。";
     const lower = cmdTrim.toLowerCase();
     const description = firstNamedString(args, [
       "description",
@@ -205,7 +216,9 @@ export function inferIntent(
     ]);
     const operation = description
       ? `运行：${description}`
-      : `执行：${summarizeShellCommand(cmdTrim)}`;
+      : cmdTrim
+        ? `执行：${summarizeShellCommand(cmdTrim)}`
+        : "Shell 命令";
 
     // Helper to check if command contains a destructive operation
     // Uses word boundaries to reduce false positives and bypasses
@@ -231,7 +244,7 @@ export function inferIntent(
     ) {
       return {
         title: "删除文件/目录",
-        detail: cmdTrim || undefined,
+        detail: commandDetail,
         operation: description ? `删除/清理：${description}` : "删除文件/目录",
         contentLabel: "命令内容",
       };
@@ -241,7 +254,7 @@ export function inferIntent(
     if (hasCommand("mv") || /(^|[;|&]|\$\(|`)\s*rename\s/.test(lower)) {
       return {
         title: "移动/重命名文件",
-        detail: cmdTrim || undefined,
+        detail: commandDetail,
         operation: description ? `移动/重命名：${description}` : "移动/重命名文件",
         contentLabel: "命令内容",
       };
@@ -251,7 +264,7 @@ export function inferIntent(
     if (hasCommand("cp") || hasCommand("scp") || hasCommand("rsync")) {
       return {
         title: "复制文件",
-        detail: cmdTrim || undefined,
+        detail: commandDetail,
         operation: description ? `复制：${description}` : "复制文件",
         contentLabel: "命令内容",
       };
@@ -269,7 +282,7 @@ export function inferIntent(
     ) {
       return {
         title: "网络/远程操作",
-        detail: cmdTrim || undefined,
+        detail: commandDetail,
         operation: description ? `网络/远程：${description}` : "网络/远程操作",
         contentLabel: "命令内容",
       };
@@ -287,7 +300,7 @@ export function inferIntent(
     ) {
       return {
         title: "安装/包管理操作",
-        detail: cmdTrim || undefined,
+        detail: commandDetail,
         operation: description ? `安装/包管理：${description}` : "安装/包管理操作",
         contentLabel: "命令内容",
       };
@@ -295,7 +308,7 @@ export function inferIntent(
 
     return {
       title: "执行命令",
-      detail: cmdTrim || undefined,
+      detail: commandDetail,
       operation,
       contentLabel: "运行内容",
     };

@@ -103,6 +103,24 @@ describe("PermissionPromptBar connector intent", () => {
     expect(permissionPromptDisplayTitle(intent)).toBe("检查 pymol 是否安装");
   });
 
+  it("falls back to raw Bash arguments when command text is missing", () => {
+    const intent = inferIntent("Bash", {
+      description: "生成最终可视化 JSON",
+      script: "python3 -c 'print(1)'",
+    });
+
+    expect(permissionPromptDisplayTitle(intent)).toBe("生成最终可视化 JSON");
+    expect(intent.detail).toContain('"script"');
+    expect(intent.detail).toContain("python3 -c");
+  });
+
+  it("warns when a Bash request contains no displayable command arguments", () => {
+    const intent = inferIntent("Bash", {});
+
+    expect(permissionPromptDisplayTitle(intent)).toBe("Shell 命令");
+    expect(intent.detail).toContain("未收到命令内容");
+  });
+
   it("makes session approval scope explicit for shell commands", () => {
     const copy = permissionSessionApprovalCopy("Bash", undefined);
 

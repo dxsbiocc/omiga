@@ -35,6 +35,7 @@ import {
   ExtensionRounded,
   ExpandMoreRounded,
   PlayArrowRounded,
+  PublishedWithChangesRounded,
   RefreshRounded,
   SearchRounded,
   SettingsRounded,
@@ -1623,6 +1624,12 @@ function pluginSyncButtonLabel(plugin: PluginSummary): string {
   return "Sync";
 }
 
+function pluginSyncTooltip(plugin: PluginSummary): string {
+  const label = pluginSyncButtonLabel(plugin);
+  const message = plugin.sync?.message?.trim();
+  return message ? `${label}: ${message}` : label;
+}
+
 function pluginCanForceSync(plugin: PluginSummary): boolean {
   return Boolean(plugin.installed && plugin.sync && plugin.sync.state !== "upToDate");
 }
@@ -3098,18 +3105,27 @@ function PluginDetailsDialog({
     processPoolStatuses,
   );
   const action = plugin.installed ? (
-    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" justifyContent="flex-end">
+    <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" justifyContent="flex-end">
       {pluginSyncNeedsAction(plugin) && (
-        <Button
-          variant="outlined"
-          size="small"
-          startIcon={busy ? <CircularProgress size={14} /> : <SyncRounded />}
-          disabled={busy}
-          onClick={() => onSync(plugin)}
-          sx={{ textTransform: "none", borderRadius: 1.5 }}
-        >
-          {pluginSyncButtonLabel(plugin)}
-        </Button>
+        <Tooltip title={pluginSyncTooltip(plugin)} arrow>
+          <span>
+            <IconButton
+              aria-label={`${pluginSyncButtonLabel(plugin)} ${displayName(plugin)}`}
+              size="small"
+              color={plugin.sync?.state === "conflictRisk" ? "warning" : "primary"}
+              disabled={busy}
+              onClick={() => onSync(plugin)}
+              sx={{
+                border: 1,
+                borderColor: "divider",
+                bgcolor: "background.paper",
+                "&:hover": { bgcolor: "action.hover" },
+              }}
+            >
+              {busy ? <CircularProgress size={18} color="inherit" /> : <SyncRounded fontSize="small" />}
+            </IconButton>
+          </span>
+        </Tooltip>
       )}
       <Stack direction="row" spacing={1} alignItems="center">
         <Typography variant="body2" color="text.secondary">
@@ -3123,16 +3139,19 @@ function PluginDetailsDialog({
           inputProps={{ "aria-label": `Enable ${displayName(plugin)}` }}
         />
       </Stack>
-      <Button
-        color="error"
-        variant="text"
-        startIcon={<DeleteOutlineRounded />}
-        disabled={busy}
-        onClick={() => onUninstall(plugin)}
-        sx={{ textTransform: "none", borderRadius: 1.5 }}
-      >
-        Uninstall
-      </Button>
+      <Tooltip title={`Uninstall ${displayName(plugin)}`} arrow>
+        <span>
+          <IconButton
+            aria-label={`Uninstall ${displayName(plugin)}`}
+            size="small"
+            color="error"
+            disabled={busy}
+            onClick={() => onUninstall(plugin)}
+          >
+            <DeleteOutlineRounded fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
     </Stack>
   ) : (
     <Button
@@ -3287,27 +3306,34 @@ function PluginDetailsDialog({
               severity={plugin.sync.state === "conflictRisk" ? "warning" : "info"}
               sx={{ borderRadius: 2 }}
               action={
-                <Stack direction="row" spacing={0.75}>
-                  <Button
-                    color="inherit"
-                    size="small"
-                    startIcon={<SyncRounded />}
-                    disabled={busy}
-                    onClick={() => onSync(plugin)}
-                    sx={{ textTransform: "none" }}
-                  >
-                    {pluginSyncButtonLabel(plugin)}
-                  </Button>
+                <Stack direction="row" spacing={0.5} alignItems="center">
+                  <Tooltip title={pluginSyncTooltip(plugin)} arrow>
+                    <span>
+                      <IconButton
+                        aria-label={`${pluginSyncButtonLabel(plugin)} ${displayName(plugin)}`}
+                        color="inherit"
+                        size="small"
+                        disabled={busy}
+                        onClick={() => onSync(plugin)}
+                      >
+                        {busy ? <CircularProgress size={18} color="inherit" /> : <SyncRounded fontSize="small" />}
+                      </IconButton>
+                    </span>
+                  </Tooltip>
                   {pluginCanForceSync(plugin) && (
-                    <Button
-                      color="inherit"
-                      size="small"
-                      disabled={busy}
-                      onClick={() => onForceSync(plugin)}
-                      sx={{ textTransform: "none", whiteSpace: "nowrap" }}
-                    >
-                      Force overwrite
-                    </Button>
+                    <Tooltip title="Force overwrite local plugin edits from marketplace" arrow>
+                      <span>
+                        <IconButton
+                          aria-label={`Force overwrite ${displayName(plugin)} from marketplace`}
+                          color="warning"
+                          size="small"
+                          disabled={busy}
+                          onClick={() => onForceSync(plugin)}
+                        >
+                          <PublishedWithChangesRounded fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                   )}
                 </Stack>
               }
