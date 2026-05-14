@@ -1,11 +1,11 @@
-feature	x_value	y_value	group	label
-GeneA	1.8	2.1	Activated	GeneA
-GeneB	1.1	-1.4	X-high	
-GeneC	-1.7	1.6	Y-high	GeneC
-GeneD	-1.2	-1.5	Low	
-GeneE	2.4	0.9	Activated	GeneE
-GeneF	-2.2	0.7	Y-high	
-GeneG	0.6	-2.1	X-high	
-GeneH	-0.9	-0.8	Low	
-GeneI	2.8	2.9	Activated	GeneI
-GeneJ	-2.5	2.2	Y-high	
+feature	x_value	y_value	label	group
+GeneA	1.8	2.1	GeneA	Activated
+GeneB	1.1	-1.4		X-high
+GeneC	-1.7	1.6	GeneC	Y-high
+GeneD	-1.2	-1.5		Low
+GeneE	2.4	0.9	GeneE	Activated
+GeneF	-2.2	0.7		Y-high
+GeneG	0.6	-2.1		X-high
+GeneH	-0.9	-0.8		Low
+GeneI	2.8	2.9	GeneI	Activated
+GeneJ	-2.5	2.2		Y-high
