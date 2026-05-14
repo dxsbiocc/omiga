@@ -9,6 +9,7 @@ import {
   Chip,
   CircularProgress,
   Dialog,
+  DialogActions,
   DialogContent,
   DialogTitle,
   IconButton,
@@ -53,6 +54,7 @@ import {
   type PluginSummary,
   usePluginStore,
 } from "../../state/pluginStore";
+import { invoke } from "@tauri-apps/api/core";
 import { useChatComposerStore } from "../../state/chatComposerStore";
 import { useSessionStore } from "../../state/sessionStore";
 import { NotebookViewerSettingsPanel } from "./NotebookSettingsTab";
@@ -2923,6 +2925,145 @@ function OperatorDetailsDialog({
   );
 }
 
+const OPERATOR_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
+
+function CreateUserOperatorDialog({
+  open,
+  onClose,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [id, setId] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [command, setCommand] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const idError = id.length > 0 && !OPERATOR_ID_PATTERN.test(id)
+    ? "Must start with a letter and contain only letters, digits, hyphens, and underscores (max 64 chars)"
+    : null;
+  const argv = command.trim().split(/\s+/).filter(Boolean);
+  const canSubmit = OPERATOR_ID_PATTERN.test(id) && name.trim().length > 0 && argv.length > 0;
+
+  function handleClose() {
+    if (submitting) return;
+    setId("");
+    setName("");
+    setDescription("");
+    setCommand("");
+    setSubmitError(null);
+    onClose();
+  }
+
+  async function handleSubmit() {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await invoke("save_user_script_operator", {
+        id: id.trim(),
+        name: name.trim(),
+        description: description.trim(),
+        argv,
+      });
+      setId("");
+      setName("");
+      setDescription("");
+      setCommand("");
+      onCreated();
+      onClose();
+    } catch (e) {
+      setSubmitError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm" aria-labelledby="create-user-operator-title">
+      <DialogTitle id="create-user-operator-title" sx={{ px: 3, py: 2, pr: 7 }}>
+        New Script Operator
+        <IconButton
+          aria-label="Close dialog"
+          onClick={handleClose}
+          disabled={submitting}
+          sx={{ position: "absolute", right: 12, top: 10 }}
+        >
+          <CloseRounded />
+        </IconButton>
+      </DialogTitle>
+      <DialogContent sx={{ px: 3, pt: 1, pb: 1 }}>
+        <Stack spacing={2} sx={{ pt: 1 }}>
+          {submitError && (
+            <Alert severity="error" sx={{ borderRadius: 2 }}>
+              {submitError}
+            </Alert>
+          )}
+          <TextField
+            label="ID"
+            value={id}
+            onChange={(e) => setId(e.target.value)}
+            required
+            fullWidth
+            size="small"
+            helperText={idError ?? "e.g. my_script"}
+            error={Boolean(idError)}
+            disabled={submitting}
+          />
+          <TextField
+            label="Name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+            fullWidth
+            size="small"
+            helperText="Human-readable display name"
+            disabled={submitting}
+          />
+          <TextField
+            label="Description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            fullWidth
+            size="small"
+            multiline
+            minRows={2}
+            helperText="Optional"
+            disabled={submitting}
+          />
+          <TextField
+            label="Command"
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            required
+            fullWidth
+            size="small"
+            helperText={`Shell command to run, e.g. bash -c "echo hello"`}
+            disabled={submitting}
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, py: 2 }}>
+        <Button onClick={handleClose} disabled={submitting} sx={{ textTransform: "none", borderRadius: 1.5 }}>
+          Cancel
+        </Button>
+        <Button
+          variant="contained"
+          onClick={() => void handleSubmit()}
+          disabled={!canSubmit || submitting}
+          sx={{ textTransform: "none", borderRadius: 1.5 }}
+        >
+          {submitting ? <CircularProgress size={18} color="inherit" /> : "Create"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 function OperatorCatalogSection({
   operators,
   diagnostics,
@@ -2935,6 +3076,7 @@ function OperatorCatalogSection({
   onCleanupRuns,
   onOpenRun,
   onCopy,
+  onCreateUserOperator,
 }: {
   operators: OperatorSummary[];
   diagnostics: OperatorManifestDiagnostic[];
@@ -2947,10 +3089,12 @@ function OperatorCatalogSection({
   onCleanupRuns: (operator?: OperatorSummary) => void;
   onOpenRun: (run: OperatorRunSummary) => void;
   onCopy: (text: string, successMessage: string) => void;
+  onCreateUserOperator: () => void;
 }) {
   const theme = useTheme();
   const [selectedSmokeTests, setSelectedSmokeTests] = useState<Record<string, string>>({});
   const [detailOperator, setDetailOperator] = useState<OperatorSummary | null>(null);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const sortedOperators = [...operators].sort((left, right) =>
     left.id
       .localeCompare(right.id)
@@ -2973,6 +3117,11 @@ function OperatorCatalogSection({
         onOpenRun={onOpenRun}
         onCleanupRuns={onCleanupRuns}
         onCopy={onCopy}
+      />
+      <CreateUserOperatorDialog
+        open={createDialogOpen}
+        onClose={() => setCreateDialogOpen(false)}
+        onCreated={onCreateUserOperator}
       />
       <Accordion disableGutters elevation={0} sx={accordionSx}>
       <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={accordionSummarySx}>
@@ -2999,9 +3148,20 @@ function OperatorCatalogSection({
       </AccordionSummary>
       <AccordionDetails sx={{ px: 2, pt: 0.75, pb: 2 }}>
         <Stack spacing={1.25} useFlexGap>
-          <Typography variant="body2" color="text.secondary">
-            Operators are plugin-defined tools that agents can call directly after exposure. Runtime follows the current session environment; the registry stays local.
-          </Typography>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
+            <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
+              Operators are plugin-defined tools that agents can call directly after exposure. Runtime follows the current session environment; the registry stays local.
+            </Typography>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<AddRounded />}
+              onClick={(e) => { e.stopPropagation(); setCreateDialogOpen(true); }}
+              sx={{ textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap", flexShrink: 0 }}
+            >
+              New Script Operator
+            </Button>
+          </Stack>
           {registryPath && (
             <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
               Registry: {registryPath}
@@ -3417,6 +3577,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     isMutating,
     error,
     loadPlugins,
+    loadOperators,
     loadOperatorRuns,
     readOperatorRun,
     readOperatorRunLog,
@@ -4249,6 +4410,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
         onOpenRun={(run) => void handleOpenOperatorRun(run)}
         onCopy={(text, successMessage) => void copyToClipboard(text, successMessage)}
+        onCreateUserOperator={() => void loadOperators()}
       />
 
       {marketplaces.length === 0 || allPlugins.length === 0 ? (

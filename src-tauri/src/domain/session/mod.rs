@@ -1,6 +1,7 @@
 //! Session management
 
 pub mod agent_task;
+pub mod artifacts;
 pub mod codec;
 pub mod config;
 

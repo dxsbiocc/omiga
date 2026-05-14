@@ -47,4 +47,9 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   ssh: 9,
   "execution-env": 9,
   "execution-envs": 9,
+  /** Cron / scheduled jobs surface */
+  schedule: 15,
+  cron: 15,
+  "cron-jobs": 15,
+  "scheduled-jobs": 15,
 };

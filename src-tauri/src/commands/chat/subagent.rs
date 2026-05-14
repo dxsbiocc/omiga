@@ -430,6 +430,7 @@ pub(super) async fn run_skill_forked(request: ForkedSkillRequest<'_>) -> Result<
             local_venv_type: runtime.local_venv_type.clone(),
             local_venv_name: runtime.local_venv_name.clone(),
             env_store: runtime.env_store.clone(),
+            artifact_registry: None,
         })
         .await;
 
@@ -909,6 +910,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
             local_venv_type: runtime.local_venv_type.clone(),
             local_venv_name: runtime.local_venv_name.clone(),
             env_store: runtime.env_store.clone(),
+            artifact_registry: None,
         })
         .await;
         let tool_messages: Vec<Message> = results

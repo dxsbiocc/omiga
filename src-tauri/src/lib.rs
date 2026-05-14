@@ -7,6 +7,7 @@
 
 pub mod api;
 pub mod app_state;
+pub mod bridge;
 pub mod commands;
 pub mod constants;
 pub mod domain;
@@ -17,6 +18,7 @@ pub mod llm;
 pub mod utils;
 
 use app_state::OmigaAppState;
+use bridge::state::BridgeState;
 use commands::integrations_settings;
 use domain::persistence::SessionRepository;
 use tauri::Manager;
@@ -131,6 +133,7 @@ pub fn run() {
 
             Ok(())
         })
+        .manage(std::sync::Arc::new(BridgeState::new()))
         .invoke_handler(tauri::generate_handler![
             commands::chat::send_message,
             commands::chat::research::list_available_agents,
@@ -150,6 +153,8 @@ pub fn run() {
             commands::chat::submit_ask_user_answer,
             commands::chat::cancel_stream,
             commands::chat::cancel_session_rounds,
+            commands::chat::get_session_artifacts,
+            commands::chat::export_session_markdown,
             commands::chat::set_api_key,
             commands::chat::get_api_key_status,
             commands::chat::set_llm_config,
@@ -279,6 +284,8 @@ pub fn run() {
             commands::plugins::list_omiga_plugin_process_pool_statuses,
             commands::plugins::clear_omiga_plugin_process_pool,
             commands::plugins::validate_omiga_retrieval_plugin,
+            commands::operators::save_user_script_operator,
+            commands::operators::get_user_operators_dir,
             commands::operators::list_operators,
             commands::operators::describe_operator,
             commands::operators::set_operator_enabled,
@@ -288,6 +295,8 @@ pub fn run() {
             commands::operators::read_operator_run_log,
             commands::operators::verify_operator_run,
             commands::operators::cleanup_operator_runs,
+            commands::cron::list_cron_jobs,
+            commands::cron::delete_cron_job,
             commands::extensions::vscode_extensions_dir,
             commands::extensions::install_vscode_extension,
             commands::extensions::list_recommended_vscode_extensions,
@@ -356,10 +365,19 @@ pub fn run() {
             commands::context_snapshot::read_context_snapshot,
             commands::context_snapshot::delete_context_snapshot,
             commands::context_snapshot::clear_all_context_snapshots,
+
+            // IDE Bridge
+            commands::bridge::bridge_start,
+            commands::bridge::bridge_stop,
+            commands::bridge::bridge_status,
+            commands::bridge::bridge_generate_setup_key,
+            commands::bridge::bridge_get_last_selection,
+
             commands::test_notification,
             commands::get_notification_permission_status,
             commands::request_notification_permission,
             commands::send_notification,
+            commands::get_audit_log_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -6,7 +6,9 @@
 //! - Returns structured errors for frontend handling
 
 pub mod blackboard;
+pub mod bridge;
 pub mod chat;
+pub mod cron;
 pub mod citation;
 pub mod claude_import;
 pub mod connectors;
@@ -113,6 +115,14 @@ pub async fn test_notification(app: tauri::AppHandle) -> Result<String, String> 
     }
 
     Err("All notification methods failed".to_string())
+}
+
+/// Return the path to today's audit log file (creates parent dirs on demand).
+#[tauri::command]
+pub fn get_audit_log_path() -> String {
+    crate::domain::audit::audit_log_path()
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Send notification with fallback (for production use)

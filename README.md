@@ -4,7 +4,7 @@
 
 Omiga is a local-first desktop AI coding agent workbench built with **Tauri, React, and Rust**. It combines chat, repository context, file operations, terminal execution, web/search tools, memory, and multi-agent orchestration in one auditable desktop application.
 
-**Current release:** `0.2.0`
+**Current release:** `2.0.0`
 
 Omiga is designed for real development work: long-running coding sessions, codebase navigation, controlled tool execution, persistent project memory, and agent workflows that can be inspected rather than treated as a black box.
 
@@ -29,24 +29,30 @@ Omiga is designed for real development work: long-running coding sessions, codeb
 
 - **Desktop AI coding workspace** — a Tauri desktop shell with a React/MUI interface for long-form engineering sessions.
 - **Provider-based LLM runtime** — DeepSeek, OpenAI, OpenAI-compatible/custom endpoints, and configurable models through `omiga.yaml` or the Settings UI.
-- **Auditable tool execution** — file read/write, search, fetch, shell, task, notebook, memory, MCP, and workflow tools with visible execution state.
-- **Multi-agent workflows** — scheduling, team/autopilot-style orchestration, background agents, research flows, and task status panels.
-- **Repository-aware context** — file tree, path mentions, code previews, Monaco editor integration, PDF/image/HTML rendering, and workspace metadata.
+- **Auditable tool execution** — file read/write, search, fetch, shell, task, notebook, memory, MCP, and workflow tools with visible execution state. Sensitive tool executions are recorded to a local audit log (`~/.omiga/audit/`).
+- **Multi-agent workflows** — scheduling, team/autopilot-style orchestration, background agents, research flows, and task status panels. Skills support forked sub-agent execution and per-skill tool allowlists.
+- **Repository-aware context** — file tree, path mentions, code previews, Monaco editor integration, PDF/image/HTML rendering, and workspace metadata. Git worktree isolation (`EnterWorktree` / `ExitWorktree`) for branch-scoped sessions.
 - **Search and retrieval** — configurable search priority with Tavily, Exa, Firecrawl, Parallel, Google, Bing, and DuckDuckGo fallbacks; literature and social-source search surfaces are available in the Search settings area.
-- **Persistent memory** — working memory, long-term memory, project wiki, implicit preferences, source registry, and permanent user profile support.
+- **Persistent memory** — working memory, long-term memory, project wiki, implicit preferences, source registry, and permanent user profile support with keyword-based PageIndex retrieval.
+- **Operator system** — install plugin-provided operators as agent tools; create user-defined script operators directly from the Settings UI without writing YAML by hand.
+- **Local IPC bridge** — a JWT-authenticated WebSocket endpoint on `localhost:7777` lets local tools (Raycast, Alfred, shell scripts) inject code context into Omiga sessions.
 - **Execution environments** — local execution plus SSH/sandbox-oriented configuration surfaces for safer and more reproducible agent runs.
-- **Release-grade validation paths** — frontend tests, Rust tests, mock LLM orchestration validation, real LLM validation scripts, and desktop packaging commands.
+- **Release-grade validation paths** — 307 frontend unit tests, 844 Rust tests, 10 Playwright E2E tests, mock LLM orchestration validation, real LLM validation scripts, and desktop packaging commands.
 
 ## Release highlights
 
-Version `0.2.0` focuses on making Omiga usable as a serious desktop agent workbench:
+Version `2.0.0` builds on the v1.0.0 workbench foundation with quality, memory, and scheduling improvements:
 
-- A redesigned settings system for providers, permissions, runtime constraints, memory, execution environments, profiles, and search.
-- More resilient built-in search/fetch behavior with ordered provider fallback and per-method retry limits.
-- Improved chat composer behavior, including IME-safe Chinese/Japanese/Korean composition handling.
-- Better task, background-agent, and orchestration visibility in the chat UI.
-- Expanded memory management UI and project profile surfaces.
-- Stronger frontend and Rust validation coverage for release verification.
+- **BM25 field-weighted memory recall** — topic/entity/summary fields scored with per-field weights (3×/2×/1.5×) plus recency decay; recall precision improves substantially for structured queries.
+- **Cron scheduling tools** — `CronCreate`, `CronList`, `CronDelete` let agents schedule recurring tasks; a dedicated **Settings → Agents → Schedule** panel shows all active jobs with one-click delete.
+- **Session artifact tracking** — every file the agent writes or edits during a session is recorded and displayed in the task panel after the turn completes.
+- **Task progress visualization** — `TaskProgressSteps` component shows a live step-by-step tool trace with status dots and durations; collapses to a summary when the turn ends.
+- **Permission dialog improvements** — dangerous operations now display a plain-language description (`"AI wants to run: rm -rf …"`) above the raw command block.
+- **Sequential tool timeout** — non-skill/bash tools are capped at 120 s; `skill`, `bash`, and `agent` tools are exempt to support long-running sessions.
+- **Monitor and PushNotification tools** — `Monitor` watches background task output for a pattern; `PushNotification` sends a native desktop notification.
+- **Git worktree tools** — `EnterWorktree`/`ExitWorktree` create and prune isolated branch workspaces.
+- **Session export** — export any session as a Markdown file via the session header menu.
+- **Test coverage** — 844 Rust tests, 307 frontend unit tests.
 
 ## System requirements
 

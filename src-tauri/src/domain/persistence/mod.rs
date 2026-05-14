@@ -418,6 +418,24 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     ensure_column_exists(pool, "background_agent_tasks", "round_id", "TEXT").await?;
     ensure_column_exists(pool, "background_agent_tasks", "plan_id", "TEXT").await?;
 
+    // Cron jobs table (global, not session-scoped).
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS cron_jobs (
+            id TEXT PRIMARY KEY,
+            schedule TEXT NOT NULL,
+            task_description TEXT NOT NULL,
+            session_id TEXT,
+            created_at TEXT NOT NULL,
+            last_run_at TEXT,
+            run_count INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_background_agent_tasks_session
@@ -1010,6 +1028,11 @@ impl SessionRepository {
     /// Create a new repository
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    /// Expose the underlying connection pool for tools that need direct DB access.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// List all sessions with message counts

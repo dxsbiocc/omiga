@@ -593,6 +593,33 @@ export const PermissionPromptBar: React.FC = () => {
           />
         </Stack>
 
+        {/* Human-readable plain description from backend (e.g. "AI wants to run: rm -rf /tmp/build") */}
+        {pendingRequest.plain_description && (
+          <Typography
+            variant="body2"
+            sx={{
+              px: 0.5,
+              py: 0.5,
+              borderRadius: 1,
+              bgcolor: (t) =>
+                isDangerous
+                  ? t.palette.mode === "dark"
+                    ? "rgba(244,67,54,0.10)"
+                    : "rgba(244,67,54,0.07)"
+                  : t.palette.mode === "dark"
+                    ? "rgba(255,255,255,0.06)"
+                    : "rgba(0,0,0,0.04)",
+              color: isDangerous ? "error.main" : "text.primary",
+              fontWeight: 500,
+              fontSize: "0.875rem",
+              lineHeight: 1.45,
+              wordBreak: "break-word",
+            }}
+          >
+            {pendingRequest.plain_description}
+          </Typography>
+        )}
+
         {connectorIntent && (
           <Box
             sx={{

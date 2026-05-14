@@ -90,6 +90,40 @@ pub(super) fn permission_risk_level_event_str(
     }
 }
 
+/// Build a human-readable summary of what the AI is trying to do with this tool call.
+fn build_plain_description(tool_name: &str, args_value: &serde_json::Value) -> String {
+    let canonical = tool_name.to_ascii_lowercase();
+    match canonical.as_str() {
+        "bash" | "shell" | "run_bash" | "run_shell" => {
+            let cmd = args_value
+                .get("command")
+                .or_else(|| args_value.get("cmd"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let preview: String = cmd.chars().take(120).collect();
+            let suffix = if cmd.chars().count() > 120 { "…" } else { "" };
+            format!("AI wants to run: {preview}{suffix}")
+        }
+        "file_write" | "write_file" => {
+            let path = args_value
+                .get("path")
+                .or_else(|| args_value.get("file_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            format!("AI wants to overwrite: {path}")
+        }
+        "file_edit" | "edit_file" | "str_replace_editor" => {
+            let path = args_value
+                .get("path")
+                .or_else(|| args_value.get("file_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            format!("AI wants to modify: {path}")
+        }
+        _ => format!("AI wants to use tool: {tool_name}"),
+    }
+}
+
 pub(super) fn build_permission_request_event_json(
     tool_name: &str,
     session_id: &str,
@@ -97,12 +131,14 @@ pub(super) fn build_permission_request_event_json(
     req: &PermissionRequest,
 ) -> serde_json::Value {
     let risk_level_str = permission_risk_level_event_str(req.risk.level);
+    let plain_description = build_plain_description(tool_name, args_value);
     serde_json::json!({
         "type": "permission_request",
         "request_id": req.request_id,
         "tool_name": tool_name,
         "risk_level": risk_level_str,
         "risk_description": req.risk.description,
+        "plain_description": plain_description,
         "session_id": session_id,
         "arguments": args_value.clone(),
         "detected_risks": req.risk.detected_risks.iter().map(|r| {

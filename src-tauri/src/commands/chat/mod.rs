@@ -1501,6 +1501,7 @@ pub async fn send_message(
                             local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
                             local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
                             env_store: crate::domain::tools::env_store::EnvStore::new(),
+                            artifact_registry: crate::domain::session::artifacts::ArtifactRegistry::default(),
                         },
                     );
                 }
@@ -1570,6 +1571,7 @@ pub async fn send_message(
             local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
             local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
             env_store: crate::domain::tools::env_store::EnvStore::new(),
+            artifact_registry: crate::domain::session::artifacts::ArtifactRegistry::default(),
         };
         {
             let mut sessions = app_state.chat.sessions.write().await;
@@ -3906,7 +3908,7 @@ pub async fn send_message(
         }
 
         for _round_idx in 0..MAX_TOOL_ROUNDS {
-            let (project_root, todos_for_tools, agent_tasks_for_tools) = {
+            let (project_root, todos_for_tools, agent_tasks_for_tools, artifact_registry_for_tools) = {
                 let sessions = sessions_clone.read().await;
                 let project_root = sessions
                     .get(&session_id_clone)
@@ -3918,7 +3920,10 @@ pub async fn send_message(
                 let agent_tasks = sessions
                     .get(&session_id_clone)
                     .map(|r| r.agent_tasks.clone());
-                (project_root, todos, agent_tasks)
+                let artifact_registry = sessions.get(&session_id_clone).map(|r| {
+                    std::sync::Arc::new(r.artifact_registry.clone())
+                });
+                (project_root, todos, agent_tasks, artifact_registry)
             };
 
             constraint_state.record_tool_names(
@@ -3947,6 +3952,7 @@ pub async fn send_message(
                 local_venv_type: agent_runtime.local_venv_type.clone(),
                 local_venv_name: agent_runtime.local_venv_name.clone(),
                 env_store: agent_runtime.env_store.clone(),
+                artifact_registry: artifact_registry_for_tools,
             })
             .await;
 
