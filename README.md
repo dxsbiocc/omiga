@@ -1,12 +1,12 @@
 # Omiga
 
 <p align="center">
-  <img src="docs/assets/omiga-logo.png" alt="Omiga" width="80" />
+  <img src="src/assets/omiga-logo.svg" alt="Omiga logo" width="80" />
 </p>
 
 <p align="center">
   <a href="https://github.com/omiga-app/omiga/releases"><img src="https://img.shields.io/badge/release-v2.0.0-blue?style=flat-square" alt="Release" /></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-macOS%20primary%20%7C%20Linux%20CI%20%7C%20Windows%20experimental-yellow?style=flat-square" alt="Platform support" />
   <img src="https://img.shields.io/badge/built%20with-Tauri%20%7C%20Rust%20%7C%20React-orange?style=flat-square" alt="Stack" />
   <img src="https://img.shields.io/badge/tests-844%20Rust%20%7C%20307%20TS-brightgreen?style=flat-square" alt="Tests" />
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License" />
@@ -19,6 +19,8 @@
 Omiga is a local-first desktop AI agent workbench built with **Tauri, React, and Rust**. It combines chat, repository context, file operations, terminal execution, web/search tools, memory, cron scheduling, and multi-agent orchestration in one auditable desktop application.
 
 **Current release:** `2.0.0`
+
+**Platform support:** macOS is the primary release target. Linux is validated from source in CI. Windows MSI packaging is configured through Tauri, but should be treated as experimental until a Windows release-validation lane is added.
 
 Omiga is designed for real development work: long-running coding sessions, codebase navigation, controlled tool execution, persistent project memory, and agent workflows that can be inspected rather than treated as a black box.
 
@@ -73,7 +75,9 @@ Version `2.0.0` builds on the v1.0.0 workbench foundation with quality, memory, 
 - **Bun** 1.x (canonical JavaScript package manager for this repository)
 - **Rust** 1.75+
 - **Tauri 2** platform prerequisites for your OS
-- **macOS 11+**, Windows, or Linux with the required WebKit/GTK packages for Tauri
+- **macOS 11+** for the primary release path
+- **Linux** with the required Tauri WebKit/GTK packages for source/CI validation
+- **Windows** MSI packaging is configured, but release validation is currently experimental
 - At least one supported LLM provider key or an OpenAI-compatible local endpoint for real agent runs
 
 > Use Bun for dependency installation and project scripts. Do not use `npm install` for this repository.
