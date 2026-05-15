@@ -388,6 +388,7 @@ pub(super) async fn execute_tool_calls(
     // `active_skill_allowed_tools`: set when an inline skill with `allowed-tools` frontmatter
     // executes; restricts subsequent tool calls in the same batch to that list.
     let mut active_skill_allowed_tools: Option<Vec<String>> = None;
+    let mut bash_call_count: u32 = 0;
 
     for idx in sequential_indices {
         let (tool_use_id, tool_name, arguments) = &tool_calls[idx];
@@ -433,7 +434,7 @@ pub(super) async fn execute_tool_calls(
             tool_name.to_ascii_lowercase().as_str(),
             "skill" | "bash" | "agent" | "task"
         );
-        let res = if exempt_from_timeout {
+        let mut res = if exempt_from_timeout {
             execute_one_tool(SingleToolExecution {
                 tool_use_id: tool_use_id.clone(),
                 tool_name: tool_name.clone(),
@@ -530,6 +531,39 @@ pub(super) async fn execute_tool_calls(
                 },
             };
             tokio::spawn(crate::domain::audit::log(entry));
+        }
+
+        // --- Runtime behaviour hints injected into tool output (not errors) ---
+        if tool_name.eq_ignore_ascii_case("bash") {
+            bash_call_count += 1;
+            let count_hint: Option<&str> = if bash_call_count == 6 {
+                Some("\n\n[System hint: 6 Bash calls this turn. For multi-step tasks prefer a single call with && chaining, or write a script with file_write and run it once.]")
+            } else if bash_call_count == 12 {
+                Some("\n\n[System hint: 12 Bash calls this turn. If you are in a loop, stop — diagnose the root cause, write a script file, or change approach entirely.]")
+            } else {
+                None
+            };
+            if let Some(h) = count_hint {
+                res.1.push_str(h);
+            }
+            // Flag large inline scripts (python3 -c / node -e / etc.) on successful runs
+            if !res.2 {
+                if let Ok(args_val) = serde_json::from_str::<serde_json::Value>(arguments) {
+                    if let Some(cmd) = args_val.get("command").and_then(|v| v.as_str()) {
+                        let is_inline = cmd.len() > 150
+                            && (cmd.contains("python3 -c")
+                                || cmd.contains("python -c")
+                                || cmd.contains("node -e")
+                                || cmd.contains("ruby -e")
+                                || cmd.contains("perl -e"));
+                        if is_inline {
+                            res.1.push_str(
+                                "\n\n[System hint: Inline script detected. For code longer than 3 lines use file_write to save it to a .py/.js file and execute — avoids quoting errors and produces an auditable file.]",
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         ordered_results[idx] = Some(res);
