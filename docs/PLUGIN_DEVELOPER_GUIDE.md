@@ -202,7 +202,7 @@ High-risk operators (those running arbitrary shell commands) are subject to the 
 
 ## Publishing to the marketplace
 
-Marketplace publishing is not yet available in v1.0. To distribute a plugin:
+Marketplace publishing is not yet available in v2.0. To distribute a plugin:
 
 1. Host the plugin directory as a Git repository or archive.
 2. Document the `plugin.json` `id`, the operator aliases, and the required execution environment.

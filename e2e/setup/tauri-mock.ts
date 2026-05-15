@@ -212,6 +212,7 @@ export const TAURI_MOCK_SCRIPT = `
     // Cron jobs
     list_cron_jobs: () => ([]),
     delete_cron_job: () => true,
+    create_cron_job: () => ({ id: "mock-cron-1", schedule: "0 9 * * 1", task: "test task", sessionId: null, createdAt: new Date().toISOString() }),
 
     // Extensions
     vscode_extensions_dir: () => "",
