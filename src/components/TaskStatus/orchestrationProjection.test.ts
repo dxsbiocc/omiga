@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildTaskDispatchSummary,
   buildOrchestrationTimelineFromEvents,
   filterOrchestrationTraceEvents,
   type OrchestrationEventDto,
@@ -231,5 +232,123 @@ describe("orchestrationProjection", () => {
       tone: "success",
       action: { type: "trace", eventId: "compact-done" },
     });
+  });
+
+  it("summarizes scheduler dispatch readiness and blocked dependencies", () => {
+    const summary = buildTaskDispatchSummary(
+      {
+        subtasks: [
+          {
+            id: "explore",
+            description: "Map state flow",
+            agentType: "Explore",
+          },
+          {
+            id: "implement",
+            description: "Implement status panel",
+            agentType: "executor",
+            dependencies: ["explore"],
+          },
+          {
+            id: "review",
+            description: "Review implementation",
+            agentType: "code-reviewer",
+            dependencies: ["implement"],
+            critical: true,
+          },
+        ],
+      },
+      [
+        {
+          task_id: "explore",
+          agent_type: "Explore",
+          description: "Map state flow",
+          status: "Completed",
+        },
+      ],
+      [
+        event({
+          id: "worker-done",
+          event_type: "worker_completed",
+          created_at: at(3),
+        }),
+      ],
+    );
+
+    expect(summary).toMatchObject({
+      total: 3,
+      completed: 1,
+      notStarted: 2,
+      ready: 1,
+      blocked: 1,
+      latestEventAt: Date.parse(at(3)),
+    });
+    expect(summary?.readyTasks.map((task) => task.id)).toEqual(["implement"]);
+    expect(summary?.blockedTasks.map((task) => [task.id, task.blockedBy])).toEqual([
+      ["review", ["implement"]],
+    ]);
+  });
+
+  it("does not classify terminal tasks as dependency-blocked work", () => {
+    const summary = buildTaskDispatchSummary(
+      {
+        subtasks: [
+          {
+            id: "explore",
+            description: "Map state flow",
+            agentType: "Explore",
+          },
+          {
+            id: "implement",
+            description: "Implement status panel",
+            agentType: "executor",
+            dependencies: ["explore"],
+          },
+        ],
+      },
+      [
+        {
+          task_id: "implement",
+          agent_type: "executor",
+          description: "Implement status panel",
+          status: "Failed",
+        },
+      ],
+    );
+
+    expect(summary).toMatchObject({
+      total: 2,
+      failed: 1,
+      ready: 1,
+      blocked: 0,
+    });
+    expect(summary?.readyTasks.map((task) => task.id)).toEqual(["explore"]);
+    expect(summary?.failedTasks.map((task) => task.id)).toEqual(["implement"]);
+  });
+
+  it("summarizes persisted task rows when no plan snapshot is available", () => {
+    const summary = buildTaskDispatchSummary(null, [
+      {
+        task_id: "worker-1",
+        agent_type: "executor",
+        description: "Implement slice",
+        status: "Running",
+      },
+      {
+        task_id: "worker-2",
+        agent_type: "test-engineer",
+        description: "Verify slice",
+        status: "Failed",
+      },
+    ]);
+
+    expect(summary).toMatchObject({
+      total: 2,
+      running: 1,
+      failed: 1,
+      ready: 0,
+      blocked: 0,
+    });
+    expect(summary?.failedTasks.map((task) => task.id)).toEqual(["worker-2"]);
   });
 });

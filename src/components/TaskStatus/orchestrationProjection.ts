@@ -29,6 +29,48 @@ export type OrchestrationEventDto = {
   created_at: string;
 };
 
+export type SchedulerPlanDispatchSnapshot = {
+  subtasks: Array<{
+    id: string;
+    description: string;
+    agentType: string;
+    dependencies?: string[];
+    stage?: string;
+    critical?: boolean;
+  }>;
+};
+
+export type DispatchTaskStatus =
+  | BackgroundAgentTaskRow["status"]
+  | "NotStarted";
+
+export type DispatchSummaryTask = {
+  id: string;
+  description: string;
+  agentType: string;
+  status: DispatchTaskStatus;
+  stage?: string;
+  critical?: boolean;
+  dependencies: string[];
+  blockedBy: string[];
+};
+
+export type TaskDispatchSummary = {
+  total: number;
+  completed: number;
+  running: number;
+  pending: number;
+  failed: number;
+  cancelled: number;
+  notStarted: number;
+  ready: number;
+  blocked: number;
+  latestEventAt?: number;
+  readyTasks: DispatchSummaryTask[];
+  blockedTasks: DispatchSummaryTask[];
+  failedTasks: DispatchSummaryTask[];
+};
+
 export function orchestrationPhaseLabel(phase: string): string {
   const labels: Record<string, string> = {
     planning: "规划中",
@@ -50,6 +92,101 @@ export function orchestrationPhaseLabel(phase: string): string {
     failed: "失败",
   };
   return labels[phase] ?? phase;
+}
+
+export function buildTaskDispatchSummary(
+  plan: SchedulerPlanDispatchSnapshot | null | undefined,
+  taskRows: BackgroundAgentTaskRow[],
+  events: OrchestrationEventDto[] = [],
+): TaskDispatchSummary | null {
+  if (!plan && taskRows.length === 0) return null;
+
+  const latestEventAt = events
+    .map((event) => parseEventTime(event.created_at) ?? 0)
+    .filter((value) => value > 0)
+    .sort((a, b) => b - a)[0];
+
+  if (!plan) {
+    const tasks = taskRows.map(rowToDispatchSummaryTask);
+    return buildTaskDispatchSummaryFromTasks(tasks, latestEventAt);
+  }
+
+  const rowsByTaskId = new Map(taskRows.map((row) => [row.task_id, row]));
+  const completedIds = new Set(
+    taskRows
+      .filter((row) => row.status === "Completed")
+      .map((row) => row.task_id),
+  );
+  const tasks = plan.subtasks.map((task) => {
+    const row = rowsByTaskId.get(task.id);
+    const dependencies = task.dependencies ?? [];
+    const status = row?.status ?? "NotStarted";
+    const blockedBy =
+      status === "Completed" ||
+      status === "Running" ||
+      status === "Failed" ||
+      status === "Cancelled"
+        ? []
+        : dependencies.filter((dependency) => !completedIds.has(dependency));
+    return {
+      id: task.id,
+      description: row?.description ?? task.description,
+      agentType: row?.agent_type ?? task.agentType,
+      status,
+      stage: task.stage,
+      critical: task.critical,
+      dependencies,
+      blockedBy,
+    } satisfies DispatchSummaryTask;
+  });
+
+  return buildTaskDispatchSummaryFromTasks(tasks, latestEventAt);
+}
+
+function rowToDispatchSummaryTask(row: BackgroundAgentTaskRow): DispatchSummaryTask {
+  return {
+    id: row.task_id,
+    description: row.description,
+    agentType: row.agent_type,
+    status: row.status,
+    dependencies: [],
+    blockedBy: [],
+  };
+}
+
+function buildTaskDispatchSummaryFromTasks(
+  tasks: DispatchSummaryTask[],
+  latestEventAt?: number,
+): TaskDispatchSummary {
+  const readyTasks = tasks.filter(
+    (task) =>
+      (task.status === "NotStarted" || task.status === "Pending") &&
+      task.blockedBy.length === 0,
+  );
+  const blockedTasks = tasks.filter(
+    (task) =>
+      (task.status === "NotStarted" || task.status === "Pending") &&
+      task.blockedBy.length > 0,
+  );
+  const failedTasks = tasks.filter(
+    (task) => task.status === "Failed" || task.status === "Cancelled",
+  );
+
+  return {
+    total: tasks.length,
+    completed: tasks.filter((task) => task.status === "Completed").length,
+    running: tasks.filter((task) => task.status === "Running").length,
+    pending: tasks.filter((task) => task.status === "Pending").length,
+    failed: tasks.filter((task) => task.status === "Failed").length,
+    cancelled: tasks.filter((task) => task.status === "Cancelled").length,
+    notStarted: tasks.filter((task) => task.status === "NotStarted").length,
+    ready: readyTasks.length,
+    blocked: blockedTasks.length,
+    latestEventAt,
+    readyTasks,
+    blockedTasks,
+    failedTasks,
+  };
 }
 
 function preflightStageLabel(stage: string): string {
