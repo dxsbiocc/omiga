@@ -230,8 +230,7 @@ pub async fn search_entries(
         // high-precision tags, summary contains the bulk of the substance.
         let topic_score = score_terms_against_text(&entry.topic, &query_terms) * 3.0;
         let summary_score = score_terms_against_text(&entry.summary, &query_terms) * 1.5;
-        let entity_score =
-            score_terms_against_text(&entry.entities.join(" "), &query_terms) * 2.0;
+        let entity_score = score_terms_against_text(&entry.entities.join(" "), &query_terms) * 2.0;
 
         // Recency bonus: full +0.5 within 7 days, linear decay to 0 at 90 days.
         // Falls back to last_reused_at, then created_at.
@@ -277,7 +276,6 @@ pub async fn search_entries(
     matches.truncate(limit);
     matches
 }
-
 
 /// Count entries that are stale: not reused in >90 days AND stability < 0.4.
 pub async fn count_stale_entries(root: &Path) -> usize {
@@ -1427,9 +1425,12 @@ mod tests {
         tokio::fs::write(&path_a, serde_json::to_string_pretty(&topic_match).unwrap())
             .await
             .unwrap();
-        tokio::fs::write(&path_b, serde_json::to_string_pretty(&summary_match).unwrap())
-            .await
-            .unwrap();
+        tokio::fs::write(
+            &path_b,
+            serde_json::to_string_pretty(&summary_match).unwrap(),
+        )
+        .await
+        .unwrap();
 
         let results = search_entries(temp.path(), "authentication scheme", 5, false).await;
         assert_eq!(results.len(), 2, "both entries should match");

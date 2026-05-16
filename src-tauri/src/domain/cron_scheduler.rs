@@ -19,8 +19,7 @@ pub struct CronJobFiredPayload {
 /// Start the background scheduling loop. Non-blocking — spawns a tokio task.
 pub fn start_cron_scheduler(pool: SqlitePool, app_handle: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut interval =
-            tokio::time::interval(tokio::time::Duration::from_secs(30));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
             if let Err(e) = tick(&pool, &app_handle).await {
@@ -30,10 +29,7 @@ pub fn start_cron_scheduler(pool: SqlitePool, app_handle: tauri::AppHandle) {
     });
 }
 
-async fn tick(
-    pool: &SqlitePool,
-    app: &tauri::AppHandle,
-) -> Result<(), sqlx::Error> {
+async fn tick(pool: &SqlitePool, app: &tauri::AppHandle) -> Result<(), sqlx::Error> {
     let rows = sqlx::query_as::<_, (String, String, String)>(
         "SELECT id, schedule, task_description FROM cron_jobs WHERE enabled = 1",
     )
@@ -95,8 +91,7 @@ fn field_matches(expr: &str, value: u32) -> bool {
     // list: N,M,...
     if expr.contains(',') {
         return expr.split(',').any(|part| {
-            part.trim().parse::<u32>().ok() == Some(value)
-                || range_matches(part.trim(), value)
+            part.trim().parse::<u32>().ok() == Some(value) || range_matches(part.trim(), value)
         });
     }
     // range: N-M

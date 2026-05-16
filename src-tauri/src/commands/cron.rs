@@ -47,9 +47,7 @@ fn db_err(e: sqlx::Error) -> AppError {
 
 /// List all enabled cron jobs, newest first.
 #[tauri::command]
-pub async fn list_cron_jobs(
-    state: State<'_, OmigaAppState>,
-) -> CommandResult<Vec<CronJobSummary>> {
+pub async fn list_cron_jobs(state: State<'_, OmigaAppState>) -> CommandResult<Vec<CronJobSummary>> {
     let pool = state.repo.pool();
     let rows = sqlx::query_as::<_, CronJobRow>(
         r#"
@@ -107,17 +105,12 @@ pub async fn create_cron_job(
 
 /// Soft-delete a cron job by id. Returns true if a row was updated.
 #[tauri::command]
-pub async fn delete_cron_job(
-    state: State<'_, OmigaAppState>,
-    id: String,
-) -> CommandResult<bool> {
+pub async fn delete_cron_job(state: State<'_, OmigaAppState>, id: String) -> CommandResult<bool> {
     let pool = state.repo.pool();
-    let result = sqlx::query(
-        "UPDATE cron_jobs SET enabled = 0 WHERE id = ? AND enabled = 1",
-    )
-    .bind(&id)
-    .execute(pool)
-    .await
-    .map_err(db_err)?;
+    let result = sqlx::query("UPDATE cron_jobs SET enabled = 0 WHERE id = ? AND enabled = 1")
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
     Ok(result.rows_affected() > 0)
 }

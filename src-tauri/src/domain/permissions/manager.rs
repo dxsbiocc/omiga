@@ -1369,7 +1369,7 @@ impl PermissionManager {
                             )
                         } else {
                             (
-                                RiskLevel::Medium,
+                                RiskLevel::High,
                                 format!("操作路径超出项目目录: {}", path_str),
                             )
                         };
@@ -1618,7 +1618,7 @@ impl PermissionManager {
     }
 
     /// 从工具参数中提取文件路径
-    fn extract_file_paths(
+    pub(crate) fn extract_file_paths(
         &self,
         tool_name: &str,
         arguments: &serde_json::Value,
@@ -2223,6 +2223,61 @@ mod tests {
         };
         let result = mgr.approve_request("s", PermissionMode::Bypass, &ctx).await;
         assert!(result.is_err(), "Bypass 模式应被拒绝");
+    }
+
+    #[tokio::test]
+    async fn test_outside_project_path_requires_approval_even_in_auto_mode() {
+        let mgr = PermissionManager::new();
+        mgr.set_session_composer_stance("s_outside", Some("auto"))
+            .await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project dir");
+        let outside_path = dir.path().join("outside.txt");
+
+        let ctx = PermissionContext {
+            tool_name: "file_read".to_string(),
+            arguments: serde_json::json!({"path": outside_path.to_string_lossy()}),
+            session_id: "s_outside".to_string(),
+            file_paths: Some(vec![outside_path]),
+            timestamp: chrono::Utc::now(),
+            project_root: Some(project_root),
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::RequireApproval(_)),
+            "工作区外路径即使在 auto 模式下也必须请求确认，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_tool_with_root_extracts_outside_project_paths() {
+        let mgr = PermissionManager::new();
+        mgr.set_session_composer_stance("s_outside_tool", Some("auto"))
+            .await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project dir");
+        let outside_path = dir.path().join("outside.txt");
+
+        let dec = mgr
+            .check_tool_with_root(
+                "s_outside_tool",
+                "file_read",
+                &serde_json::json!({"path": outside_path.to_string_lossy()}),
+                Some(&project_root),
+            )
+            .await;
+
+        assert!(
+            matches!(dec, PermissionDecision::RequireApproval(_)),
+            "check_tool_with_root 必须提取路径并拦截工作区外访问，实际: {:?}",
+            dec
+        );
     }
 
     #[tokio::test]

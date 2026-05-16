@@ -44,9 +44,6 @@ impl ArtifactRegistry {
 
     /// Return all recorded artifacts (cloned snapshot).
     pub fn list(&self) -> Vec<ArtifactEntry> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }

@@ -111,7 +111,9 @@ pub async fn save_user_script_operator(
 /// Return the path to `~/.omiga/user-operators/` so the frontend can show it.
 #[tauri::command]
 pub async fn get_user_operators_dir() -> CommandResult<String> {
-    Ok(operators::user_operators_dir().to_string_lossy().into_owned())
+    Ok(operators::user_operators_dir()
+        .to_string_lossy()
+        .into_owned())
 }
 
 #[tauri::command]

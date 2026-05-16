@@ -55,11 +55,25 @@ pub async fn execute_tool(
     let session_id = "execute_tool"; // IPC 调用使用固定 session_id
 
     let perm_decision = permission_manager
-        .check_tool(session_id, name, &args_value)
+        .check_tool_with_root(session_id, name, &args_value, Some(project))
         .await;
 
     match perm_decision {
         crate::domain::permissions::PermissionDecision::Deny(ref reason) => {
+            let arguments_json =
+                serde_json::to_string(&args_value).unwrap_or_else(|_| "{}".to_string());
+            crate::commands::permissions::append_permission_audit_event(
+                &state,
+                session_id,
+                None,
+                Some(&project_root),
+                "denied",
+                name,
+                None,
+                Some(reason),
+                &arguments_json,
+            )
+            .await;
             tracing::warn!(
                 tool = %name,
                 reason = %reason,
@@ -91,7 +105,8 @@ pub async fn execute_tool(
                 "risk_level": risk_level_str,
                 "risk_description": req.risk.description,
                 "session_id": session_id,
-                "arguments": args_value,
+                "project_root": project_root.clone(),
+                "arguments": crate::domain::computer_use::redact_json_value(&args_value),
             });
             let _ = app.emit("permission-request", &permission_event);
 

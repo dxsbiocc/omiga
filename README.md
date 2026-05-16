@@ -318,6 +318,7 @@ Omiga is released under the [MIT License](LICENSE).
 ## Further documentation
 
 - [`docs/architecture.md`](docs/architecture.md)
+- [`docs/FEATURE_STATUS.md`](docs/FEATURE_STATUS.md)
 - [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md)
 - [`docs/REAL_LLM_VALIDATION.md`](docs/REAL_LLM_VALIDATION.md)
 - [`docs/MOCK_LLM_RUNTIME_VALIDATION.md`](docs/MOCK_LLM_RUNTIME_VALIDATION.md)

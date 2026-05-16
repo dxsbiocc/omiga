@@ -397,6 +397,7 @@ export default function App() {
           }>;
           recommendations?: string[];
           session_id?: string;
+          project_root?: string | null;
         }>("permission-request", (event) => {
           try {
             console.log("Permission request received:", event.payload);
@@ -418,6 +419,7 @@ export default function App() {
             }));
             const rawArgs = (event.payload as { arguments?: Record<string, unknown> }).arguments;
             const sessionFromEvent = (event.payload as { session_id?: string }).session_id;
+            const projectRootFromEvent = (event.payload as { project_root?: string | null }).project_root;
             setPendingRequest({
               allowed: false,
               requires_approval: true,
@@ -429,6 +431,7 @@ export default function App() {
               recommendations: event.payload.recommendations || [],
               arguments: rawArgs,
               session_id: sessionFromEvent,
+              project_root: projectRootFromEvent ?? undefined,
             });
             console.log("[Permission] Pending request set");
           } catch (error) {

@@ -6,6 +6,7 @@ use crate::constants::tool_limits::{
     truncate_utf8_prefix, PREVIEW_SIZE_BYTES, TOOL_DISPLAY_MAX_INPUT_CHARS,
 };
 use crate::domain::chat_state::{AskUserWaiter, PermissionToolWaiter};
+use crate::domain::computer_use::redact_json_value;
 use crate::domain::permissions::PermissionRequest;
 use crate::domain::tools::ask_user_question;
 use crate::infrastructure::streaming::StreamOutputItem;
@@ -131,7 +132,8 @@ pub(super) fn build_permission_request_event_json(
     req: &PermissionRequest,
 ) -> serde_json::Value {
     let risk_level_str = permission_risk_level_event_str(req.risk.level);
-    let plain_description = build_plain_description(tool_name, args_value);
+    let display_args = redact_json_value(args_value);
+    let plain_description = build_plain_description(tool_name, &display_args);
     serde_json::json!({
         "type": "permission_request",
         "request_id": req.request_id,
@@ -140,7 +142,8 @@ pub(super) fn build_permission_request_event_json(
         "risk_description": req.risk.description,
         "plain_description": plain_description,
         "session_id": session_id,
-        "arguments": args_value.clone(),
+        "project_root": req.context.project_root.as_ref().map(|root| root.to_string_lossy().to_string()),
+        "arguments": display_args,
         "detected_risks": req.risk.detected_risks.iter().map(|r| {
             let severity_str = permission_risk_level_event_str(r.severity);
             serde_json::json!({
@@ -195,6 +198,7 @@ pub(super) async fn wait_for_permission_tool_resolution(
                 tx,
                 session_id: session_id.to_string(),
                 message_id: message_id.to_string(),
+                context: req.context.clone(),
             },
         );
     }
@@ -481,4 +485,49 @@ pub(super) async fn execute_ask_user_question_interactive(
     let model_output =
         process_tool_output_for_model(output_text.clone(), &tool_use_id, tool_results_dir).await;
     (tool_use_id, model_output, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::permissions::types::{
+        PermissionContext, PermissionMode, PermissionRequest, RiskAssessment, RiskLevel,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn permission_request_event_redacts_display_arguments() {
+        let args = json!({
+            "command": "echo token=ghp_1234567890abcdef && export OPENAI_API_KEY=sk-1234567890abcdef",
+            "token": "secret-token-value"
+        });
+        let req = PermissionRequest {
+            request_id: "request-redact".to_string(),
+            context: PermissionContext {
+                tool_name: "bash".to_string(),
+                arguments: args.clone(),
+                session_id: "session-redact".to_string(),
+                file_paths: None,
+                timestamp: chrono::Utc::now(),
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+            },
+            risk: RiskAssessment {
+                level: RiskLevel::High,
+                categories: Vec::new(),
+                description: "risk".to_string(),
+                recommendations: Vec::new(),
+                detected_risks: Vec::new(),
+            },
+            suggested_mode: PermissionMode::AskEveryTime,
+        };
+
+        let event = build_permission_request_event_json("bash", "session-redact", &args, &req);
+        let serialized = event.to_string();
+
+        assert!(!serialized.contains("secret-token-value"));
+        assert!(!serialized.contains("ghp_1234567890abcdef"));
+        assert!(!serialized.contains("sk-1234567890abcdef"));
+        assert!(serialized.contains("[REDACTED]"));
+        assert_eq!(event["project_root"], "/tmp/project");
+    }
 }

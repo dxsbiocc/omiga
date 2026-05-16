@@ -8,10 +8,11 @@
 //! - Session-scoped working memory scratchpad
 
 use crate::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
+use crate::domain::computer_use::{redact_json_value, redact_secrets_in_text};
 use crate::domain::session::{sanitize_background_sidechain_message, AgentTask, Message, TodoItem};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
-    Row, SqlitePool,
+    QueryBuilder, Row, Sqlite, SqlitePool,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -26,6 +27,56 @@ const SESSION_FTS_SCHEMA_VERSION: &str = "1";
 const SESSION_FTS_MATCH_LIMIT: i64 = 500;
 const SESSION_TRIGRAM_FTS_SCHEMA_KEY: &str = "sessions_trigram_fts_schema_version";
 const SESSION_TRIGRAM_FTS_SCHEMA_VERSION: &str = "1";
+
+fn redact_permission_audit_arguments_json(arguments_json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(arguments_json) {
+        Ok(value) => serde_json::to_string(&redact_json_value(&value))
+            .unwrap_or_else(|_| redact_secrets_in_text(arguments_json)),
+        Err(_) => redact_secrets_in_text(arguments_json),
+    }
+}
+
+fn clean_optional_filter(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PermissionAuditFilters<'a> {
+    project_root: Option<&'a str>,
+    decision: Option<&'a str>,
+    tool_query: Option<&'a str>,
+}
+
+fn push_permission_audit_filters<'a>(
+    query: &mut QueryBuilder<'a, Sqlite>,
+    filters: PermissionAuditFilters<'a>,
+    include_decision: bool,
+) {
+    let mut has_where = false;
+
+    if let Some(project_root) = clean_optional_filter(filters.project_root) {
+        query.push(" WHERE project_root = ").push_bind(project_root);
+        has_where = true;
+    }
+
+    if include_decision {
+        if let Some(decision) = clean_optional_filter(filters.decision) {
+            query
+                .push(if has_where { " AND " } else { " WHERE " })
+                .push("decision = ")
+                .push_bind(decision);
+            has_where = true;
+        }
+    }
+
+    if let Some(tool_query) = clean_optional_filter(filters.tool_query) {
+        query
+            .push(if has_where { " AND " } else { " WHERE " })
+            .push("tool_name LIKE ")
+            .push_bind(format!("%{tool_query}%"))
+            .push(" COLLATE NOCASE");
+    }
+}
 
 /// Initialize the database.
 ///
@@ -257,6 +308,56 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_runtime_constraint_events_session
         ON runtime_constraint_events(session_id, created_at DESC)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Durable permission audit: unlike the PermissionManager's in-memory caches,
+    // these records survive restart and can back user-facing audit views.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS permission_audit_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            request_id TEXT,
+            project_root TEXT,
+            decision TEXT NOT NULL CHECK(decision IN ('approved', 'denied')),
+            tool_name TEXT NOT NULL,
+            mode TEXT,
+            reason TEXT,
+            arguments_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    ensure_column_exists(pool, "permission_audit_events", "project_root", "TEXT").await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_permission_audit_events_created
+        ON permission_audit_events(created_at DESC, id DESC)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_permission_audit_events_project
+        ON permission_audit_events(project_root, created_at DESC, id DESC)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_permission_audit_events_session
+        ON permission_audit_events(session_id, created_at DESC)
         "#,
     )
     .execute(pool)
@@ -1906,6 +2007,190 @@ impl SessionRepository {
         .await
     }
 
+    pub async fn append_permission_audit_event(
+        &self,
+        event: NewPermissionAuditEventRecord<'_>,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let request_id = clean_optional_filter(event.request_id);
+        let project_root = clean_optional_filter(event.project_root);
+        let redacted_arguments_json = redact_permission_audit_arguments_json(event.arguments_json);
+
+        if let Some(request_id) = request_id {
+            sqlx::query(
+                r#"
+                INSERT INTO permission_audit_events
+                    (id, session_id, request_id, project_root, decision, tool_name, mode, reason, arguments_json, created_at)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM permission_audit_events
+                    WHERE request_id = ?
+                )
+                "#,
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(event.session_id)
+            .bind(request_id)
+            .bind(project_root)
+            .bind(event.decision)
+            .bind(event.tool_name)
+            .bind(event.mode)
+            .bind(event.reason)
+            .bind(redacted_arguments_json)
+            .bind(&now)
+            .bind(request_id)
+            .execute(&self.pool)
+            .await?;
+            return Ok(());
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO permission_audit_events
+                (id, session_id, request_id, project_root, decision, tool_name, mode, reason, arguments_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(event.session_id)
+        .bind(request_id)
+        .bind(project_root)
+        .bind(event.decision)
+        .bind(event.tool_name)
+        .bind(event.mode)
+        .bind(event.reason)
+        .bind(redacted_arguments_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_recent_permission_audit_events(
+        &self,
+        limit: i64,
+        offset: i64,
+        project_root: Option<&str>,
+        decision: Option<&str>,
+        tool_query: Option<&str>,
+    ) -> Result<Vec<PermissionAuditEventRecord>, sqlx::Error> {
+        Ok(self
+            .list_recent_permission_audit_events_page(
+                limit,
+                offset,
+                project_root,
+                decision,
+                tool_query,
+            )
+            .await?
+            .events)
+    }
+
+    pub async fn list_recent_permission_audit_events_page(
+        &self,
+        limit: i64,
+        offset: i64,
+        project_root: Option<&str>,
+        decision: Option<&str>,
+        tool_query: Option<&str>,
+    ) -> Result<PermissionAuditEventPage, sqlx::Error> {
+        let limit = limit.clamp(1, 500);
+        let offset = offset.max(0);
+        let filters = PermissionAuditFilters {
+            project_root,
+            decision,
+            tool_query,
+        };
+
+        let mut query = QueryBuilder::<Sqlite>::new(
+            r#"
+            SELECT id, session_id, request_id, project_root, decision, tool_name, mode, reason, arguments_json, created_at
+            FROM permission_audit_events
+            "#,
+        );
+        push_permission_audit_filters(&mut query, filters, true);
+
+        query
+            .push(" ORDER BY created_at DESC, id DESC LIMIT ")
+            .push_bind(limit)
+            .push(" OFFSET ")
+            .push_bind(offset);
+
+        let events = query
+            .build_query_as::<PermissionAuditEventRecord>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut total_query = QueryBuilder::<Sqlite>::new(
+            r#"
+            SELECT COUNT(*) AS total_count
+            FROM permission_audit_events
+            "#,
+        );
+        push_permission_audit_filters(&mut total_query, filters, true);
+        let total_count = total_query
+            .build_query_scalar::<i64>()
+            .fetch_one(&self.pool)
+            .await?;
+
+        let mut facets_query = QueryBuilder::<Sqlite>::new(
+            r#"
+            SELECT
+                COALESCE(SUM(CASE WHEN decision = 'approved' THEN 1 ELSE 0 END), 0) AS approved_count,
+                COALESCE(SUM(CASE WHEN decision = 'denied' THEN 1 ELSE 0 END), 0) AS denied_count
+            FROM permission_audit_events
+            "#,
+        );
+        push_permission_audit_filters(&mut facets_query, filters, false);
+        let facets_row = facets_query.build().fetch_one(&self.pool).await?;
+
+        Ok(PermissionAuditEventPage {
+            events,
+            total_count,
+            facets: PermissionAuditFacets {
+                approved_count: facets_row.try_get("approved_count")?,
+                denied_count: facets_row.try_get("denied_count")?,
+            },
+        })
+    }
+
+    pub async fn list_recent_permission_denials(
+        &self,
+        limit: i64,
+        project_root: Option<&str>,
+    ) -> Result<Vec<PermissionAuditEventRecord>, sqlx::Error> {
+        let limit = limit.clamp(1, 500);
+        if let Some(project_root) = clean_optional_filter(project_root) {
+            return sqlx::query_as::<_, PermissionAuditEventRecord>(
+                r#"
+                SELECT id, session_id, request_id, project_root, decision, tool_name, mode, reason, arguments_json, created_at
+                FROM permission_audit_events
+                WHERE decision = 'denied' AND project_root = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(project_root)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await;
+        }
+
+        sqlx::query_as::<_, PermissionAuditEventRecord>(
+            r#"
+            SELECT id, session_id, request_id, project_root, decision, tool_name, mode, reason, arguments_json, created_at
+            FROM permission_audit_events
+            WHERE decision = 'denied'
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     pub async fn list_runtime_constraint_events_for_round(
         &self,
         round_id: &str,
@@ -2561,6 +2846,33 @@ pub struct OrchestrationEventRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PermissionAuditEventRecord {
+    pub id: String,
+    pub session_id: String,
+    pub request_id: Option<String>,
+    pub project_root: Option<String>,
+    pub decision: String,
+    pub tool_name: String,
+    pub mode: Option<String>,
+    pub reason: Option<String>,
+    pub arguments_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PermissionAuditFacets {
+    pub approved_count: i64,
+    pub denied_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PermissionAuditEventPage {
+    pub events: Vec<PermissionAuditEventRecord>,
+    pub total_count: i64,
+    pub facets: PermissionAuditFacets,
+}
+
 /// Borrowed orchestration-event insert payload.
 #[derive(Debug, Clone, Copy)]
 pub struct NewOrchestrationEventRecord<'a> {
@@ -2572,6 +2884,19 @@ pub struct NewOrchestrationEventRecord<'a> {
     pub phase: Option<&'a str>,
     pub task_id: Option<&'a str>,
     pub payload_json: &'a str,
+}
+
+/// Borrowed permission-audit insert payload.
+#[derive(Debug, Clone, Copy)]
+pub struct NewPermissionAuditEventRecord<'a> {
+    pub session_id: &'a str,
+    pub request_id: Option<&'a str>,
+    pub project_root: Option<&'a str>,
+    pub decision: &'a str,
+    pub tool_name: &'a str,
+    pub mode: Option<&'a str>,
+    pub reason: Option<&'a str>,
+    pub arguments_json: &'a str,
 }
 
 #[cfg(test)]
@@ -2627,6 +2952,251 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e.event_type == "phase_changed" && e.phase.as_deref() == Some("executing")));
+    }
+
+    #[tokio::test]
+    async fn persists_permission_audit_events_across_repository_instances() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.append_permission_audit_event(NewPermissionAuditEventRecord {
+            session_id: "session-permission",
+            request_id: Some("request-1"),
+            project_root: Some("/tmp/project-a"),
+            decision: "denied",
+            tool_name: "bash",
+            mode: None,
+            reason: Some("user denied"),
+            arguments_json: r#"{"command":"rm -rf /tmp/demo"}"#,
+        })
+        .await
+        .expect("append denial");
+
+        repo.append_permission_audit_event(NewPermissionAuditEventRecord {
+            session_id: "session-other",
+            request_id: Some("request-2"),
+            project_root: Some("/tmp/project-b"),
+            decision: "denied",
+            tool_name: "bash",
+            mode: None,
+            reason: Some("other project"),
+            arguments_json: r#"{"command":"touch outside"}"#,
+        })
+        .await
+        .expect("append other project denial");
+
+        drop(repo);
+
+        let pool = init_db(&db_path).await.expect("reopen db");
+        let repo = SessionRepository::new(pool);
+        let denials = repo
+            .list_recent_permission_denials(10, Some("/tmp/project-a"))
+            .await
+            .expect("list denials");
+
+        assert_eq!(denials.len(), 1);
+        assert_eq!(denials[0].session_id, "session-permission");
+        assert_eq!(denials[0].request_id.as_deref(), Some("request-1"));
+        assert_eq!(denials[0].project_root.as_deref(), Some("/tmp/project-a"));
+        assert_eq!(denials[0].decision, "denied");
+        assert_eq!(denials[0].tool_name, "bash");
+        assert_eq!(denials[0].reason.as_deref(), Some("user denied"));
+        assert_eq!(
+            denials[0].arguments_json,
+            r#"{"command":"rm -rf /tmp/demo"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_audit_events_are_idempotent_for_non_empty_request_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.append_permission_audit_event(NewPermissionAuditEventRecord {
+            session_id: "session-1",
+            request_id: Some("request-dedupe"),
+            project_root: Some("/tmp/project-a"),
+            decision: "approved",
+            tool_name: "bash",
+            mode: Some("session"),
+            reason: Some("first write"),
+            arguments_json: r#"{"command":"pwd"}"#,
+        })
+        .await
+        .expect("append first audit event");
+
+        repo.append_permission_audit_event(NewPermissionAuditEventRecord {
+            session_id: "session-2",
+            request_id: Some("request-dedupe"),
+            project_root: Some("/tmp/project-b"),
+            decision: "denied",
+            tool_name: "git",
+            mode: Some("ask_every_time"),
+            reason: Some("duplicate write"),
+            arguments_json: r#"{"command":"git status"}"#,
+        })
+        .await
+        .expect("append duplicate audit event");
+
+        let events = repo
+            .list_recent_permission_audit_events(10, 0, None, None, None)
+            .await
+            .expect("list audit events");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].request_id.as_deref(), Some("request-dedupe"));
+        assert_eq!(events[0].session_id, "session-1");
+        assert_eq!(events[0].project_root.as_deref(), Some("/tmp/project-a"));
+        assert_eq!(events[0].decision, "approved");
+        assert_eq!(events[0].tool_name, "bash");
+        assert_eq!(events[0].reason.as_deref(), Some("first write"));
+    }
+
+    #[tokio::test]
+    async fn permission_audit_events_support_filters_pagination_and_facets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.append_permission_audit_event(NewPermissionAuditEventRecord {
+            session_id: "session-1",
+            request_id: Some("request-1"),
+            project_root: Some("/tmp/project-a"),
+            decision: "approved",
+            tool_name: "read_file",
+            mode: None,
+            reason: None,
+            arguments_json: r#"{"path":"Cargo.toml"}"#,
+        })
+        .await
+        .expect("append first audit event");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        repo.append_permission_audit_event(NewPermissionAuditEventRecord {
+            session_id: "session-2",
+            request_id: Some("request-2"),
+            project_root: Some("/tmp/project-a"),
+            decision: "denied",
+            tool_name: "Bash",
+            mode: None,
+            reason: Some("denied"),
+            arguments_json: r#"{"command":"rm -rf build"}"#,
+        })
+        .await
+        .expect("append second audit event");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        repo.append_permission_audit_event(NewPermissionAuditEventRecord {
+            session_id: "session-3",
+            request_id: Some("request-3"),
+            project_root: Some("/tmp/project-b"),
+            decision: "denied",
+            tool_name: "bash",
+            mode: None,
+            reason: Some("other project"),
+            arguments_json: r#"{"command":"touch /tmp/demo"}"#,
+        })
+        .await
+        .expect("append third audit event");
+
+        let filtered = repo
+            .list_recent_permission_audit_events_page(
+                10,
+                0,
+                Some("/tmp/project-a"),
+                Some("denied"),
+                Some("bash"),
+            )
+            .await
+            .expect("filter audit events");
+
+        assert_eq!(filtered.events.len(), 1);
+        assert_eq!(filtered.total_count, 1);
+        assert_eq!(filtered.facets.approved_count, 0);
+        assert_eq!(filtered.facets.denied_count, 1);
+        assert_eq!(filtered.events[0].session_id, "session-2");
+        assert_eq!(
+            filtered.events[0].project_root.as_deref(),
+            Some("/tmp/project-a")
+        );
+        assert_eq!(filtered.events[0].decision, "denied");
+        assert_eq!(filtered.events[0].tool_name, "Bash");
+
+        let paged = repo
+            .list_recent_permission_audit_events_page(1, 1, None, None, None)
+            .await
+            .expect("page audit events");
+
+        assert_eq!(paged.events.len(), 1);
+        assert_eq!(paged.total_count, 3);
+        assert_eq!(paged.facets.approved_count, 1);
+        assert_eq!(paged.facets.denied_count, 2);
+        assert_eq!(paged.events[0].request_id.as_deref(), Some("request-2"));
+    }
+
+    #[tokio::test]
+    async fn permission_audit_event_page_clamps_limit_and_offset_without_losing_counts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        for index in 0..3 {
+            repo.append_permission_audit_event(NewPermissionAuditEventRecord {
+                session_id: "session-clamp",
+                request_id: None,
+                project_root: Some("/tmp/project-a"),
+                decision: if index == 0 { "approved" } else { "denied" },
+                tool_name: "Bash",
+                mode: None,
+                reason: None,
+                arguments_json: r#"{"command":"echo hi"}"#,
+            })
+            .await
+            .expect("append audit event");
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+
+        let page = repo
+            .list_recent_permission_audit_events_page(0, -10, None, Some("denied"), Some("bash"))
+            .await
+            .expect("clamped page");
+
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.total_count, 2);
+        assert_eq!(page.facets.approved_count, 1);
+        assert_eq!(page.facets.denied_count, 2);
+        assert!(page
+            .events
+            .iter()
+            .all(|event| event.decision == "denied" && event.tool_name == "Bash"));
+    }
+
+    #[test]
+    fn redacts_secret_fields_before_persisting_permission_audit_arguments() {
+        let redacted = redact_permission_audit_arguments_json(
+            r#"{"command":"export OPENAI_API_KEY=sk-1234567890abcdef","token":"secret-token-value","nested":{"password":"hunter2"}}"#,
+        );
+
+        assert!(!redacted.contains("sk-1234567890abcdef"));
+        assert!(!redacted.contains("secret-token-value"));
+        assert!(!redacted.contains("hunter2"));
+        assert!(redacted.contains("sk-[REDACTED]"));
+        assert!(redacted.contains(r#""token":"[REDACTED]""#));
+        assert!(redacted.contains(r#""password":"[REDACTED]""#));
+    }
+
+    #[test]
+    fn redacts_secrets_in_non_json_permission_audit_payloads() {
+        let redacted =
+            redact_permission_audit_arguments_json("password=hunter2 token=ghp_1234567890abcdef");
+
+        assert_eq!(redacted, "password=[REDACTED] token=[REDACTED]");
     }
 
     #[tokio::test]

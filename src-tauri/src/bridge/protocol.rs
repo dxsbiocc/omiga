@@ -16,7 +16,6 @@ pub struct SelectionRange {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IdeMessage {
     // ── IDE → Omiga ──────────────────────────────────────────────────────────
-
     /// IDE sends a code selection for Omiga to operate on.
     CodeSelection {
         file: String,
@@ -32,7 +31,6 @@ pub enum IdeMessage {
     Ping,
 
     // ── Omiga → IDE ──────────────────────────────────────────────────────────
-
     /// Omiga returns a suggested diff for a file.
     DiffResult {
         file: String,

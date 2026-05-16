@@ -38,7 +38,9 @@ impl super::ToolImpl for PushNotificationTool {
             "title": args.title,
             "body": args.body,
         }))
-        .map_err(|e| ToolError::ExecutionFailed { message: e.to_string() })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: e.to_string(),
+        })?;
 
         Ok(PushNotificationOutput { text }.into_stream())
     }
@@ -47,10 +49,7 @@ impl super::ToolImpl for PushNotificationTool {
 fn send_desktop_notification(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     {
-        let script = format!(
-            "display notification {:?} with title {:?}",
-            body, title
-        );
+        let script = format!("display notification {:?} with title {:?}", body, title);
         let _ = std::process::Command::new("osascript")
             .args(["-e", &script])
             .output();

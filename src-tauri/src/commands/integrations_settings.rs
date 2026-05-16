@@ -2,6 +2,7 @@
 
 use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
+use crate::domain::connectors::mcp_tool_meta_string;
 use crate::domain::integrations_catalog::{
     IntegrationsCatalog, McpServerCatalogEntry, McpServerConfigCatalogEntry, McpToolCatalogEntry,
     SkillCatalogEntry,
@@ -130,9 +131,24 @@ fn mcp_tool_entries_for_server(
         .map(|t| {
             let wire = build_mcp_tool_name(server_key, t.name.as_ref());
             let desc = t.description.as_deref().unwrap_or("MCP tool").to_string();
+            let connector_id = mcp_tool_meta_string(&t, &["connector_id", "connectorId"]);
+            let connector_name = mcp_tool_meta_string(
+                &t,
+                &[
+                    "connector_name",
+                    "connectorName",
+                    "connector_display_name",
+                    "connectorDisplayName",
+                ],
+            );
+            let connector_description =
+                mcp_tool_meta_string(&t, &["connector_description", "connectorDescription"]);
             McpToolCatalogEntry {
                 wire_name: wire,
                 description: desc,
+                connector_id,
+                connector_name,
+                connector_description,
             }
         })
         .collect()

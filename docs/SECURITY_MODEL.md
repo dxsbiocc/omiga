@@ -30,7 +30,7 @@ Status: living document. Update this file whenever a security boundary, permissi
 
 ### Permission manager
 
-The backend has a `PermissionManager` that tracks rules, session approvals, time-window approvals, one-shot approvals, session denials, recent denials, and composer permission stance. Current known limitation: recent denials are process-memory state, not a durable audit log.
+The backend has a `PermissionManager` that tracks rules, session approvals, time-window approvals, one-shot approvals, session denials, recent denials, and composer permission stance. Explicit approval/denial commands and pre-dialog denials append durable, project-scoped SQLite audit records so user decisions survive restart. Audit arguments are redacted before persistence.
 
 ### Tool deny rules
 
@@ -57,7 +57,7 @@ Session, message, orchestration event, working memory, and background-agent task
 | Risk | Current state | Required mitigation | Priority |
 | --- | --- | --- | --- |
 | Null Tauri CSP | `src-tauri/tauri.conf.json` currently sets `csp: null`. | Design and test CSP compatible with React/MUI/Monaco/rendered markdown. | P1 |
-| Non-durable permission audit | Permission denials/approvals are not yet an authoritative persisted audit trail. | Add schema + commands/tests for permission audit records. | P0 |
+| Incomplete permission audit surface | Permission approvals/denials and pre-dialog denials persist to project-scoped SQLite records with argument redaction, but the user-facing audit browser is still intentionally compact. | Add pagination, richer filters, request de-duplication, and risk-level facets. | P0 |
 | Shell is powerful by design | Bash runs local commands with user privileges. | Continue dangerous pattern tests; add policy matrix and clearer UI risk labels. | P0 |
 | Secret leakage through tools | No complete encrypted secret store/leak detector is documented as production-ready. | Design secret store, redaction, and input/output leak scans. | P1 |
 | Experimental backends may look usable | Multiple execution backends are registered. | Mark incomplete backends experimental/unavailable in UI/docs. | P1 |

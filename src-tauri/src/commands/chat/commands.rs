@@ -231,9 +231,7 @@ pub async fn export_session_markdown(
     .map_err(|e| format!("Failed to load messages: {e}"))?;
 
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let mut md = format!(
-        "# Session Export\n\n> Exported from Omiga on {date}\n\n---\n\n"
-    );
+    let mut md = format!("# Session Export\n\n> Exported from Omiga on {date}\n\n---\n\n");
 
     for record in &records {
         match record.role.as_str() {
@@ -252,9 +250,7 @@ pub async fn export_session_markdown(
                     md.push('\n');
                 }
                 if let Some(tc_json) = &record.tool_calls {
-                    if let Ok(calls) =
-                        serde_json::from_str::<Vec<serde_json::Value>>(tc_json)
-                    {
+                    if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json) {
                         for call in &calls {
                             // Allowlist characters in tool names — they are internal identifiers.
                             let raw_name = call

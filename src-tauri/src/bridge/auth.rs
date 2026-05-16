@@ -2,7 +2,7 @@
 //!
 //! Uses HS256 with a random per-instance secret, tokens expire after 24 hours.
 
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]

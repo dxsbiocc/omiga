@@ -3,8 +3,8 @@
 //! Listens on `127.0.0.1:<port>`, performs a JWT handshake on every new
 //! connection, then dispatches `IdeMessage` frames from connected IDE clients.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use futures::SinkExt;
 use futures::StreamExt;
@@ -46,11 +46,8 @@ pub async fn start_bridge(state: Arc<BridgeState>) {
 
     while state.running.load(Ordering::SeqCst) {
         // Use a short timeout so we can check `running` frequently.
-        let accept = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            listener.accept(),
-        )
-        .await;
+        let accept =
+            tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
 
         match accept {
             Ok(Ok((stream, peer))) => {
@@ -117,15 +114,17 @@ async fn handle_connection(
             },
         );
     }
-    tracing::info!("IDE Bridge: authenticated client '{}' ({})", client_type, conn_id);
+    tracing::info!(
+        "IDE Bridge: authenticated client '{}' ({})",
+        client_type,
+        conn_id
+    );
 
     // ── Message loop ────────────────────────────────────────────────────────
     while let Some(raw) = reader.next().await {
         match raw {
             Ok(Message::Text(text)) => {
-                if let Err(e) =
-                    process_message(&text, &state, &mut writer).await
-                {
+                if let Err(e) = process_message(&text, &state, &mut writer).await {
                     tracing::warn!("IDE Bridge message error: {}", e);
                     break;
                 }
