@@ -115,6 +115,13 @@ pub fn run() {
                     integrations_settings::warm_integrations_catalog_cache(&state, "").await;
                 });
 
+                // Start the cron job scheduler (polls every 30 s, fires cron-job-fired events).
+                {
+                    let cron_pool = app_handle.state::<OmigaAppState>().repo.pool().clone();
+                    let cron_handle = app_handle.clone();
+                    crate::domain::cron_scheduler::start_cron_scheduler(cron_pool, cron_handle);
+                }
+
                 // Hourly cleanup of completed/failed background agent tasks older than 1 hour.
                 tauri::async_runtime::spawn(async {
                     let mut interval =
@@ -409,6 +416,7 @@ pub fn run() {
             commands::request_notification_permission,
             commands::send_notification,
             commands::get_audit_log_path,
+            commands::get_setup_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

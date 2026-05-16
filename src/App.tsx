@@ -238,6 +238,29 @@ export default function App() {
     void useExtensionStore.getState().loadExtensions();
   }, []);
 
+  // Listen for cron job fired events from the backend scheduler
+  useEffect(() => {
+    const unlistenPromise = listenTauriEvent<{
+      id: string;
+      task: string;
+      firedAt: string;
+    }>("cron-job-fired", (event) => {
+      const { task } = event.payload;
+      // Use the existing notification system if available, otherwise log
+      try {
+        new Notification("Omiga — Scheduled Task", {
+          body: task.length > 100 ? task.slice(0, 97) + "…" : task,
+          silent: false,
+        });
+      } catch {
+        console.info("[cron] job fired:", task);
+      }
+    });
+    return () => {
+      void unlistenPromise.then((f) => f());
+    };
+  }, []);
+
   useEffect(() => {
     const raw = getLocalStorageItem(WEB_SEARCH_KEYS_STORAGE);
     if (raw) {

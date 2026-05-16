@@ -188,3 +188,77 @@ pub fn request_notification_permission(app: tauri::AppHandle) -> &'static str {
         Err(_) => "error",
     }
 }
+
+/// Setup status returned to the frontend on first launch.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupStatus {
+    /// Whether omiga.yaml (or equivalent) was found.
+    pub config_file_found: bool,
+    /// Resolved path to the config file, if found.
+    pub config_file_path: Option<String>,
+    /// Whether at least one provider is enabled and has a non-empty API key.
+    pub has_enabled_provider: bool,
+    /// Human-readable guidance shown in the setup dialog.
+    pub setup_hint: String,
+}
+
+/// Check whether the app is configured and ready to use.
+///
+/// Called by the frontend on startup to decide whether to show the
+/// first-launch setup guide.
+#[tauri::command]
+pub fn get_setup_status() -> SetupStatus {
+    let config_file = crate::llm::config::find_config_file();
+    let config_file_found = config_file.is_some();
+    let config_file_path = config_file.map(|p| p.to_string_lossy().into_owned());
+
+    let has_enabled_provider = crate::llm::config::load_config_file()
+        .ok()
+        .and_then(|cf| {
+            let providers = cf.providers?;
+            let placeholder = |s: &str| {
+                s.is_empty()
+                    || s == "${DEEPSEEK_API_KEY}"
+                    || s == "${OPENAI_API_KEY}"
+                    || s == "${GOOGLE_API_KEY}"
+                    || s == "${LLM_API_KEY}"
+            };
+            let any = providers.values().any(|p| {
+                p.enabled
+                    && p.api_key
+                        .as_deref()
+                        .map(|k| !placeholder(k))
+                        .unwrap_or(false)
+            });
+            Some(any)
+        })
+        .unwrap_or(false);
+
+    let setup_hint = if !config_file_found {
+        "No configuration file found. Copy config.example.yaml to omiga.yaml in your \
+         project root, then set your API key:\n\
+         • DeepSeek:  export DEEPSEEK_API_KEY=\"sk-...\"\n\
+         • OpenAI:    export OPENAI_API_KEY=\"sk-...\"\n\
+         • Google:    export GOOGLE_API_KEY=\"AIza...\"\n\
+         Restart the app after saving."
+            .to_string()
+    } else if !has_enabled_provider {
+        "Configuration file found but no provider has a valid API key. \
+         Set the environment variable for your chosen provider and restart:\n\
+         • DeepSeek:  export DEEPSEEK_API_KEY=\"sk-...\"\n\
+         • OpenAI:    export OPENAI_API_KEY=\"sk-...\"\n\
+         • Google:    export GOOGLE_API_KEY=\"AIza...\"\n\
+         Or enter your key directly in Settings → Providers."
+            .to_string()
+    } else {
+        String::new()
+    };
+
+    SetupStatus {
+        config_file_found,
+        config_file_path,
+        has_enabled_provider,
+        setup_hint,
+    }
+}
