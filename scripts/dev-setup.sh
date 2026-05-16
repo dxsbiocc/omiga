@@ -5,7 +5,8 @@
 #   ./scripts/dev-setup.sh
 #
 # Optional skips:
-#   SKIP_NPM=1 ./scripts/dev-setup.sh
+#   SKIP_JS=1 ./scripts/dev-setup.sh
+#   SKIP_NPM=1 ./scripts/dev-setup.sh   # legacy alias for SKIP_JS
 #   SKIP_RUST=1 ./scripts/dev-setup.sh
 #   SKIP_VERIFY=1 ./scripts/dev-setup.sh
 
@@ -15,18 +16,23 @@ cd "$(dirname "$0")/.."
 
 echo "=== Omiga developer setup ==="
 
-if [[ "${SKIP_NPM:-0}" != "1" ]]; then
-  if ! command -v npm >/dev/null 2>&1; then
-    echo "ERROR: npm is required for frontend setup." >&2
+require_bun() {
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "ERROR: Bun is required for JavaScript setup." >&2
+    echo "Install Bun 1.x, then rerun this script. This repository intentionally does not use npm install." >&2
     exit 1
   fi
+}
 
-  if [[ -f package-lock.json ]]; then
-    echo "[frontend] npm ci"
-    npm ci
+if [[ "${SKIP_JS:-${SKIP_NPM:-0}}" != "1" ]]; then
+  require_bun
+
+  if [[ -f bun.lock ]]; then
+    echo "[frontend] bun install --frozen-lockfile"
+    bun install --frozen-lockfile
   else
-    echo "[frontend] npm install"
-    npm install
+    echo "[frontend] bun install"
+    bun install
   fi
 fi
 
@@ -43,11 +49,13 @@ if [[ "${SKIP_RUST:-0}" != "1" ]]; then
 fi
 
 if [[ "${SKIP_VERIFY:-0}" != "1" ]]; then
+  require_bun
+
   echo "[verify] frontend tests"
-  npm test
+  bun run test
 
   echo "[verify] frontend build"
-  npm run build
+  bun run build
 
   echo "[verify] rust fmt"
   cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check

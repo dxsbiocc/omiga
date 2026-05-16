@@ -95,16 +95,28 @@ check_api_key() {
     fi
 
     # Check for config file
-    if [ -f "omiga.yaml" ] || [ -f "omiga.json" ] || [ -f "omiga.toml" ]; then
+    if [ -f "omiga.yaml" ] || [ -f "omiga.yml" ] || [ -f "omiga.json" ] || [ -f "omiga.toml" ]; then
         echo -e "${GREEN}✓ Configuration file found${NC}"
         return 0
     fi
-    if [ -f "$HOME/.config/omiga/config.yaml" ]; then
-        echo -e "${GREEN}✓ Config file found at ~/.config/omiga/config.yaml${NC}"
+    if [ -f "$HOME/.config/omiga/omiga.yaml" ] || [ -f "$HOME/.config/omiga/omiga.yml" ] || [ -f "$HOME/.config/omiga/omiga.json" ] || [ -f "$HOME/.config/omiga/omiga.toml" ]; then
+        echo -e "${GREEN}✓ Config file found at ~/.config/omiga/${NC}"
+        return 0
+    fi
+    if [ -f "$HOME/.omiga/omiga.yaml" ] || [ -f "$HOME/.omiga/omiga.yml" ] || [ -f "$HOME/.omiga/omiga.json" ] || [ -f "$HOME/.omiga/omiga.toml" ]; then
+        echo -e "${GREEN}✓ Config file found at ~/.omiga/${NC}"
         return 0
     fi
 
     return 1
+}
+
+require_bun() {
+    if ! command -v bun >/dev/null 2>&1; then
+        echo -e "${RED}✗ Bun 1.x is required for Omiga JavaScript commands${NC}" >&2
+        echo "Install Bun and rerun this script. This repository intentionally does not use npm install." >&2
+        exit 1
+    fi
 }
 
 # Check API Key
@@ -205,11 +217,16 @@ if [ ! -f "package.json" ]; then
 fi
 
 echo -e "${GREEN}✓ In correct directory${NC}"
+require_bun
 
 # Install dependencies if needed
 if [ ! -d "node_modules" ]; then
     echo "📦 Installing frontend dependencies..."
-    npm install
+    if [ -f "bun.lock" ]; then
+        bun install --frozen-lockfile
+    else
+        bun install
+    fi
 fi
 
 if [ ! -d "src-tauri/target" ]; then
@@ -232,4 +249,4 @@ echo "=========================="
 echo ""
 
 # Start Tauri in dev mode
-npm run tauri dev
+bun run tauri dev

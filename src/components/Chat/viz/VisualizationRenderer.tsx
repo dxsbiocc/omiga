@@ -28,7 +28,7 @@ function EChartView({ option }: { option: unknown }) {
         handleResize = () => inst.resize();
         window.addEventListener("resize", handleResize);
       } catch {
-        setError("ECharts 未安装，请运行 npm install echarts");
+        setError("ECharts 未安装，请运行 bun add echarts");
       }
     })();
     return () => {
@@ -150,7 +150,7 @@ function PlotlyView({ data, layout }: { data: unknown; layout?: unknown }) {
         handleResize = () => Plotly.Plots.resize(containerRef.current);
         window.addEventListener("resize", handleResize);
       } catch {
-        setError("Plotly 未安装，请运行 npm install plotly.js-dist-min");
+        setError("Plotly 未安装，请运行 bun add plotly.js-dist-min");
       }
     })();
     return () => {
