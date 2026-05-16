@@ -238,27 +238,37 @@ export default function App() {
     void useExtensionStore.getState().loadExtensions();
   }, []);
 
-  // Listen for cron job fired events from the backend scheduler
+  // Listen for cron job fired events — create an AI session and send the task
   useEffect(() => {
     const unlistenPromise = listenTauriEvent<{
       id: string;
       task: string;
       firedAt: string;
-    }>("cron-job-fired", (event) => {
-      const { task } = event.payload;
-      // Use the existing notification system if available, otherwise log
+    }>("cron-job-fired", async (event) => {
+      const { task, id } = event.payload;
       try {
-        new Notification("Omiga — Scheduled Task", {
-          body: task.length > 100 ? task.slice(0, 97) + "…" : task,
-          silent: false,
+        const sessionTitle = `[定时任务] ${task.slice(0, 40)}${task.length > 40 ? "…" : ""}`;
+        await useSessionStore.getState().createSession(sessionTitle, ".");
+        const sessionId = useSessionStore.getState().currentSession?.id;
+        if (!sessionId) throw new Error("session id unavailable after createSession");
+        await useSessionStore.getState().sendMessage({
+          content: `[定时任务触发 ID: ${id}]\n\n${task}`,
+          session_id: sessionId,
+          use_tools: true,
         });
-      } catch {
-        console.info("[cron] job fired:", task);
+      } catch (e) {
+        console.warn("[cron] failed to create AI session:", e);
+        try {
+          new Notification("Omiga — 定时任务", {
+            body: task.length > 100 ? task.slice(0, 97) + "…" : task,
+            silent: false,
+          });
+        } catch {
+          console.info("[cron] job fired:", task);
+        }
       }
     });
-    return () => {
-      void unlistenPromise.then((f) => f());
-    };
+    return () => { void unlistenPromise.then((f) => f()); };
   }, []);
 
   useEffect(() => {
