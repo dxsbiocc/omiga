@@ -73,6 +73,7 @@ import { schedulerStageLabel } from "../../utils/schedulerPlanHierarchy";
 import { filterTaskOrchestrationEvents } from "./taskPanelDisplay";
 
 import {
+  buildTaskDispatchSummary,
   buildOrchestrationTimelineFromEvents,
   filterOrchestrationTraceEvents,
   orchestrationPhaseLabel,
@@ -1107,6 +1108,22 @@ export function TaskStatus() {
       (task) => task.plan_id && task.plan_id === schedulerPlan.planId,
     );
   }, [schedulerPlan, scopedSessionBackgroundTasks]);
+  const dispatchSummary = useMemo(
+    () =>
+      buildTaskDispatchSummary(
+        schedulerPlan,
+        currentPlanTaskRows.length > 0
+          ? currentPlanTaskRows
+          : scopedSessionBackgroundTasks,
+        scopedTaskOrchestrationEvents,
+      ),
+    [
+      currentPlanTaskRows,
+      schedulerPlan,
+      scopedSessionBackgroundTasks,
+      scopedTaskOrchestrationEvents,
+    ],
+  );
   const runningAgentCards = useMemo<RuntimeAgentTaskItem[]>(() => {
     const sourceRows =
       currentPlanTaskRows.length > 0 ? currentPlanTaskRows : runningWorkerTasks;
@@ -1914,6 +1931,97 @@ export function TaskStatus() {
                     ) : chip;
                   })()}
                 </Stack>
+              )}
+
+              {dispatchSummary && dispatchSummary.total > 0 && (
+                <Box
+                  sx={{
+                    p: 0.75,
+                    borderRadius: 1,
+                    border: `1px solid ${alpha("#6366f1", 0.12)}`,
+                    bgcolor: alpha("#6366f1", 0.035),
+                  }}
+                >
+                  <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                    <Chip
+                      size="small"
+                      label={`任务 ${dispatchSummary.completed}/${dispatchSummary.total} 完成`}
+                      sx={{ height: 20, fontSize: 9.5, fontWeight: 700 }}
+                    />
+                    {(dispatchSummary.running > 0 || dispatchSummary.pending > 0) && (
+                      <Chip
+                        size="small"
+                        label={`${dispatchSummary.running + dispatchSummary.pending} 调度中`}
+                        sx={{
+                          height: 20,
+                          fontSize: 9.5,
+                          bgcolor: alpha("#0ea5e9", 0.1),
+                          color: "#0369a1",
+                        }}
+                      />
+                    )}
+                    {dispatchSummary.ready > 0 && (
+                      <Chip
+                        size="small"
+                        label={`${dispatchSummary.ready} 可启动`}
+                        sx={{
+                          height: 20,
+                          fontSize: 9.5,
+                          bgcolor: alpha("#22c55e", 0.1),
+                          color: "#15803d",
+                        }}
+                      />
+                    )}
+                    {dispatchSummary.blocked > 0 && (
+                      <Chip
+                        size="small"
+                        label={`${dispatchSummary.blocked} 等依赖`}
+                        sx={{
+                          height: 20,
+                          fontSize: 9.5,
+                          bgcolor: alpha("#f59e0b", 0.1),
+                          color: "#b45309",
+                        }}
+                      />
+                    )}
+                    {dispatchSummary.failed + dispatchSummary.cancelled > 0 && (
+                      <Chip
+                        size="small"
+                        icon={<WarningAmber sx={{ fontSize: 12 }} />}
+                        label={`${dispatchSummary.failed + dispatchSummary.cancelled} 异常`}
+                        sx={{
+                          height: 20,
+                          fontSize: 9.5,
+                          bgcolor: alpha("#ef4444", 0.1),
+                          color: "#dc2626",
+                        }}
+                      />
+                    )}
+                  </Stack>
+
+                  {dispatchSummary.readyTasks[0] && (
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ display: "block", mt: 0.55, fontSize: 9.5, lineHeight: 1.45 }}
+                    >
+                      下一批：{normalizeAgentDisplayName(dispatchSummary.readyTasks[0].agentType)}
+                      {" · "}
+                      {compactLabel(dispatchSummary.readyTasks[0].description, 42)}
+                    </Typography>
+                  )}
+                  {dispatchSummary.blockedTasks[0] && (
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ display: "block", mt: 0.3, fontSize: 9.5, lineHeight: 1.45 }}
+                    >
+                      阻塞：{compactLabel(dispatchSummary.blockedTasks[0].description, 34)}
+                      {" · 等待 "}
+                      {dispatchSummary.blockedTasks[0].blockedBy.join(", ")}
+                    </Typography>
+                  )}
+                </Box>
               )}
 
               <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>

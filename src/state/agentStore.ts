@@ -171,21 +171,22 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   updateTaskStatus: (taskId, status, extra) =>
     set((s) => ({
-      backgroundTasks: s.backgroundTasks.map((t) =>
-        t.taskId === taskId
-          ? {
-              ...t,
-              status,
-              ...extra,
-              ...(status === "running" && !t.startedAt
-                ? { startedAt: Date.now() }
-                : {}),
-              ...((status === "completed" ||
-                status === "failed" ||
-                status === "cancelled") && { completedAt: Date.now() }),
-            }
-          : t,
-      ),
+      backgroundTasks: s.backgroundTasks.map((t) => {
+        if (t.taskId !== taskId) return t;
+        const next = { ...t, ...extra, status };
+        if (status === "running" && !next.startedAt) {
+          next.startedAt = Date.now();
+        }
+        if (
+          (status === "completed" ||
+            status === "failed" ||
+            status === "cancelled") &&
+          !next.completedAt
+        ) {
+          next.completedAt = Date.now();
+        }
+        return next;
+      }),
     })),
 
   removeTask: (taskId) =>

@@ -39,7 +39,7 @@ fn openai_sse_text(text: &str) -> String {
     format!("data: {text_chunk}\n\ndata: {stop_chunk}\n\ndata: [DONE]\n\n")
 }
 
-async fn mock_config_for_response(response_text: &str) -> LlmConfig {
+async fn mock_config_for_response(response_text: &str) -> (LlmConfig, MockServer) {
     // Test sandboxes and CI runners may set HTTP(S)_PROXY globally. Keep the local
     // mock endpoint off those proxies so failures exercise Omiga code, not host proxy policy.
     std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
@@ -56,10 +56,12 @@ async fn mock_config_for_response(response_text: &str) -> LlmConfig {
         .mount(&server)
         .await;
 
-    LlmConfig::new(LlmProvider::Custom, "mock-key")
+    let config = LlmConfig::new(LlmProvider::Custom, "mock-key")
         .with_base_url(format!("{}/v1", server.uri()))
         .with_model("mock-planner")
-        .with_max_tokens(1024)
+        .with_max_tokens(1024);
+
+    (config, server)
 }
 
 fn phased_plan_json() -> String {
@@ -154,7 +156,7 @@ fn team_plan_json_without_terminal_verify() -> String {
 
 #[tokio::test]
 async fn mock_openai_compatible_streaming_smoke() {
-    let config = mock_config_for_response("ok").await;
+    let (config, _server) = mock_config_for_response("ok").await;
     let client = create_client(config).expect("create mock client");
     let mut stream = client
         .send_message_streaming(vec![LlmMessage::user("Reply with exactly: ok")], vec![])
@@ -177,7 +179,7 @@ async fn mock_openai_compatible_streaming_smoke() {
 
 #[tokio::test]
 async fn mock_schedule_uses_llm_planner_without_real_provider() {
-    let llm_config = mock_config_for_response(&phased_plan_json()).await;
+    let (llm_config, _server) = mock_config_for_response(&phased_plan_json()).await;
     let scheduler = AgentScheduler::new();
     let request = SchedulingRequest::new(
         "Refactor the login flow to add token refresh, add regression tests, and produce a verification checklist.",
@@ -209,7 +211,8 @@ async fn mock_schedule_uses_llm_planner_without_real_provider() {
 
 #[tokio::test]
 async fn mock_team_adds_terminal_verification_and_reviewers() {
-    let llm_config = mock_config_for_response(&team_plan_json_without_terminal_verify()).await;
+    let (llm_config, _server) =
+        mock_config_for_response(&team_plan_json_without_terminal_verify()).await;
     let scheduler = AgentScheduler::new();
     let request = SchedulingRequest::new(
         "Fix the export race condition, verify the fix, and prepare a concise final synthesis. Use a coordinated team of specialized agents.",
@@ -249,7 +252,7 @@ async fn mock_team_adds_terminal_verification_and_reviewers() {
 
 #[tokio::test]
 async fn mock_autopilot_plan_gets_reviewer_family() {
-    let llm_config = mock_config_for_response(&phased_plan_json()).await;
+    let (llm_config, _server) = mock_config_for_response(&phased_plan_json()).await;
     let scheduler = AgentScheduler::new();
     let request = SchedulingRequest::new(
         "Autopilot this feature: implement settings sync, run QA, validate acceptance criteria, and surface remaining risks.",
