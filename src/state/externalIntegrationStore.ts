@@ -233,13 +233,28 @@ function isMissingUnifiedCatalogCommand(error: unknown): boolean {
 }
 
 function toolTextHaystack(tool: McpToolCatalogEntry): string[] {
-  return [
-    tool.wireName,
-    tool.description,
-    tool.connectorId,
-    tool.connectorName,
-    tool.connectorDescription,
-  ].map(normalizeSearchValue);
+  return [tool.wireName, tool.description].map(normalizeSearchValue);
+}
+
+function toolHasConnectorMetadata(tool: McpToolCatalogEntry): boolean {
+  return Boolean(
+    normalizeSearchValue(tool.connectorId) ||
+      normalizeSearchValue(tool.connectorName),
+  );
+}
+
+function toolMatchesConnectorMetadata(
+  connector: ConnectorInfo,
+  tool: McpToolCatalogEntry,
+): boolean {
+  const connectorId = normalizeSearchValue(connector.definition.id);
+  const connectorName = normalizeSearchValue(connector.definition.name);
+  const toolConnectorId = normalizeSearchValue(tool.connectorId);
+  const toolConnectorName = normalizeSearchValue(tool.connectorName);
+  return (
+    (Boolean(toolConnectorId) && toolConnectorId === connectorId) ||
+    (Boolean(toolConnectorName) && toolConnectorName === connectorName)
+  );
 }
 
 function connectorMatchesMcpServer(
@@ -253,6 +268,13 @@ function connectorMatchesMcpServer(
     .flatMap((tool) => [tool.name, tool.description])
     .map(normalizeSearchValue)
     .filter(Boolean);
+  const metadataTools = server.tools.filter(toolHasConnectorMetadata);
+  if (metadataTools.length > 0) {
+    return metadataTools.some((tool) =>
+      toolMatchesConnectorMetadata(connector, tool),
+    );
+  }
+
   const toolTerms = server.tools.flatMap(toolTextHaystack);
 
   if (toolTerms.some((term) => term.includes(connectorId))) {

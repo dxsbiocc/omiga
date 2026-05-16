@@ -408,10 +408,7 @@ fn connector_identity_matches(connector: &ConnectorInfo, value: &str) -> bool {
     }
     let id_key = connector_match_key(&connector.definition.id);
     let name_key = connector_match_key(&connector.definition.name);
-    candidate == id_key
-        || candidate == name_key
-        || (id_key.len() >= 4 && candidate.contains(&id_key))
-        || (name_key.len() >= 4 && candidate.contains(&name_key))
+    candidate == id_key || candidate == name_key
 }
 
 fn connector_match_key(value: &str) -> String {
@@ -594,6 +591,47 @@ mod tests {
             merged.items[1].mcp_servers[0].tools,
             vec![sample_tool("mcp__codex_apps__search_workspace")]
         );
+    }
+
+    #[test]
+    fn merge_external_integrations_matches_connector_binding_exactly() {
+        let github = sample_connector("github", "GitHub");
+        let github_enterprise = sample_connector("github-enterprise", "GitHub Enterprise");
+        let server = sample_mcp_server(
+            "codex_apps",
+            vec![sample_tool("mcp__codex_apps__read_enterprise_issue")],
+        );
+
+        let merged = merge_external_integrations(
+            &ConnectorCatalog {
+                connectors: vec![github, github_enterprise],
+                scope: "user".to_string(),
+                config_path: "/tmp/connectors.json".to_string(),
+                notes: Vec::new(),
+            },
+            &[ExternalIntegrationMcpServerBinding {
+                server,
+                tool_bindings: vec![ExternalIntegrationMcpToolBinding {
+                    wire_name: "mcp__codex_apps__read_enterprise_issue".to_string(),
+                    connector_id: Some("github-enterprise".to_string()),
+                    connector_name: None,
+                }],
+            }],
+            &[],
+        );
+
+        assert_eq!(merged.items.len(), 2);
+        assert_eq!(merged.items[0].connector_id.as_deref(), Some("github"));
+        assert_eq!(merged.items[0].kind, ExternalIntegrationKind::Connector);
+        assert_eq!(
+            merged.items[1].connector_id.as_deref(),
+            Some("github-enterprise")
+        );
+        assert_eq!(
+            merged.items[1].kind,
+            ExternalIntegrationKind::McpBackedConnector
+        );
+        assert_eq!(merged.items[1].mcp_server_keys, vec!["codex_apps"]);
     }
 
     #[test]

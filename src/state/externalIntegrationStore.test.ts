@@ -464,4 +464,62 @@ describe("external integration selectors", () => {
       "github",
     ]);
   });
+
+  it("matches structured MCP connector metadata exactly in legacy fallback rows", () => {
+    const github = connector({
+      connected: true,
+      accessible: true,
+      status: "connected",
+      authSource: "codex_apps",
+      definition: {
+        id: "github",
+        name: "GitHub",
+        authType: "externalMcp",
+      },
+    });
+    const githubEnterprise = connector({
+      connected: true,
+      accessible: true,
+      status: "connected",
+      authSource: "codex_apps",
+      definition: {
+        id: "github-enterprise",
+        name: "GitHub Enterprise",
+        authType: "externalMcp",
+      },
+    });
+    const codexApps = mcpServer({
+      tools: [
+        {
+          wireName: "mcp__codex_apps__read_enterprise_issue",
+          description: "Read GitHub Enterprise issues",
+          connectorId: "github-enterprise",
+          connectorName: "GitHub Enterprise",
+        },
+      ],
+    });
+
+    const catalog = buildExternalIntegrationsCatalogFromLegacy({
+      connectors: [github, githubEnterprise],
+      mcpServers: [codexApps],
+    });
+
+    expect(
+      selectConnectorLikeItems(catalog).map((item) => ({
+        id: item.connectorId,
+        kind: item.kind,
+        mcpServers: item.mcpServers.map((server) => server.configKey),
+      })),
+    ).toEqual([
+      { id: "github", kind: "connector", mcpServers: [] },
+      {
+        id: "github-enterprise",
+        kind: "mcp_backed_connector",
+        mcpServers: ["codex_apps"],
+      },
+    ]);
+    expect(selectMcpServerRows(catalog)[0].linkedConnectorIds).toEqual([
+      "github-enterprise",
+    ]);
+  });
 });
