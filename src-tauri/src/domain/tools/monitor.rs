@@ -55,8 +55,7 @@ impl super::ToolImpl for MonitorTool {
 
         let manager = get_background_agent_manager();
         let timeout_ms = args.timeout_ms.min(600_000);
-        let deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
         loop {
             match manager.get_task(&args.task_id).await {

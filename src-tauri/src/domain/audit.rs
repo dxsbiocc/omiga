@@ -68,8 +68,7 @@ async fn write_entry(path: &PathBuf, entry: &AuditEntry) -> std::io::Result<()> 
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let mut line = serde_json::to_string(entry)
-        .map_err(std::io::Error::other)?;
+    let mut line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
     line.push('\n');
     use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::OpenOptions::new()

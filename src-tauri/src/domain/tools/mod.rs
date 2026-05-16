@@ -11,10 +11,10 @@ pub mod agent;
 #[path = "interaction/ask_user_question.rs"]
 pub mod ask_user_question;
 pub mod bash;
+pub mod connector;
 pub mod cron_create;
 pub mod cron_delete;
 pub mod cron_list;
-pub mod connector;
 #[path = "plan/enter_mode.rs"]
 pub mod enter_plan_mode;
 pub mod enter_worktree;
@@ -33,8 +33,6 @@ pub mod execution_lineage_report;
 pub mod execution_record_detail;
 #[path = "execution/record_list.rs"]
 pub mod execution_record_list;
-pub mod monitor;
-pub mod push_notification;
 #[path = "plan/exit_mode.rs"]
 pub mod exit_plan_mode;
 pub mod exit_worktree;
@@ -69,12 +67,14 @@ pub mod learning_self_evolution_report;
 pub mod list_mcp_resources;
 #[path = "skill/list.rs"]
 pub mod list_skills;
+pub mod monitor;
 #[path = "notebook/edit.rs"]
 pub mod notebook_edit;
 #[path = "operator/describe.rs"]
 pub mod operator_describe;
 #[path = "operator/list.rs"]
 pub mod operator_list;
+pub mod push_notification;
 pub mod query;
 #[path = "mcp/read_resource.rs"]
 pub mod read_mcp_resource;

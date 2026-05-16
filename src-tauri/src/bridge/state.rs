@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 use tokio::sync::Mutex;
 

@@ -401,9 +401,9 @@ pub(super) async fn execute_tool_calls(
             );
             if !is_skill_tool {
                 let canonical = canonical_permission_tool_name(tool_name);
-                let permitted = allowed.iter().any(|a| {
-                    canonical_permission_tool_name(a) == canonical || a == tool_name
-                });
+                let permitted = allowed
+                    .iter()
+                    .any(|a| canonical_permission_tool_name(a) == canonical || a == tool_name);
                 if !permitted {
                     let error_msg = format!(
                         "Tool `{tool_name}` is blocked by the active skill's \
@@ -444,8 +444,7 @@ pub(super) async fn execute_tool_calls(
             })
             .await
         } else {
-            let timeout_dur =
-                std::time::Duration::from_secs(SEQUENTIAL_TOOL_DEFAULT_TIMEOUT_SECS);
+            let timeout_dur = std::time::Duration::from_secs(SEQUENTIAL_TOOL_DEFAULT_TIMEOUT_SECS);
             match tokio::time::timeout(
                 timeout_dur,
                 execute_one_tool(SingleToolExecution {
@@ -490,19 +489,14 @@ pub(super) async fn execute_tool_calls(
         // --- Feature 2 Step C: record file artifacts ---
         if !res.2 {
             let tname_lower = tool_name.to_ascii_lowercase();
-            let is_write_tool = matches!(
-                tname_lower.as_str(),
-                "file_write" | "write_file"
-            );
+            let is_write_tool = matches!(tname_lower.as_str(), "file_write" | "write_file");
             let is_edit_tool = matches!(
                 tname_lower.as_str(),
                 "file_edit" | "edit_file" | "str_replace_editor"
             );
             if is_write_tool || is_edit_tool {
                 if let Some(ref registry) = shared.artifact_registry {
-                    if let Ok(args_val) =
-                        serde_json::from_str::<serde_json::Value>(arguments)
-                    {
+                    if let Ok(args_val) = serde_json::from_str::<serde_json::Value>(arguments) {
                         let path = args_val
                             .get("path")
                             .or_else(|| args_val.get("file_path"))
@@ -588,7 +582,11 @@ fn extract_skill_allowed_tools(output: &str) -> Option<Vec<String>> {
         .iter()
         .filter_map(|v| v.as_str().map(str::to_owned))
         .collect();
-    if allowed.is_empty() { None } else { Some(allowed) }
+    if allowed.is_empty() {
+        None
+    } else {
+        Some(allowed)
+    }
 }
 
 /// Execute a single tool call. Called from both the parallel and sequential paths.
@@ -1574,20 +1572,21 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                                                 output_len = fork_result_str.len(),
                                                 "Skill fork execution completed"
                                             );
-                                            let display_output =
-                                                if fork_result_str.len() > PREVIEW_SIZE_BYTES {
-                                                    let prefix = truncate_utf8_prefix(
-                                                        &fork_result_str,
-                                                        PREVIEW_SIZE_BYTES,
-                                                    );
-                                                    format!(
+                                            let display_output = if fork_result_str.len()
+                                                > PREVIEW_SIZE_BYTES
+                                            {
+                                                let prefix = truncate_utf8_prefix(
+                                                    &fork_result_str,
+                                                    PREVIEW_SIZE_BYTES,
+                                                );
+                                                format!(
                                                         "{}\n\n[Output truncated... {} total characters]",
                                                         prefix,
                                                         fork_result_str.len()
                                                     )
-                                                } else {
-                                                    fork_result_str.clone()
-                                                };
+                                            } else {
+                                                fork_result_str.clone()
+                                            };
                                             let _ = app.emit(
                                                 &format!("chat-stream-{}", message_id),
                                                 &StreamOutputItem::ToolResult {

@@ -894,8 +894,7 @@ pub fn save_user_script_operator(
     }
 
     let dir = user_operators_dir();
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("create user-operators dir: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("create user-operators dir: {e}"))?;
 
     let argv_yaml = argv
         .iter()
@@ -924,12 +923,20 @@ pub fn save_user_script_operator(
 
 fn sanitize_id(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
 fn serde_yaml_escape(s: &str) -> String {
-    if s.contains(['"', '\'', '\n', ':', '#', '&', '*', '!', '|', '>', '{', '}', '[', ']', ',']) {
+    if s.contains([
+        '"', '\'', '\n', ':', '#', '&', '*', '!', '|', '>', '{', '}', '[', ']', ',',
+    ]) {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         s.to_string()
