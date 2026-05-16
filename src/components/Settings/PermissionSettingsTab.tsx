@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ComponentType,
   type MouseEvent,
@@ -16,6 +17,7 @@ import {
   Chip,
   CircularProgress,
   Divider,
+  InputAdornment,
   Stack,
   TextField,
   Typography,
@@ -42,6 +44,10 @@ import {
   ImportContacts as ImportContactsIcon,
   StopCircle as StopCircleIcon,
   Widgets as WidgetsIcon,
+  History as HistoryIcon,
+  CheckCircle as CheckCircleIcon,
+  Cancel as CancelIcon,
+  Refresh as RefreshIcon,
 } from "@mui/icons-material";
 import {
   PERMISSION_PRESETS,
@@ -54,6 +60,29 @@ import { isUnsetWorkspacePath } from "../../state/sessionStore";
 type PermissionSettingsTabProps = {
   projectPath: string;
 };
+
+type AuditDecisionFilter = "all" | "approved" | "denied";
+
+type PermissionAuditEvent = {
+  id: string;
+  sessionId: string;
+  requestId?: string | null;
+  projectRoot?: string | null;
+  decision: "approved" | "denied" | string;
+  toolName: string;
+  mode?: string | null;
+  reason?: string | null;
+  timestamp: string;
+};
+
+type PermissionAuditEventsResponse = {
+  events: PermissionAuditEvent[];
+  totalCount: number;
+  approvedCount: number;
+  deniedCount: number;
+};
+
+const AUDIT_PAGE_SIZE = 20;
 
 const PRESET_ICONS: Record<string, ComponentType<SvgIconProps>> = {
   Bash: TerminalIcon,
@@ -261,15 +290,75 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
   const [customBlock, setCustomBlock] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditEvents, setAuditEvents] = useState<PermissionAuditEvent[]>([]);
+  const [auditTotalCount, setAuditTotalCount] = useState(0);
+  const [auditApprovedCount, setAuditApprovedCount] = useState(0);
+  const [auditDeniedCount, setAuditDeniedCount] = useState(0);
+  const [auditDecisionFilter, setAuditDecisionFilter] =
+    useState<AuditDecisionFilter>("all");
+  const [auditToolFilter, setAuditToolFilter] = useState("");
+  const [auditToolQuery, setAuditToolQuery] = useState("");
+  const [auditPage, setAuditPage] = useState(1);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
   } | null>(null);
+  const auditRequestSeq = useRef(0);
+  const previousAuditQueryKey = useRef<string | null>(null);
+  const auditHasMore = auditPage * AUDIT_PAGE_SIZE < auditTotalCount;
 
   const blockedCount = useMemo(
     () => Object.values(presetChecked).filter(Boolean).length,
     [presetChecked],
   );
+  const auditPageSummary = useMemo(
+    () =>
+      auditEvents.reduce(
+        (summary, event) => {
+          if (event.decision === "approved") {
+            summary.approved += 1;
+          } else if (event.decision === "denied") {
+            summary.denied += 1;
+          } else {
+            summary.other += 1;
+          }
+          return summary;
+        },
+        { approved: 0, denied: 0, other: 0 },
+      ),
+    [auditEvents],
+  );
+  const hasActiveAuditFilters =
+    auditDecisionFilter !== "all" || auditToolQuery.length > 0;
+  const auditFilterSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (auditDecisionFilter === "approved") {
+      parts.push("仅看批准");
+    } else if (auditDecisionFilter === "denied") {
+      parts.push("仅看拒绝");
+    } else {
+      parts.push("全部决策");
+    }
+    if (auditToolQuery.length > 0) {
+      parts.push(`工具包含“${auditToolQuery}”`);
+    }
+    return parts.join(" / ");
+  }, [auditDecisionFilter, auditToolQuery]);
+  const auditPageSummaryText = useMemo(() => {
+    const parts = [
+      `本页 ${auditEvents.length} 条`,
+      `批准 ${auditPageSummary.approved}`,
+      `拒绝 ${auditPageSummary.denied}`,
+    ];
+    if (auditPageSummary.other > 0) {
+      parts.push(`其他 ${auditPageSummary.other}`);
+    }
+    return parts.join(" / ");
+  }, [auditEvents.length, auditPageSummary]);
+  const auditFacetSummaryText = useMemo(() => {
+    return `总计 ${auditTotalCount} 条 / 批准 ${auditApprovedCount} / 拒绝 ${auditDeniedCount}`;
+  }, [auditApprovedCount, auditDeniedCount, auditTotalCount]);
 
   const load = useCallback(async () => {
     if (isUnsetWorkspacePath(projectPath)) {
@@ -296,9 +385,65 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
     }
   }, [projectPath]);
 
+  const loadAuditEvents = useCallback(async (page: number) => {
+    if (isUnsetWorkspacePath(projectPath)) {
+      setAuditEvents([]);
+      setAuditTotalCount(0);
+      setAuditApprovedCount(0);
+      setAuditDeniedCount(0);
+      return;
+    }
+    const requestSeq = ++auditRequestSeq.current;
+    setAuditLoading(true);
+    try {
+      const response = await invoke<PermissionAuditEventsResponse>("permission_get_audit_events", {
+        limit: AUDIT_PAGE_SIZE,
+        offset: (page - 1) * AUDIT_PAGE_SIZE,
+        projectRoot: projectPath,
+        decision: auditDecisionFilter === "all" ? undefined : auditDecisionFilter,
+        toolQuery: auditToolQuery || undefined,
+      });
+      if (requestSeq !== auditRequestSeq.current) {
+        return;
+      }
+      setAuditEvents(response.events);
+      setAuditTotalCount(response.totalCount);
+      setAuditApprovedCount(response.approvedCount);
+      setAuditDeniedCount(response.deniedCount);
+    } catch (e) {
+      setMessage({
+        type: "error",
+        text: `加载权限审计失败: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    } finally {
+      if (requestSeq === auditRequestSeq.current) {
+        setAuditLoading(false);
+      }
+    }
+  }, [auditDecisionFilter, auditToolQuery, projectPath]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setAuditToolQuery(auditToolFilter.trim());
+    }, 250);
+    return () => window.clearTimeout(timeoutId);
+  }, [auditToolFilter]);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const queryKey = `${projectPath}::${auditDecisionFilter}::${auditToolQuery}`;
+    if (previousAuditQueryKey.current !== queryKey) {
+      previousAuditQueryKey.current = queryKey;
+      if (auditPage !== 1) {
+        setAuditPage(1);
+        return;
+      }
+    }
+    void loadAuditEvents(auditPage);
+  }, [auditDecisionFilter, auditPage, auditToolQuery, loadAuditEvents, projectPath]);
 
   const togglePreset = (rule: string) => {
     setPresetChecked((prev) => ({ ...prev, [rule]: !prev[rule] }));
@@ -438,6 +583,227 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
         </Box>
       ) : (
         <>
+          <Stack
+            direction={{ xs: "column", sm: "row" }}
+            alignItems={{ xs: "stretch", sm: "center" }}
+            justifyContent="space-between"
+            spacing={1.5}
+            sx={{ mb: 2 }}
+          >
+            <Stack direction="row" alignItems="center" spacing={1}>
+              <HistoryIcon sx={{ color: "text.secondary", fontSize: 22 }} />
+              <Box>
+                <Typography variant="overline" sx={{ display: "block", letterSpacing: 0, fontWeight: 800, color: "text.secondary", lineHeight: 1.2 }}>
+                  权限审计
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  最近的批准和拒绝会持久保存，重启后仍可查看。
+                </Typography>
+              </Box>
+            </Stack>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={auditLoading ? <CircularProgress size={14} /> : <RefreshIcon />}
+              onClick={() => void loadAuditEvents(auditPage)}
+              disabled={auditLoading}
+              sx={{ alignSelf: { xs: "flex-start", sm: "center" }, textTransform: "none", fontWeight: 700 }}
+            >
+              刷新
+            </Button>
+          </Stack>
+
+          <Stack
+            direction={{ xs: "column", md: "row" }}
+            spacing={1.5}
+            alignItems={{ xs: "stretch", md: "center" }}
+            sx={{ mb: 1.5 }}
+          >
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Chip
+                label="全部"
+                color={auditDecisionFilter === "all" ? "primary" : "default"}
+                variant={auditDecisionFilter === "all" ? "filled" : "outlined"}
+                onClick={() => setAuditDecisionFilter("all")}
+                sx={{ fontWeight: 700 }}
+              />
+              <Chip
+                label="批准"
+                color={auditDecisionFilter === "approved" ? "success" : "default"}
+                variant={auditDecisionFilter === "approved" ? "filled" : "outlined"}
+                onClick={() => setAuditDecisionFilter("approved")}
+                sx={{ fontWeight: 700 }}
+              />
+              <Chip
+                label="拒绝"
+                color={auditDecisionFilter === "denied" ? "error" : "default"}
+                variant={auditDecisionFilter === "denied" ? "filled" : "outlined"}
+                onClick={() => setAuditDecisionFilter("denied")}
+                sx={{ fontWeight: 700 }}
+              />
+            </Stack>
+            <TextField
+              size="small"
+              value={auditToolFilter}
+              onChange={(event) => setAuditToolFilter(event.target.value)}
+              placeholder="按工具名过滤，例如 Bash 或 mcp__server"
+              inputProps={{ "aria-label": "按工具名过滤审计记录" }}
+              sx={{ minWidth: { xs: "100%", md: 280 }, maxWidth: { md: 360 } }}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon sx={{ fontSize: 18, color: "text.secondary" }} />
+                  </InputAdornment>
+                ),
+              }}
+            />
+          </Stack>
+
+          <Stack
+            direction={{ xs: "column", md: "row" }}
+            spacing={1}
+            alignItems={{ xs: "flex-start", md: "center" }}
+            justifyContent="space-between"
+            sx={{ mb: 1.25 }}
+          >
+            <Typography variant="caption" color="text.secondary">
+              {`第 ${auditPage} 页 / 当前筛选：${auditFilterSummary}${
+                auditLoading ? " / 加载中…" : ""
+              }${!auditHasMore && auditTotalCount > 0 ? " / 无更多记录" : ""}`}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {`${auditFacetSummaryText} / ${auditPageSummaryText}`}
+            </Typography>
+          </Stack>
+
+          <Box
+            sx={{
+              border: `1px solid ${alpha(theme.palette.divider, 0.9)}`,
+              borderRadius: 2.5,
+              overflow: "hidden",
+              mb: 3,
+              bgcolor: alpha(theme.palette.background.paper, 0.82),
+            }}
+          >
+            {auditLoading && auditEvents.length === 0 ? (
+              <Stack
+                alignItems="center"
+                spacing={1}
+                sx={{ px: 2, py: 4, color: "text.secondary" }}
+              >
+                <CircularProgress size={24} />
+                <Typography variant="body2" color="text.secondary">
+                  正在加载最近的权限审计记录…
+                </Typography>
+              </Stack>
+            ) : auditEvents.length === 0 ? (
+              <Stack spacing={0.75} sx={{ p: 2 }}>
+                <Typography variant="body2" fontWeight={700}>
+                  {hasActiveAuditFilters
+                    ? "当前筛选下没有匹配的记录。"
+                    : auditPage > 1
+                      ? "当前页没有更多权限审计记录。"
+                      : "暂无权限审计记录。"}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {hasActiveAuditFilters
+                    ? "试试切回“全部”，或清空工具名过滤关键字。"
+                    : auditPage > 1
+                      ? "可以返回上一页，或刷新后重试。"
+                      : "批准或拒绝工具后，这里会显示最近记录。"}
+                </Typography>
+                {hasActiveAuditFilters ? (
+                  <Box>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setAuditDecisionFilter("all");
+                        setAuditToolFilter("");
+                      }}
+                      sx={{ mt: 0.5, textTransform: "none", fontWeight: 700 }}
+                    >
+                      清除筛选
+                    </Button>
+                  </Box>
+                ) : null}
+              </Stack>
+            ) : (
+              <Stack divider={<Divider />}>
+                {auditEvents.map((event) => {
+                  const approved = event.decision === "approved";
+                  return (
+                    <Stack
+                      key={event.id}
+                      direction={{ xs: "column", sm: "row" }}
+                      alignItems={{ xs: "flex-start", sm: "center" }}
+                      spacing={1.25}
+                      sx={{ px: 1.5, py: 1.2 }}
+                    >
+                      {approved ? (
+                        <CheckCircleIcon color="success" sx={{ fontSize: 20 }} />
+                      ) : (
+                        <CancelIcon color="error" sx={{ fontSize: 20 }} />
+                      )}
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
+                          <Typography variant="body2" fontWeight={800}>
+                            {approved ? "已批准" : "已拒绝"}
+                          </Typography>
+                          <Box component="code" sx={{ fontSize: "0.76rem", px: 0.6, py: 0.15, borderRadius: 0.75, bgcolor: alpha(theme.palette.text.primary, 0.06) }}>
+                            {event.toolName}
+                          </Box>
+                          {event.mode ? (
+                            <Chip size="small" label={event.mode} sx={{ height: 22, fontSize: "0.68rem" }} />
+                          ) : null}
+                        </Stack>
+                        {event.reason ? (
+                          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
+                            {event.reason}
+                          </Typography>
+                        ) : null}
+                      </Box>
+                      <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: "nowrap" }}>
+                        {new Date(event.timestamp).toLocaleString()}
+                      </Typography>
+                    </Stack>
+                  );
+                })}
+              </Stack>
+            )}
+            <Divider />
+            <Stack
+              direction="row"
+              alignItems="center"
+              justifyContent="space-between"
+              spacing={1}
+              sx={{ px: 1.5, py: 1.2 }}
+            >
+              <Button
+                size="small"
+                variant="text"
+                onClick={() => setAuditPage((page) => Math.max(1, page - 1))}
+                disabled={auditLoading || auditPage === 1}
+                sx={{ textTransform: "none", fontWeight: 700 }}
+              >
+                上一页
+              </Button>
+              <Typography variant="caption" color="text.secondary">
+                {`第 ${auditPage} 页 · 共 ${auditTotalCount} 条${
+                  !auditHasMore && auditTotalCount > 0 ? " · 无更多记录" : ""
+                }`}
+              </Typography>
+              <Button
+                size="small"
+                variant="text"
+                onClick={() => setAuditPage((page) => page + 1)}
+                disabled={auditLoading || !auditHasMore}
+                sx={{ textTransform: "none", fontWeight: 700 }}
+              >
+                下一页
+              </Button>
+            </Stack>
+          </Box>
+
           <Typography
             variant="overline"
             sx={{

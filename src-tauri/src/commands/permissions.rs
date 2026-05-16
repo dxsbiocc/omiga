@@ -5,9 +5,11 @@ use crate::domain::permissions::types::{
     DetectedRisk, PermissionContext, PermissionDecision, PermissionModeInput, PermissionRule,
     RiskLevel,
 };
+use crate::domain::persistence::NewPermissionAuditEventRecord;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
 
@@ -27,6 +29,7 @@ pub struct PermissionCheckResponse {
     pub detected_risks: Vec<RiskInfoDto>,
     pub recommendations: Vec<String>,
     pub arguments: Option<Value>, // 返回原始参数，用于批准时的哈希匹配
+    pub project_root: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,6 +61,30 @@ pub struct DenialRecordDto {
     pub reason: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionAuditEventDto {
+    pub id: String,
+    pub session_id: String,
+    pub request_id: Option<String>,
+    pub project_root: Option<String>,
+    pub decision: String,
+    pub tool_name: String,
+    pub mode: Option<String>,
+    pub reason: Option<String>,
+    pub arguments: Value,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionAuditEventsResponse {
+    pub events: Vec<PermissionAuditEventDto>,
+    pub total_count: usize,
+    pub approved_count: usize,
+    pub denied_count: usize,
+}
+
 // === 请求类型 ===
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +98,8 @@ pub struct ApproveRequest {
     /// Wakes the blocked `execute_one_tool` wait (same id as `permission-request`).
     #[serde(default)]
     pub request_id: Option<String>,
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +113,8 @@ pub struct DenyRequest {
     pub reason: String,
     #[serde(default)]
     pub request_id: Option<String>,
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 fn default_deny_reason() -> String {
@@ -134,11 +165,112 @@ fn convert_risk_info(risk: &DetectedRisk) -> RiskInfoDto {
     }
 }
 
+fn audit_timestamp(raw: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+fn permission_mode_to_audit_label(
+    mode: &crate::domain::permissions::types::PermissionMode,
+) -> String {
+    match mode {
+        crate::domain::permissions::types::PermissionMode::AskEveryTime => {
+            "ask_every_time".to_string()
+        }
+        crate::domain::permissions::types::PermissionMode::Session => "session".to_string(),
+        crate::domain::permissions::types::PermissionMode::TimeWindow { minutes } => {
+            format!("time_window:{minutes}")
+        }
+        crate::domain::permissions::types::PermissionMode::Plan => "plan".to_string(),
+        crate::domain::permissions::types::PermissionMode::Auto => "auto".to_string(),
+        crate::domain::permissions::types::PermissionMode::Bypass => "bypass".to_string(),
+    }
+}
+
+fn arguments_to_audit_json(arguments: &Value) -> String {
+    serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn normalize_project_root(project_root: Option<&str>) -> Option<PathBuf> {
+    project_root
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn build_permission_context(
+    manager: &PermissionManager,
+    session_id: String,
+    tool_name: String,
+    arguments: Value,
+    project_root: Option<&str>,
+) -> PermissionContext {
+    PermissionContext {
+        file_paths: manager.extract_file_paths(&tool_name, &arguments),
+        project_root: normalize_project_root(project_root),
+        session_id,
+        tool_name,
+        arguments,
+        timestamp: chrono::Utc::now(),
+    }
+}
+
+async fn waiter_context_for_request(
+    app_state: &OmigaAppState,
+    request_id: Option<&str>,
+) -> Option<PermissionContext> {
+    let request_id = request_id?;
+    let map = app_state.chat.permission_tool_waiters.lock().await;
+    map.get(request_id).map(|waiter| waiter.context.clone())
+}
+
+fn context_project_root_label(context: &PermissionContext) -> Option<String> {
+    context
+        .project_root
+        .as_ref()
+        .map(|root| root.to_string_lossy().to_string())
+}
+
+pub(crate) async fn append_permission_audit_event(
+    app_state: &OmigaAppState,
+    session_id: &str,
+    request_id: Option<&str>,
+    project_root: Option<&str>,
+    decision: &str,
+    tool_name: &str,
+    mode: Option<&str>,
+    reason: Option<&str>,
+    arguments_json: &str,
+) {
+    if let Err(err) = app_state
+        .repo
+        .append_permission_audit_event(NewPermissionAuditEventRecord {
+            session_id,
+            request_id,
+            project_root,
+            decision,
+            tool_name,
+            mode,
+            reason,
+            arguments_json,
+        })
+        .await
+    {
+        tracing::warn!(
+            target: "omiga::permissions",
+            error = %err,
+            "failed to append durable permission audit event"
+        );
+    }
+}
+
 fn convert_decision_to_response(
     decision: PermissionDecision,
     session_id: &str,
     tool_name: &str,
     arguments: &Value,
+    project_root: Option<&str>,
 ) -> PermissionCheckResponse {
     match decision {
         PermissionDecision::Allow => PermissionCheckResponse {
@@ -152,6 +284,7 @@ fn convert_decision_to_response(
             detected_risks: vec![],
             recommendations: vec![],
             arguments: Some(arguments.clone()),
+            project_root: project_root.map(str::to_string),
         },
         PermissionDecision::Deny(reason) => PermissionCheckResponse {
             session_id: session_id.to_string(),
@@ -164,6 +297,7 @@ fn convert_decision_to_response(
             detected_risks: vec![],
             recommendations: vec!["如需允许此操作，请手动批准".to_string()],
             arguments: Some(arguments.clone()),
+            project_root: project_root.map(str::to_string),
         },
         PermissionDecision::RequireApproval(req) => PermissionCheckResponse {
             session_id: session_id.to_string(),
@@ -181,6 +315,7 @@ fn convert_decision_to_response(
                 .collect(),
             recommendations: req.risk.recommendations.clone(),
             arguments: Some(arguments.clone()),
+            project_root: project_root.map(str::to_string),
         },
     }
 }
@@ -195,28 +330,51 @@ pub struct PermissionCheckRequest {
     pub tool_name: String,
     #[serde(default)]
     pub arguments: Value,
+    #[serde(default)]
+    pub project_root: Option<String>,
 }
 
 #[tauri::command]
 pub async fn permission_check(
     request: PermissionCheckRequest,
     manager: State<'_, Arc<PermissionManager>>,
+    app_state: State<'_, OmigaAppState>,
 ) -> CommandResult<PermissionCheckResponse> {
     let session_id = request.session_id;
     let tool_name = request.tool_name;
     let arguments = request.arguments;
-    let context = PermissionContext {
+    let project_root = request.project_root;
+    let context = build_permission_context(
+        &manager,
         session_id,
-        tool_name: tool_name.clone(),
-        arguments: arguments.clone(),
-        file_paths: None,
-        timestamp: chrono::Utc::now(),
-        project_root: None,
-    };
+        tool_name.clone(),
+        arguments.clone(),
+        project_root.as_deref(),
+    );
 
     let decision = manager.check_permission(&context).await;
-    let response =
-        convert_decision_to_response(decision, &context.session_id, &tool_name, &arguments);
+    if let PermissionDecision::Deny(reason) = &decision {
+        let arguments_json = arguments_to_audit_json(&arguments);
+        append_permission_audit_event(
+            &app_state,
+            &context.session_id,
+            None,
+            project_root.as_deref(),
+            "denied",
+            &tool_name,
+            None,
+            Some(reason),
+            &arguments_json,
+        )
+        .await;
+    }
+    let response = convert_decision_to_response(
+        decision,
+        &context.session_id,
+        &tool_name,
+        &arguments,
+        project_root.as_deref(),
+    );
 
     Ok(response)
 }
@@ -235,33 +393,42 @@ pub async fn permission_approve(
         "Approving permission"
     );
 
-    // 构建 context 用于批准
-    let context = PermissionContext {
-        session_id: request.session_id.clone(),
-        tool_name: request.tool_name.clone(),
-        arguments: request.arguments.clone(),
-        file_paths: None,
-        timestamp: chrono::Utc::now(),
-        project_root: None,
-    };
+    // 构建 context 用于批准。聊天工具审批使用后端保存的原始 context；
+    // renderer 只需要脱敏参数用于展示，避免把 secrets 往返传给前端。
+    let context = waiter_context_for_request(&app_state, request.request_id.as_deref())
+        .await
+        .unwrap_or_else(|| {
+            build_permission_context(
+                &manager,
+                request.session_id.clone(),
+                request.tool_name.clone(),
+                request.arguments.clone(),
+                request.project_root.as_deref(),
+            )
+        });
 
-    // 转换 PermissionModeInput -> PermissionMode
-    let mode = match request.mode {
-        PermissionModeInput::AskEveryTime => {
-            crate::domain::permissions::types::PermissionMode::AskEveryTime
-        }
-        PermissionModeInput::Session => crate::domain::permissions::types::PermissionMode::Session,
-        PermissionModeInput::TimeWindow { minutes } => {
-            crate::domain::permissions::types::PermissionMode::TimeWindow { minutes }
-        }
-        PermissionModeInput::Plan => crate::domain::permissions::types::PermissionMode::Plan,
-        PermissionModeInput::Auto => crate::domain::permissions::types::PermissionMode::Auto,
-    };
+    let mode: crate::domain::permissions::types::PermissionMode = request.mode.clone().into();
+    let mode_label = permission_mode_to_audit_label(&mode);
+    let arguments_json = arguments_to_audit_json(&context.arguments);
+    let context_project_root = context_project_root_label(&context);
 
     manager
-        .approve_request(&request.session_id, mode, &context)
+        .approve_request(&context.session_id, mode, &context)
         .await
         .map_err(crate::errors::AppError::Unknown)?;
+
+    append_permission_audit_event(
+        &app_state,
+        &context.session_id,
+        request.request_id.as_deref(),
+        context_project_root.as_deref(),
+        "approved",
+        &context.tool_name,
+        Some(&mode_label),
+        None,
+        &arguments_json,
+    )
+    .await;
 
     if let Some(rid) = request.request_id.as_ref() {
         let mut map = app_state.chat.permission_tool_waiters.lock().await;
@@ -288,20 +455,39 @@ pub async fn permission_deny(
         "Denying permission"
     );
 
-    // 构建 context 用于拒绝
-    let context = PermissionContext {
-        session_id: request.session_id.clone(),
-        tool_name: request.tool_name.clone(),
-        arguments: request.arguments.clone(),
-        file_paths: None,
-        timestamp: chrono::Utc::now(),
-        project_root: None,
-    };
+    // 构建 context 用于拒绝。聊天工具审批优先使用后端保存的原始 context，
+    // 避免前端持有或回传未脱敏参数。
+    let context = waiter_context_for_request(&app_state, request.request_id.as_deref())
+        .await
+        .unwrap_or_else(|| {
+            build_permission_context(
+                &manager,
+                request.session_id.clone(),
+                request.tool_name.clone(),
+                request.arguments.clone(),
+                request.project_root.as_deref(),
+            )
+        });
 
     manager
         .deny_request(&context, &request.reason)
         .await
         .map_err(crate::errors::AppError::Unknown)?;
+
+    let arguments_json = arguments_to_audit_json(&context.arguments);
+    let context_project_root = context_project_root_label(&context);
+    append_permission_audit_event(
+        &app_state,
+        &context.session_id,
+        request.request_id.as_deref(),
+        context_project_root.as_deref(),
+        "denied",
+        &context.tool_name,
+        None,
+        Some(&request.reason),
+        &arguments_json,
+    )
+    .await;
 
     if let Err(err) = crate::domain::connectors::append_connector_permission_denial_audit_event(
         &context.tool_name,
@@ -380,9 +566,37 @@ pub async fn permission_update_rule(
 #[tauri::command]
 pub async fn permission_get_recent_denials(
     limit: Option<usize>,
+    project_root: Option<String>,
+    app_state: State<'_, OmigaAppState>,
     manager: State<'_, Arc<PermissionManager>>,
 ) -> CommandResult<Vec<DenialRecordDto>> {
     let limit = limit.unwrap_or(50);
+    match app_state
+        .repo
+        .list_recent_permission_denials(limit as i64, project_root.as_deref())
+        .await
+    {
+        Ok(denials) => {
+            let dtos = denials
+                .into_iter()
+                .map(|d| DenialRecordDto {
+                    id: d.id,
+                    timestamp: audit_timestamp(&d.created_at),
+                    tool_name: d.tool_name,
+                    reason: d.reason.unwrap_or_else(|| "denied".to_string()),
+                })
+                .collect();
+            return Ok(dtos);
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "omiga::permissions",
+                error = %err,
+                "failed to load durable permission denials; falling back to in-memory denials"
+            );
+        }
+    }
+
     let denials = manager.get_recent_denials(limit).await;
 
     let dtos: Vec<DenialRecordDto> = denials
@@ -396,6 +610,55 @@ pub async fn permission_get_recent_denials(
         .collect();
 
     Ok(dtos)
+}
+
+/// 获取持久化权限审计事件
+#[tauri::command]
+pub async fn permission_get_audit_events(
+    limit: Option<usize>,
+    project_root: Option<String>,
+    offset: Option<usize>,
+    decision: Option<String>,
+    tool_query: Option<String>,
+    app_state: State<'_, OmigaAppState>,
+) -> CommandResult<PermissionAuditEventsResponse> {
+    let limit = limit.unwrap_or(100);
+    let offset = offset.unwrap_or(0);
+    let page = app_state
+        .repo
+        .list_recent_permission_audit_events_page(
+            limit as i64,
+            offset as i64,
+            project_root.as_deref(),
+            decision.as_deref(),
+            tool_query.as_deref(),
+        )
+        .await
+        .map_err(|err| crate::errors::AppError::Persistence(err.to_string()))?;
+
+    let events = page
+        .events
+        .into_iter()
+        .map(|event| PermissionAuditEventDto {
+            id: event.id,
+            session_id: event.session_id,
+            request_id: event.request_id,
+            project_root: event.project_root,
+            decision: event.decision,
+            tool_name: event.tool_name,
+            mode: event.mode,
+            reason: event.reason,
+            arguments: serde_json::from_str(&event.arguments_json).unwrap_or(Value::Null),
+            timestamp: audit_timestamp(&event.created_at),
+        })
+        .collect();
+
+    Ok(PermissionAuditEventsResponse {
+        events,
+        total_count: page.total_count.max(0) as usize,
+        approved_count: page.facets.approved_count.max(0) as usize,
+        denied_count: page.facets.denied_count.max(0) as usize,
+    })
 }
 
 /// 设置默认模式

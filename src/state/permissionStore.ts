@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import { useSessionStore } from "./sessionStore";
+import { isUnsetWorkspacePath, useSessionStore } from "./sessionStore";
 import { notifyPermissionRequest } from "../utils/notifications";
 
 export type RiskLevel = "safe" | "low" | "medium" | "high" | "critical";
@@ -32,6 +32,7 @@ export interface PermissionCheckResult {
   arguments?: Record<string, unknown>; // 原始参数
   /** 与后端 `check_tool` 一致的会话 id，批准时必须回传 */
   session_id?: string;
+  project_root?: string;
   /** Human-readable description of the operation, e.g. "AI wants to run: rm -rf /tmp/build" */
   plain_description?: string;
 }
@@ -110,11 +111,15 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
   checkPermission: async (sessionId, toolName, args) => {
     set({ checking: true, error: null });
     try {
+      const currentSession = useSessionStore.getState().currentSession;
+      const projectRoot =
+        currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
       const result = await invoke<PermissionCheckResult>("permission_check", {
         request: {
           sessionId,
           toolName,
           arguments: args,
+          projectRoot: isUnsetWorkspacePath(projectRoot) ? null : projectRoot,
         },
       });
 
@@ -156,6 +161,11 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
       pendingRequest.session_id ??
       useSessionStore.getState().currentSession?.id ??
       "default";
+    const projectRoot =
+      pendingRequest.project_root ??
+      useSessionStore.getState().currentSession?.workingDirectory ??
+      useSessionStore.getState().currentSession?.projectPath ??
+      "";
 
     set({ error: null });
     try {
@@ -166,6 +176,7 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
           arguments: pendingRequest.arguments ?? {},
           mode: permissionModeToRustJson(mode),
           requestId: pendingRequest.request_id ?? null,
+          projectRoot: isUnsetWorkspacePath(projectRoot) ? null : projectRoot,
         },
       });
 
@@ -187,6 +198,11 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
       pendingRequest.session_id ??
       useSessionStore.getState().currentSession?.id ??
       "default";
+    const projectRoot =
+      pendingRequest.project_root ??
+      useSessionStore.getState().currentSession?.workingDirectory ??
+      useSessionStore.getState().currentSession?.projectPath ??
+      "";
 
     set({ error: null });
     try {
@@ -197,6 +213,7 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
           arguments: pendingRequest.arguments ?? {},
           reason,
           requestId: pendingRequest.request_id ?? null,
+          projectRoot: isUnsetWorkspacePath(projectRoot) ? null : projectRoot,
         },
       });
 
@@ -252,6 +269,13 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
     try {
       const denials = await invoke<DenialRecord[]>("permission_get_recent_denials", {
         limit: 50,
+        projectRoot: isUnsetWorkspacePath(
+          useSessionStore.getState().currentSession?.workingDirectory ??
+            useSessionStore.getState().currentSession?.projectPath,
+        )
+          ? null
+          : (useSessionStore.getState().currentSession?.workingDirectory ??
+              useSessionStore.getState().currentSession?.projectPath),
       });
       set({ recentDenials: denials });
     } catch (err) {

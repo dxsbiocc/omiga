@@ -316,6 +316,7 @@ Omiga 使用 [MIT License](LICENSE) 发布。
 ## 更多文档
 
 - [`docs/architecture.md`](docs/architecture.md)
+- [`docs/FEATURE_STATUS.md`](docs/FEATURE_STATUS.md)
 - [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md)
 - [`docs/REAL_LLM_VALIDATION.md`](docs/REAL_LLM_VALIDATION.md)
 - [`docs/MOCK_LLM_RUNTIME_VALIDATION.md`](docs/MOCK_LLM_RUNTIME_VALIDATION.md)

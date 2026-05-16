@@ -16,6 +16,7 @@ This directory contains design, validation, and user-facing documentation for Om
 | Document | Purpose |
 | --- | --- |
 | [`architecture.md`](architecture.md) | System architecture and major runtime boundaries. |
+| [`FEATURE_STATUS.md`](FEATURE_STATUS.md) | Release-facing status table for public feature claims. |
 | [`SECURITY_MODEL.md`](SECURITY_MODEL.md) | Security model, trust boundaries, and permission considerations. |
 | [`REAL_LLM_VALIDATION.md`](REAL_LLM_VALIDATION.md) | Manual validation path for real provider-backed runs. |
 | [`MOCK_LLM_RUNTIME_VALIDATION.md`](MOCK_LLM_RUNTIME_VALIDATION.md) | Deterministic mock LLM validation path. |

@@ -852,6 +852,21 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
 
             match perm_decision {
                 crate::domain::permissions::PermissionDecision::Deny(ref reason) => {
+                    let project_root_label = project_root.to_string_lossy().to_string();
+                    let arguments_json =
+                        serde_json::to_string(&args_value).unwrap_or_else(|_| "{}".to_string());
+                    crate::commands::permissions::append_permission_audit_event(
+                        &app_state,
+                        session_id,
+                        None,
+                        Some(&project_root_label),
+                        "denied",
+                        tool_name,
+                        None,
+                        Some(reason),
+                        &arguments_json,
+                    )
+                    .await;
                     tracing::warn!(
                         tool = %tool_name,
                         reason = %reason,

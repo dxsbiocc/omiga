@@ -45,6 +45,7 @@ pub struct PermissionToolWaiter {
     pub tx: oneshot::Sender<Result<(), String>>,
     pub session_id: String,
     pub message_id: String,
+    pub context: crate::domain::permissions::PermissionContext,
 }
 
 /// Active chat state with optimized in-memory caching.

@@ -200,6 +200,7 @@ pub fn run() {
             commands::permissions::permission_add_rule,
             commands::permissions::permission_delete_rule,
             commands::permissions::permission_get_recent_denials,
+            commands::permissions::permission_get_audit_events,
             commands::permissions::permission_update_rule,
             commands::permissions::permission_set_default_mode,
             commands::permissions::permission_get_approval_status,
