@@ -276,6 +276,7 @@ pub fn run() {
             commands::integrations_settings::poll_mcp_oauth_login,
             commands::integrations_settings::logout_mcp_oauth_server,
             commands::integrations_settings::save_integrations_state,
+            commands::external_integrations::get_external_integrations_catalog,
             commands::connectors::list_omiga_connectors,
             commands::connectors::list_omiga_connector_audit_events,
             commands::connectors::set_omiga_connector_enabled,

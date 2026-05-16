@@ -44,6 +44,7 @@ import { useSessionStore } from "../../state/sessionStore";
 import { useColorModeStore } from "../../state/themeStore";
 import { PermissionSettingsTab } from "./PermissionSettingsTab";
 import { ClaudeCodeImportPanel } from "./ClaudeCodeImportPanel";
+import { ExternalIntegrationsPanel } from "./ExternalIntegrationsPanel";
 import { IntegrationsCatalogPanel } from "./IntegrationsCatalogPanel";
 import { UnifiedMemoryTab } from "./UnifiedMemoryTab";
 import { ProfileSettingsTab } from "./ProfileSettingsTab";
@@ -52,7 +53,6 @@ import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
 import { PluginsPanel } from "./PluginsPanel";
-import { ConnectorsPanel } from "./ConnectorsPanel";
 import { CronJobsPanel } from "./CronJobsPanel";
 import {
   DEFAULT_WEB_SEARCH_METHODS,
@@ -105,7 +105,7 @@ const SETTINGS_SECTIONS: {
     header: "Integrations",
     items: [
       { index: 4, label: "Plugins" },
-      { index: 14, label: "Connectors" },
+      { index: 14, label: "External" },
       { index: 5, label: "MCP" },
       { index: 6, label: "Skills" },
       { index: 9, label: "Execution" },
@@ -3493,30 +3493,17 @@ export function Settings({
             )}
 
             {activeTab === 14 && (
-              <ConnectorsPanel projectPath={projectPath} />
+              <ExternalIntegrationsPanel
+                projectPath={projectPath}
+                initialView="connectors"
+              />
             )}
 
             {activeTab === 5 && (
-              <Box>
-                <IntegrationsCatalogPanel
-                  projectPath={projectPath}
-                  mode="mcp"
-                />
-                <Box sx={{ mt: 3 }}>
-                  <Typography variant="subtitle1" fontWeight={650}>
-                    导入已有 MCP JSON
-                  </Typography>
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ mt: 0.5 }}
-                  >
-                    如果已经有符合 mcpServers 格式的 JSON 文件，可以合并到当前项目
-                    .omiga/mcp.json。
-                  </Typography>
-                  <ClaudeCodeImportPanel projectPath={projectPath} mode="mcp" />
-                </Box>
-              </Box>
+              <ExternalIntegrationsPanel
+                projectPath={projectPath}
+                initialView="mcp"
+              />
             )}
 
             {activeTab === 6 && (

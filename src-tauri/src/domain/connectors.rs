@@ -2130,7 +2130,7 @@ fn connector_metadata_matches(connector: &ConnectorInfo, value: &str) -> bool {
         || (name_key.len() >= 4 && candidate.contains(&name_key))
 }
 
-fn mcp_tool_meta_string(tool: &McpTool, keys: &[&str]) -> Option<String> {
+pub(crate) fn mcp_tool_meta_string(tool: &McpTool, keys: &[&str]) -> Option<String> {
     let meta = tool.meta.as_ref()?;
     keys.iter().find_map(|key| {
         meta.0

@@ -18,6 +18,7 @@ pub mod context_snapshot;
 pub mod execution_envs;
 pub mod execution_records;
 pub mod extensions;
+pub mod external_integrations;
 pub mod fs;
 pub mod git_workspace;
 pub mod integrations_settings;
