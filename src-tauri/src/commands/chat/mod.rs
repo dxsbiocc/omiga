@@ -763,6 +763,7 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
         client,
         final_reply: &final_response,
         skip_summary: preflight_skip_turn_summary,
+        user_request: user_message,
         suggestions_reply: &final_response,
         repo: repo.clone(),
     })
@@ -1510,7 +1511,8 @@ pub async fn send_message(
                             local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
                             local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
                             env_store: crate::domain::tools::env_store::EnvStore::new(),
-                            artifact_registry: crate::domain::session::artifacts::ArtifactRegistry::default(),
+                            artifact_registry:
+                                crate::domain::session::artifacts::ArtifactRegistry::default(),
                         },
                     );
                 }
@@ -3933,6 +3935,7 @@ pub async fn send_message(
                 client: client.as_ref(),
                 final_reply: &final_reply_for_follow_up,
                 skip_summary: preflight_skip_turn_summary,
+                user_request: &request_text_for_constraints,
                 suggestions_reply: &final_reply_for_follow_up,
                 repo: repo_clone.clone(),
             })
@@ -3954,9 +3957,9 @@ pub async fn send_message(
                 let agent_tasks = sessions
                     .get(&session_id_clone)
                     .map(|r| r.agent_tasks.clone());
-                let artifact_registry = sessions.get(&session_id_clone).map(|r| {
-                    std::sync::Arc::new(r.artifact_registry.clone())
-                });
+                let artifact_registry = sessions
+                    .get(&session_id_clone)
+                    .map(|r| std::sync::Arc::new(r.artifact_registry.clone()));
                 (project_root, todos, agent_tasks, artifact_registry)
             };
 
@@ -4159,6 +4162,7 @@ pub async fn send_message(
                         client: client.as_ref(),
                         final_reply: &stop_text,
                         skip_summary: preflight_skip_turn_summary,
+                        user_request: &request_text_for_constraints,
                         suggestions_reply: &stop_text,
                         repo: repo_clone.clone(),
                     })
@@ -4825,6 +4829,7 @@ pub async fn send_message(
                     client: client.as_ref(),
                     final_reply: &final_reply_for_follow_up,
                     skip_summary: preflight_skip_turn_summary,
+                    user_request: &request_text_for_constraints,
                     suggestions_reply: &final_reply_for_follow_up,
                     repo: repo_clone.clone(),
                 })
@@ -4914,6 +4919,7 @@ pub async fn send_message(
             client: client.as_ref(),
             final_reply: &final_reply_for_follow_up,
             skip_summary: preflight_skip_turn_summary,
+            user_request: &request_text_for_constraints,
             suggestions_reply: &final_reply_for_follow_up,
             repo: repo_clone.clone(),
         })

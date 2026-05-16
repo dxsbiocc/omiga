@@ -635,6 +635,7 @@ async fn maybe_archive_session_summary(
 /// After the visible assistant reply is finalized: optional recap (independent LLM), then follow-up chips (independent LLM), then [`StreamOutputItem::Complete`].
 ///
 /// - `skip_summary`：跳过摘要 LLM 调用（preflight 判定为无需摘要，或本轮已通过 SendUserMessage 直接交付内容）。
+/// - `user_request`：用户本轮原始请求，供 follow-up 模型区分“完成但仍值得继续探索”的实质性回复。
 /// - `suggestions_reply`：生成 follow-up suggestions 所用的文本；当本轮使用了 SendUserMessage 时传其 message 内容，
 ///   而非 LLM 的空壳收尾文本；其余情况与 `final_reply` 相同。
 pub(super) struct PostTurnCompletionRequest<'a> {
@@ -645,6 +646,7 @@ pub(super) struct PostTurnCompletionRequest<'a> {
     pub client: &'a dyn LlmClient,
     pub final_reply: &'a str,
     pub skip_summary: bool,
+    pub user_request: &'a str,
     pub suggestions_reply: &'a str,
     pub repo: Arc<crate::domain::persistence::SessionRepository>,
 }
@@ -686,6 +688,7 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
     let stream_id = request.stream_message_id.to_string();
     let assistant_id = request.assistant_message_id.to_string();
     let final_reply_bg = request.final_reply.to_string();
+    let user_request_bg = request.user_request.to_string();
     let suggestions_text = request.suggestions_reply.to_string();
     let repo = request.repo.clone();
     let client_config = request.client.config().clone();
@@ -843,6 +846,7 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
                 }
                 let follow_res = crate::domain::suggestions::generate_follow_up_suggestions(
                     bg_client.as_ref(),
+                    Some(&user_request_bg),
                     &suggestions_text,
                     follow_enabled,
                 )

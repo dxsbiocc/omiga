@@ -1349,6 +1349,7 @@ pub(crate) async fn inject_schedule_summary_message(
 
                     match crate::domain::suggestions::generate_follow_up_suggestions(
                         client.as_ref(),
+                        Some(user_request),
                         &summary,
                         follow_enabled,
                     )
