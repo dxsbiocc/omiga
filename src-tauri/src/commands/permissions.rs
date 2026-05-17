@@ -1,9 +1,11 @@
 use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
-use crate::domain::permissions::manager::PermissionManager;
 use crate::domain::permissions::types::{
     DetectedRisk, PermissionContext, PermissionDecision, PermissionModeInput, PermissionRule,
     RiskLevel,
+};
+use crate::domain::permissions::{
+    manager::PermissionManager, read_omiga_permissions_file, write_omiga_permissions_file,
 };
 use crate::domain::persistence::NewPermissionAuditEventRecord;
 use chrono::{DateTime, Utc};
@@ -129,6 +131,16 @@ pub struct AddRuleRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateRuleRequest {
     pub rule: PermissionRule,
+}
+
+fn project_root_path(project_root: &str) -> CommandResult<PathBuf> {
+    let trimmed = project_root.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return Err(crate::errors::AppError::Unknown(
+            "projectRoot is required".to_string(),
+        ));
+    }
+    Ok(PathBuf::from(trimmed))
 }
 
 // === 转换函数 ===
@@ -559,6 +571,31 @@ pub async fn permission_update_rule(
         .update_rule(request.rule)
         .await
         .map_err(crate::errors::AppError::Unknown)?;
+    Ok(())
+}
+
+/// Read the Omiga-managed project denylist edited by Settings.
+#[tauri::command]
+pub async fn get_omiga_permission_denies(project_root: String) -> CommandResult<Vec<String>> {
+    let project_root = project_root_path(&project_root)?;
+    Ok(read_omiga_permissions_file(&project_root))
+}
+
+/// Save the Omiga-managed project denylist edited by Settings.
+#[tauri::command]
+pub async fn save_omiga_permission_denies(
+    project_root: String,
+    deny: Vec<String>,
+    app_state: State<'_, OmigaAppState>,
+) -> CommandResult<()> {
+    let project_root = project_root_path(&project_root)?;
+    write_omiga_permissions_file(&project_root, &deny).map_err(crate::errors::AppError::Unknown)?;
+    app_state
+        .chat
+        .permission_deny_cache
+        .lock()
+        .await
+        .remove(&project_root);
     Ok(())
 }
 
