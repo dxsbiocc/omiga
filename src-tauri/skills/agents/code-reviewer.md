@@ -1,3 +1,4 @@
+<!-- reviewed: 2026-05-16 -->
 ---
 name: code-reviewer
 description: Expert code review for quality, security, and maintainability. Read-only — never edits files.

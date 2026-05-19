@@ -445,14 +445,6 @@ fn api_messages_to_llm(messages: &[crate::api::Message]) -> Vec<LlmMessage> {
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => LlmContent::Text { text: text.clone() },
-                    ContentBlock::Image {
-                        source: crate::api::ImageSource::Base64 { media_type, data },
-                    } => LlmContent::Image {
-                        source: crate::llm::ImageSource::Base64 {
-                            media_type: media_type.clone(),
-                            data: data.clone(),
-                        },
-                    },
                     ContentBlock::ToolUse { id, name, input } => {
                         let (name, arguments) = normalize_llm_tool_history_for_model(name, input);
                         LlmContent::ToolUse {
@@ -614,7 +606,6 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
                 content: assistant_text,
                 tool_calls: tool_calls_json.as_deref(),
                 tool_call_id: None,
-                tool_is_error: None,
                 token_usage_json: None,
                 reasoning_content: reasoning_save,
                 follow_up_suggestions_json: None,
@@ -639,14 +630,13 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             }
         }
 
-        let blocked_batch: Vec<(String, String, Option<String>, bool)> = tool_calls
+        let blocked_batch: Vec<(String, String, Option<String>)> = tool_calls
             .iter()
             .map(|(id, _name, _arguments)| {
                 (
                     id.clone(),
                     block.tool_result_message.to_string(),
                     None,
-                    true,
                 )
             })
             .collect();
@@ -664,10 +654,9 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             let mut sessions_guard = sessions.write().await;
             if let Some(runtime) = sessions_guard.get_mut(session_id) {
                 for (tool_use_id, tool_name, arguments) in tool_calls {
-                    runtime.session.add_tool_result_with_error(
+                    runtime.session.add_tool_result(
                         tool_use_id.clone(),
                         block.tool_result_message.to_string(),
-                        Some(true),
                     );
                     let _ = app.emit(
                         &format!("chat-stream-{}", message_id),
@@ -721,7 +710,6 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
                     content: &block.assistant_response,
                     tool_calls: ask_tool_calls_json.as_deref(),
                     tool_call_id: None,
-                    tool_is_error: None,
                     token_usage_json: None,
                     reasoning_content: None,
                     follow_up_suggestions_json: None,
@@ -762,7 +750,7 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             if let Err(e) = repo
                 .save_tool_results_batch(
                     session_id,
-                    &[(returned_tool_id.clone(), output.clone(), None, is_error)],
+                    &[(returned_tool_id.clone(), output.clone(), None)],
                 )
                 .await
             {
@@ -771,10 +759,9 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             {
                 let mut sessions_guard = sessions.write().await;
                 if let Some(runtime) = sessions_guard.get_mut(session_id) {
-                    runtime.session.add_tool_result_with_error(
+                    runtime.session.add_tool_result(
                         returned_tool_id,
                         output,
-                        Some(is_error),
                     );
                 }
             }
@@ -793,7 +780,6 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
                             content: post_answer_response,
                             tool_calls: None,
                             tool_call_id: None,
-                            tool_is_error: None,
                             token_usage_json: None,
                             reasoning_content: None,
                             follow_up_suggestions_json: None,
@@ -836,7 +822,6 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
                 content: &block.assistant_response,
                 tool_calls: None,
                 tool_call_id: None,
-                tool_is_error: None,
                 token_usage_json: None,
                 reasoning_content: None,
                 follow_up_suggestions_json: None,
@@ -1594,7 +1579,6 @@ pub async fn send_message(
                     content: &request.content,
                     tool_calls: None,
                     tool_call_id: None,
-                    tool_is_error: None,
                     token_usage_json: None,
                     reasoning_content: None,
                     follow_up_suggestions_json: None,
@@ -1692,7 +1676,6 @@ pub async fn send_message(
             content: &request.content,
             tool_calls: None,
             tool_call_id: None,
-            tool_is_error: None,
             token_usage_json: None,
             reasoning_content: None,
             follow_up_suggestions_json: None,
@@ -3327,14 +3310,6 @@ pub async fn send_message(
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => LlmContent::Text { text: text.clone() },
-                    ContentBlock::Image {
-                        source: crate::api::ImageSource::Base64 { media_type, data },
-                    } => LlmContent::Image {
-                        source: crate::llm::ImageSource::Base64 {
-                            media_type: media_type.clone(),
-                            data: data.clone(),
-                        },
-                    },
                     ContentBlock::ToolUse { id, name, input } => {
                         let (name, arguments) = normalize_llm_tool_history_for_model(name, input);
                         LlmContent::ToolUse {
@@ -3360,7 +3335,7 @@ pub async fn send_message(
         })
         .collect();
     let request_image_attachments =
-        load_request_image_attachments(&project_root, &request.composer_attached_paths).await;
+        load_request_image_attachments(&project_root, &[]).await;
     append_image_attachments_to_latest_user_message(&mut llm_messages, &request_image_attachments);
 
     // Start streaming in background
@@ -3832,7 +3807,6 @@ pub async fn send_message(
                     content: &assistant_text,
                     tool_calls: tool_calls_json.as_deref(),
                     tool_call_id: None,
-                    tool_is_error: None,
                     token_usage_json: None,
                     reasoning_content: reasoning_save,
                     follow_up_suggestions_json: None,
@@ -3954,7 +3928,6 @@ pub async fn send_message(
                                 content: &retry_text,
                                 tool_calls: None,
                                 tool_call_id: None,
-                                tool_is_error: None,
                                 token_usage_json: None,
                                 reasoning_content: retry_reasoning_save,
                                 follow_up_suggestions_json: None,
@@ -4175,9 +4148,9 @@ pub async fn send_message(
             {
                 let repo = &*repo_clone;
                 // Write all tool results in a single transaction (one fsync instead of N).
-                let batch: Vec<(String, String, Option<String>, bool)> = tool_results
+                let batch: Vec<(String, String, Option<String>)> = tool_results
                     .iter()
-                    .map(|(id, out, is_error)| (id.clone(), out.clone(), None, *is_error))
+                    .map(|(id, out, _is_error)| (id.clone(), out.clone(), None))
                     .collect();
                 if let Err(e) = repo
                     .save_tool_results_batch(&session_id_clone, &batch)
@@ -4190,11 +4163,10 @@ pub async fn send_message(
             {
                 let mut sessions = sessions_clone.write().await;
                 if let Some(runtime) = sessions.get_mut(&session_id_clone) {
-                    for (tool_use_id, output, is_error) in &tool_results {
-                        runtime.session.add_tool_result_with_error(
+                    for (tool_use_id, output, _is_error) in &tool_results {
+                        runtime.session.add_tool_result(
                             tool_use_id,
                             output,
-                            Some(*is_error),
                         );
                     }
                 }
@@ -4258,7 +4230,6 @@ pub async fn send_message(
                             content: &stop_text,
                             tool_calls: None,
                             tool_call_id: None,
-                            tool_is_error: None,
                             token_usage_json: None,
                             reasoning_content: reasoning_save,
                             follow_up_suggestions_json: None,
@@ -4771,7 +4742,6 @@ pub async fn send_message(
                         content: &next_text,
                         tool_calls: next_tc_json.as_deref(),
                         tool_call_id: None,
-                        tool_is_error: None,
                         token_usage_json: None,
                         reasoning_content: next_reasoning_save,
                         follow_up_suggestions_json: None,
@@ -4859,7 +4829,6 @@ pub async fn send_message(
                                     content: &retry_text,
                                     tool_calls: None,
                                     tool_call_id: None,
-                                    tool_is_error: None,
                                     token_usage_json: None,
                                     reasoning_content: retry_reasoning_save,
                                     follow_up_suggestions_json: None,
