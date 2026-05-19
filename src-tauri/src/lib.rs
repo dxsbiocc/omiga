@@ -205,6 +205,8 @@ pub fn run() {
             commands::permissions::permission_set_default_mode,
             commands::permissions::permission_get_approval_status,
             commands::permissions::permission_clear_session_approvals,
+            commands::permissions::get_omiga_permission_denies,
+            commands::permissions::save_omiga_permission_denies,
             app_state::get_app_state_snapshot,
             commands::tools::execute_tool,
             commands::session::list_sessions,

@@ -477,3 +477,57 @@ pub fn validate_permission_deny_entries(entries: &[DenyRuleEntry]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        load_merged_permission_deny_rules, read_omiga_permissions_file,
+        write_omiga_permissions_file,
+    };
+
+    fn workspace_tempdir() -> tempfile::TempDir {
+        let base = std::env::current_dir()
+            .expect("current dir")
+            .join("target")
+            .join("permission-tool-rules-tests");
+        std::fs::create_dir_all(&base).expect("create temp base");
+        tempfile::Builder::new()
+            .prefix("project-")
+            .tempdir_in(base)
+            .expect("temp project")
+    }
+
+    #[test]
+    fn omiga_permissions_file_round_trips_clean_deny_rules() {
+        let project = workspace_tempdir();
+        write_omiga_permissions_file(
+            project.path(),
+            &[
+                " Bash ".to_string(),
+                "".to_string(),
+                "mcp__user-Figma".to_string(),
+                "  ".to_string(),
+            ],
+        )
+        .expect("write omiga permissions");
+
+        assert_eq!(
+            read_omiga_permissions_file(project.path()),
+            vec!["Bash", "mcp__user-Figma"]
+        );
+    }
+
+    #[test]
+    fn omiga_permissions_file_participates_in_merged_deny_rules() {
+        let project = workspace_tempdir();
+        write_omiga_permissions_file(
+            project.path(),
+            &["Read".to_string(), "Bash(rm:*)".to_string()],
+        )
+        .expect("write omiga permissions");
+
+        let rules = load_merged_permission_deny_rules(project.path());
+        assert!(rules.contains(&"Read".to_string()));
+        assert!(rules.contains(&"Bash(rm:*)".to_string()));
+    }
+}
