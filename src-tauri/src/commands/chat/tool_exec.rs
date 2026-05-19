@@ -560,6 +560,57 @@ pub(super) async fn execute_tool_calls(
             }
         }
 
+        // --- Forced verification gate ---
+        // When todo_write marks ≥3 tasks completed and no verification agent ran
+        // this turn, inject a prompt requiring an independent verification Agent.
+        //
+        // Detection uses an exact sentinel string emitted by the verification agent's
+        // skill file, not a broad substring, to avoid false-positive suppression from
+        // arbitrary tool output that happens to contain "verif…".
+        const VERIFICATION_SENTINEL: &str = "[VERIFICATION-AGENT-RAN]";
+        if tool_name.eq_ignore_ascii_case("todo_write") && !res.2 {
+            if let Ok(args_val) = serde_json::from_str::<serde_json::Value>(arguments) {
+                let todos_raw = args_val.get("todos");
+
+                // Warn when the key exists but is not an array — silently swallowing
+                // malformed input would hide logic errors.
+                if todos_raw.is_some() && todos_raw.and_then(|v| v.as_array()).is_none() {
+                    tracing::warn!(
+                        target: "omiga::verification_gate",
+                        "todo_write `todos` key exists but is not an array — skipping gate"
+                    );
+                }
+
+                let todos = todos_raw
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let completed_count = todos.iter().filter(|t| {
+                    t.get("status").and_then(|s| s.as_str()) == Some("completed")
+                }).count();
+                let all_completed = completed_count == todos.len() && completed_count >= 3;
+
+                // Check whether a verification agent already ran this turn by looking
+                // for the exact sentinel token, not a broad substring.
+                let verification_ran = ordered_results.iter().flatten().any(|(_, out, _)| {
+                    out.contains(VERIFICATION_SENTINEL)
+                });
+
+                if all_completed && !verification_ran {
+                    res.1.push_str(
+                        "\n\n[System: All tasks marked completed. Before writing your final \
+                         summary, spawn an independent verification agent:\n\
+                         Agent({ subagent_type: \"verification\",\n\
+                         prompt: \"Verify all claimed completed tasks. For each task, confirm \
+                         the change exists at the expected file:line and passes a sanity check. \
+                         Issue PASS/PARTIAL/FAIL verdict with evidence. \
+                         Begin your response with the token [VERIFICATION-AGENT-RAN].\" })\n\
+                         Self-verification is not accepted — only the verifier's verdict counts.]",
+                    );
+                }
+            }
+        }
+
         ordered_results[idx] = Some(res);
     }
 

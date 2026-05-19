@@ -11,6 +11,7 @@ pub mod definition;
 pub mod hot_reload;
 pub mod integration;
 /// 内置 `SOUL.md` / `MEMORY.md` / `USER.md` 等模板（`include_str!`）。
+pub mod intent_classifier;
 pub mod markdown;
 pub mod model_router;
 pub mod output_formatter;

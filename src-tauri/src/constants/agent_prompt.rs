@@ -48,7 +48,31 @@ fn section_using_tools() -> String {
 
 - **Never** run multi-line logic through one-off shell invocations (`python -c`, heredocs, long `Rscript -e` strings, or pasting multi-line code into `bash`). Always write the code to a script file first, then execute the file. This applies to all code — not just data processing.
 - **Python**: Prefer a Jupyter notebook (`.ipynb`). Use `notebook_edit` to add or update cells incrementally (one logical step per cell when practical). If a notebook is not a good fit, use a `.py` script with `file_write` / `file_edit` instead of ephemeral shell-only code.
-- **R**: Prefer R Markdown (`.Rmd`) when the work benefits from narrative plus code (reports, reproducible analysis). Use `file_write` / `file_edit` on the `.Rmd`. If a literate document is not appropriate, use a plain `.R` script file. Avoid large analysis living only in one-line `Rscript -e` shell calls."#.to_string()
+- **R**: Prefer R Markdown (`.Rmd`) when the work benefits from narrative plus code (reports, reproducible analysis). Use `file_write` / `file_edit` on the `.Rmd`. If a literate document is not appropriate, use a plain `.R` script file. Avoid large analysis living only in one-line `Rscript -e` shell calls.
+
+### Agent subagent_type routing (BLOCKING — check before every Agent call)
+
+Before spawning an `Agent`, match the task to the table. If a row matches, use that `subagent_type`. Do NOT handle the task inline when a specialist agent exists.
+
+| Task pattern | subagent_type | Model tier |
+|---|---|---|
+| Code review, PR review, diff review | `code-reviewer` | standard |
+| Bug, error, crash, "why broken", stack trace | `debugger` | standard |
+| Security audit, vulnerability, injection, secrets | `security-reviewer` | frontier |
+| Architecture, system design, tradeoffs | `architect` | frontier |
+| Write tests, TDD, coverage | `test-engineer` | standard |
+| Performance, profiling, N+1, slow query | `performance-reviewer` | standard |
+| Research, papers, literature, web survey | `deep-research` | frontier |
+| Data analysis, statistics, Python/R scripts | `data-analysis` | standard |
+| Charts, plots, scientific figures | `data-visual` | standard |
+| Quick file/symbol lookup, "where is X" | `explore` | spark (Haiku) |
+| Plan before implementation | `plan` | standard |
+| Verify completed work, QA | `verification` | standard |
+| General / multi-domain / unclear | *(omit — defaults to general-purpose)* | standard |
+
+**Parallel dispatch rule**: when you need multiple independent assessments (e.g. security + performance + code quality), spawn ALL of them in ONE response as parallel `Agent` calls. Sequential spawning of independent agents is a hard anti-pattern.
+
+**Briefing rule**: each `Agent` call starts with zero context. Write the prompt as if briefing a smart colleague who just walked in — include file paths, what you've already tried, and what specifically to assess."#.to_string()
 }
 
 /// Mirrors Claude Code plan-mode behavior (`getPlanModeV2Instructions`, `EnterPlanModeTool` / `ExitPlanModeTool` prompts in the main TypeScript repo).
