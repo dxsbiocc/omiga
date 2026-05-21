@@ -29,7 +29,11 @@ Safety features:
 - Content hash conflict detection (prevents overwriting changes)
 - Atomic writes (no partial writes on crash)
 - Diff preview for conflict resolution
-- Creates parent directories automatically"#;
+- Creates parent directories automatically
+
+Workspace hygiene:
+- Write generated code, notebooks, scripts, logs, temporary files, figures, and result tables under the primary session working directory by default.
+- Treat user-provided data/input folders as read-only unless the user explicitly asks you to modify them."#;
 
 /// Arguments for FileWrite tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,7 +292,7 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file (relative to project root or absolute)"
+                    "description": "Path to the file (relative to the primary session working directory/project root or absolute). Do not write generated scripts, notebooks, logs, figures, temp files, or result tables inside user-provided data/input folders unless explicitly requested."
                 },
                 "content": {
                     "type": "string",

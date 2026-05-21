@@ -50,7 +50,7 @@ async fn run_subagent_session(
         );
     }
     
-    let effective_root = resolve_agent_cwd(project_root, args.cwd.as_deref());
+    let focus_path = resolve_agent_focus_path(project_root, args.cwd.as_deref());
     let subagent_skill_task_context = format!("{} {}", args.description.trim(), args.prompt.trim());
     
     // ===== 修改：使用 Agent 配置的模型 =====
@@ -58,16 +58,20 @@ async fn run_subagent_session(
     sub_cfg.model = agent_config.model;
     
     // Fast existence check for subagent
-    let skills_exist = skills::skills_any_exist(&effective_root, &skill_cache).await;
+    let skills_exist = skills::skills_any_exist(project_root, &skill_cache).await;
     
     // ===== 修改：构建系统提示词 =====
     let mut prompt_parts: Vec<String> = Vec::new();
     
     // 基础系统提示词（来自 constants/agent_prompt.rs）
     prompt_parts.push(agent_prompt::build_system_prompt(
-        &effective_root,
+        project_root,
         &sub_cfg.model,
     ));
+
+    if let Some(note) = subagent_focus_path_note(project_root, &focus_path) {
+        prompt_parts.push(note);
+    }
     
     // Agent 特定的系统提示词
     prompt_parts.push(agent_config.system_prompt);
@@ -87,7 +91,7 @@ async fn run_subagent_session(
     };
     
     let mut tools = build_subagent_tool_schemas(
-        &effective_root,
+        project_root,
         skills_exist,
         subagent_opts,
     )
@@ -154,7 +158,7 @@ async fn run_subagent_session(
             message_id,
             session_id,
             tool_results_dir,
-            &effective_root,
+            project_root,
             session_todos.clone(),
             session_agent_tasks.clone(),
             Some(runtime),

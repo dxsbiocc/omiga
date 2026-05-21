@@ -42,6 +42,7 @@ Defaults (same as upstream Claude Code bash / `src/tools/BashTool`):
 - **`run_in_background`**: when true, the command runs in a **detached** task (like `spawnShellTask`); the tool returns immediately with a task id and output file path. Completion is emitted as Tauri event `background-shell-complete`.
 - **`dangerously_disable_sandbox`**: ignored (no sandbox layer in Omiga); kept for API compatibility.
 - `cwd` is optional: omit to use the session working directory (usually the project root), or set a path relative to the project root, or an absolute path / `~/...`.
+- Workspace hygiene: when inspecting a user-provided data/input directory, treat that directory as read-only by default. For commands that create scripts, notebooks, logs, temporary files, figures, or result tables, run from the session working directory and pass input data paths explicitly unless the user asked to write inside the input directory.
 
 Safety: fork bombs, writing raw disk devices, and `rm -rf /` (root filesystem) patterns are blocked. Leading `sleep N` (N ≥ 2) is blocked unless you use sub-second sleep for pacing — use normal execution instead of polling with sleep. Output is truncated if it exceeds a large byte limit."#;
 
@@ -1120,7 +1121,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Working directory: omit for session cwd, or project-relative / absolute / ~/ path"
+                    "description": "Working directory: omit for session cwd, or project-relative / absolute / ~/ path. For commands that create scripts, notebooks, logs, figures, result tables, or temp files, use the session cwd and pass data/input paths explicitly unless the user asked to write inside that input directory."
                 },
                 "timeout": {
                     "type": "integer",

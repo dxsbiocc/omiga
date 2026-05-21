@@ -19,7 +19,8 @@ pub const DESCRIPTION: &str = r#"Performs exact string replacements in a file.
 Use when you need to modify part of a file without rewriting the whole file.
 - `old_string` must match the file contents exactly (including whitespace).
 - If `old_string` is not unique and `replace_all` is false, the edit fails — include more context in `old_string` or set `replace_all` to true.
-- Prefer this over full-file writes when changing a small region."#;
+- Prefer this over full-file writes when changing a small region.
+- Treat user-provided data/input folders as read-only unless the user explicitly asks you to modify them. Keep generated code, notebooks, scripts, logs, temporary files, figures, and result tables under the primary session working directory."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEditArgs {

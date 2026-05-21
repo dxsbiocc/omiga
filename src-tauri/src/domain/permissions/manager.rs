@@ -121,9 +121,12 @@ impl PermissionManager {
         match stance {
             Some(ComposerPermissionStance::Auto) => self.composer_auto_fallback(context, &risk),
             Some(ComposerPermissionStance::Bypass) => self.composer_bypass_fallback(),
-            Some(ComposerPermissionStance::Ask) | None => {
-                self.default_decision(context, &risk).await
+            // Ask 模式：用户明确要求每次询问，工作区智能放行不应绕过该意图
+            Some(ComposerPermissionStance::Ask) => {
+                self.default_decision(context, &risk, false).await
             }
+            // 无明确立场时使用默认分级（允许工作区智能放行）
+            None => self.default_decision(context, &risk, true).await,
         }
     }
 
@@ -998,7 +1001,8 @@ impl PermissionManager {
         };
 
         if !is_valid {
-            return self.default_decision(context, risk).await;
+            // 规则已过期 → 回落到默认决定；规则过期时允许工作区智能放行
+            return self.default_decision(context, risk, true).await;
         }
 
         let tool_key = Self::approval_cache_key_for_context(context);
@@ -1087,14 +1091,18 @@ impl PermissionManager {
     }
 
     /// 默认决定（无规则匹配时）
+    ///
+    /// `allow_workspace_bypass`：是否允许工作区智能放行。
+    /// - `true`（无明确立场）：工作区内非破坏性写操作自动放行
+    /// - `false`（用户设置了 Ask 模式）：尊重用户意图，跳过工作区放行逻辑，回落到风险等级判断
     async fn default_decision(
         &self,
         context: &PermissionContext,
         risk: &RiskAssessment,
+        allow_workspace_bypass: bool,
     ) -> PermissionDecision {
-        // 工作区智能放行：在已配置项目根目录内的非破坏性写操作自动批准，
-        // 无需每次弹窗——这是最常见的 AI 编码场景。
-        if self.is_workspace_safe(context) {
+        // 工作区智能放行：仅在用户未明确要求"每次询问"时启用
+        if allow_workspace_bypass && self.is_workspace_safe(context) {
             return PermissionDecision::Allow;
         }
 
@@ -2766,6 +2774,36 @@ mod tests {
         assert!(
             matches!(dec, PermissionDecision::RequireApproval(_)),
             "未配置工作区时 file_write 必须弹窗，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ask_stance_overrides_workspace_safe_bypass() {
+        // ComposerPermissionStance::Ask 时，即使路径在工作区内也必须弹窗
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().to_path_buf();
+        let file_path = project_root.join("src/lib.rs");
+
+        let mgr = PermissionManager::new();
+        let session_id = "s_ask_stance";
+
+        // 设置 Ask 立场（raw string "ask" → ComposerPermissionStance::Ask）
+        mgr.set_session_composer_stance(session_id, Some("ask")).await;
+
+        let ctx = PermissionContext {
+            tool_name: "file_write".to_string(),
+            arguments: serde_json::json!({"path": file_path.to_str().unwrap()}),
+            session_id: session_id.to_string(),
+            file_paths: Some(vec![file_path.clone()]),
+            timestamp: chrono::Utc::now(),
+            project_root: Some(project_root.clone()),
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::RequireApproval(_)),
+            "Ask 模式下工作区内写操作也必须弹窗，实际: {:?}",
             dec
         );
     }
