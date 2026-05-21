@@ -556,3 +556,150 @@ pub fn schema() -> ToolSchema {
         }),
     )
 }
+
+// ─── Shared kernelspec utility (used by file_write interception) ──────────────
+
+/// 判断 notebook JSON 中的 kernelspec 是否是通用默认值（python3 / python / 缺失），
+/// 即 AI 没有显式选择特定 kernel。
+fn kernelspec_is_generic(nb: &Value) -> bool {
+    let name = nb
+        .get("metadata")
+        .and_then(|m| m.get("kernelspec"))
+        .and_then(|ks| ks.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("python3"); // 缺失时视为默认
+    matches!(name, "python3" | "python" | "")
+}
+
+/// 构造 venv 对应的 kernelspec JSON 对象。
+fn venv_kernelspec(venv_type: &str, venv_name: &str) -> Option<serde_json::Map<String, Value>> {
+    let name = venv_name.trim();
+    if name.is_empty() || venv_type == "none" || venv_type.is_empty() {
+        return None;
+    }
+    let (kernel_name, display_name) = match venv_type {
+        "conda" => (name.to_string(), format!("Python (conda: {})", name)),
+        "venv" => {
+            let label = std::path::Path::new(name)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| name.to_string());
+            ("python3".to_string(), format!("Python (venv: {})", label))
+        }
+        "pyenv" => (
+            format!("python{}", name),
+            format!("Python {} (pyenv)", name),
+        ),
+        _ => return None,
+    };
+    let mut m = serde_json::Map::new();
+    m.insert("display_name".to_string(), Value::String(display_name));
+    m.insert("language".to_string(), Value::String("python".to_string()));
+    m.insert("name".to_string(), Value::String(kernel_name));
+    Some(m)
+}
+
+/// 若内容是合法的 `.ipynb` JSON，且 kernelspec 是通用默认值，
+/// 并且当前会话选定了 venv，则将 kernelspec 替换为对应 venv 的值后返回修正后的字符串。
+///
+/// 其他情况（kernelspec 已经是非默认值、JSON 解析失败、未选 venv）原样返回 None。
+pub(crate) fn fix_ipynb_kernelspec_if_default(
+    content: &str,
+    venv_type: &str,
+    venv_name: &str,
+) -> Option<String> {
+    // 未选 venv，不修改
+    let ks = venv_kernelspec(venv_type, venv_name)?;
+
+    let mut nb: Value = serde_json::from_str(content).ok()?;
+
+    // kernelspec 已经是非默认值（AI 或用户明确设置），尊重并保留
+    if !kernelspec_is_generic(&nb) {
+        return None;
+    }
+
+    // 替换 kernelspec
+    if let Some(meta) = nb.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+        meta.insert("kernelspec".to_string(), Value::Object(ks));
+    } else {
+        // metadata 缺失，创建一个
+        let mut meta = serde_json::Map::new();
+        meta.insert("kernelspec".to_string(), Value::Object(ks));
+        if let Some(obj) = nb.as_object_mut() {
+            obj.insert("metadata".to_string(), Value::Object(meta));
+        }
+    }
+
+    serde_json::to_string_pretty(&nb).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_notebook(kernel_name: &str) -> String {
+        format!(
+            r#"{{"cells":[],"metadata":{{"kernelspec":{{"display_name":"Python 3","language":"python","name":"{kernel_name}"}}}},"nbformat":4,"nbformat_minor":5}}"#
+        )
+    }
+
+    fn notebook_without_kernelspec() -> &'static str {
+        r#"{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}"#
+    }
+
+    #[test]
+    fn fix_replaces_default_python3_with_conda_env() {
+        let nb = minimal_notebook("python3");
+        let fixed = fix_ipynb_kernelspec_if_default(&nb, "conda", "myenv")
+            .expect("should fix default kernel");
+        let v: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        let name = v["metadata"]["kernelspec"]["name"].as_str().unwrap();
+        assert_eq!(name, "myenv");
+    }
+
+    #[test]
+    fn fix_replaces_missing_kernelspec_with_conda_env() {
+        let nb = notebook_without_kernelspec();
+        let fixed = fix_ipynb_kernelspec_if_default(nb, "conda", "base")
+            .expect("should fix missing kernel");
+        let v: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        assert_eq!(v["metadata"]["kernelspec"]["name"].as_str().unwrap(), "base");
+    }
+
+    #[test]
+    fn fix_leaves_explicitly_set_kernel_untouched() {
+        // AI already set the correct non-default kernel — must not be overwritten
+        let nb = minimal_notebook("data-analysis-env");
+        let result = fix_ipynb_kernelspec_if_default(&nb, "conda", "other-env");
+        assert!(result.is_none(), "should not override an explicitly set kernel");
+    }
+
+    #[test]
+    fn fix_returns_none_when_no_venv_selected() {
+        let nb = minimal_notebook("python3");
+        assert!(fix_ipynb_kernelspec_if_default(&nb, "none", "").is_none());
+        assert!(fix_ipynb_kernelspec_if_default(&nb, "", "").is_none());
+    }
+
+    #[test]
+    fn fix_venv_uses_python3_kernel_name_with_label() {
+        let nb = minimal_notebook("python3");
+        let fixed = fix_ipynb_kernelspec_if_default(&nb, "venv", "/project/.venv")
+            .expect("should fix venv");
+        let v: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        // venv uses "python3" kernel name, display_name annotates the path
+        assert_eq!(v["metadata"]["kernelspec"]["name"].as_str().unwrap(), "python3");
+        assert!(v["metadata"]["kernelspec"]["display_name"]
+            .as_str().unwrap()
+            .contains(".venv"));
+    }
+
+    #[test]
+    fn fix_pyenv_sets_versioned_kernel_name() {
+        let nb = minimal_notebook("python3");
+        let fixed = fix_ipynb_kernelspec_if_default(&nb, "pyenv", "3.11.5")
+            .expect("should fix pyenv");
+        let v: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        assert_eq!(v["metadata"]["kernelspec"]["name"].as_str().unwrap(), "python3.11.5");
+    }
+}

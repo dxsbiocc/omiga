@@ -138,11 +138,32 @@ impl super::ToolImpl for FileWriteTool {
             }
         }
 
+        // .ipynb kernelspec 修正：若文件是 Jupyter notebook 且 kernelspec 是通用默认值
+        // (python3/python/缺失)，且当前会话选定了 venv，则将 kernelspec 替换为对应环境。
+        // 仅在 kernelspec 为默认值时生效，AI 或用户已显式设置的 kernel 保持不变。
+        let final_content = {
+            let is_ipynb = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("ipynb"))
+                .unwrap_or(false);
+            if is_ipynb {
+                crate::domain::tools::notebook_edit::fix_ipynb_kernelspec_if_default(
+                    &args.content,
+                    &ctx.local_venv_type,
+                    &ctx.local_venv_name,
+                )
+                .unwrap_or_else(|| args.content.clone())
+            } else {
+                args.content.clone()
+            }
+        };
+
         // Atomic write: write to temp file, then rename
         let temp_path = path.with_extension("tmp");
 
         // Write to temp file
-        tokio::fs::write(&temp_path, &args.content)
+        tokio::fs::write(&temp_path, &final_content)
             .await
             .map_err(|e| FsError::IoError {
                 message: format!("Failed to write temp file: {}", e),
@@ -155,12 +176,12 @@ impl super::ToolImpl for FileWriteTool {
                 message: format!("Failed to rename temp file: {}", e),
             })?;
 
-        // Compute new hash
-        let new_hash = compute_hash(&args.content);
+        // Compute new hash (of the final written content, which may differ for .ipynb)
+        let new_hash = compute_hash(&final_content);
 
         let output = FileWriteOutput {
             path: args.path,
-            bytes_written: args.content.len(),
+            bytes_written: final_content.len(),
             new_hash,
             created: current_hash.is_none(),
         };
