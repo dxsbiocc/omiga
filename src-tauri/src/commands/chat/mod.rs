@@ -1159,23 +1159,50 @@ fn normalize_execution_environment(raw: Option<&String>) -> String {
     }
 }
 
-fn composer_execution_addendum(env: &str, ssh_server: Option<&str>) -> Option<String> {
+fn composer_execution_addendum(
+    env: &str,
+    ssh_server: Option<&str>,
+    venv_type: &str,
+    venv_name: &str,
+) -> Option<String> {
+    // 虚拟环境说明行（非空时追加）
+    let venv_line = {
+        let name = venv_name.trim();
+        if !name.is_empty() && venv_type != "none" && !venv_type.is_empty() {
+            let kind_label = match venv_type {
+                "conda" => "conda env",
+                "venv"  => "venv",
+                "pyenv" => "pyenv",
+                other   => other,
+            };
+            format!(
+                "\nActive Python environment: **{kind_label} `{name}`** — \
+                 all `bash` tool commands are automatically wrapped with the activation \
+                 preamble before execution. \
+                 **Do NOT** write `conda activate`, `source activate`, or \
+                 `pyenv shell` manually in bash commands — it is already done for you. \
+                 Use `python` / `pip` / `jupyter` directly. \
+                 When creating `.ipynb` notebooks, set kernelspec `name` to `{name}` \
+                 so the notebook uses this environment's kernel.",
+            )
+        } else {
+            String::new()
+        }
+    };
+
     match env {
         "ssh" => {
             let server_info = ssh_server.map(|s| format!(" (server: `{}`)", s)).unwrap_or_default();
             Some(format!(
-                "### Composer execution environment\nThe user chose **SSH**{} for this session turn: assume tools and shell should run on the configured SSH server when available; local-only tools may error until remote is fully wired.",
-                server_info
+                "### Composer execution environment\nThe user chose **SSH**{server_info} for this session turn: assume tools and shell should run on the configured SSH server when available; local-only tools may error until remote is fully wired.{venv_line}",
             ))
         }
-        "sandbox" => Some(
-            "### Composer execution environment\nThe user chose **sandbox** for this session turn: assume tools and shell should run on the configured remote sandbox when available; local-only tools may error until remote is fully wired."
-                .to_string(),
-        ),
-        _ => Some(
-            "### Composer execution environment\nThe user chose **local**: run terminal commands and workspace tools on this machine."
-                .to_string(),
-        ),
+        "sandbox" => Some(format!(
+            "### Composer execution environment\nThe user chose **sandbox** for this session turn: assume tools and shell should run on the configured remote sandbox when available; local-only tools may error until remote is fully wired.{venv_line}",
+        )),
+        _ => Some(format!(
+            "### Composer execution environment\nThe user chose **local**: run terminal commands and workspace tools on this machine.{venv_line}",
+        )),
     }
 }
 
@@ -2750,9 +2777,12 @@ pub async fn send_message(
                 ));
             }
         }
-        if let Some(line) =
-            composer_execution_addendum(exec_env.as_str(), request.ssh_server.as_deref())
-        {
+        if let Some(line) = composer_execution_addendum(
+            exec_env.as_str(),
+            request.ssh_server.as_deref(),
+            request.local_venv_type.as_deref().unwrap_or(""),
+            request.local_venv_name.as_deref().unwrap_or(""),
+        ) {
             prompt_parts.push(line);
         }
     }

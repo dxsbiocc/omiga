@@ -221,6 +221,10 @@ impl super::ToolImpl for NotebookEditTool {
             _ => unreachable!(),
         }
 
+        // 如果 ToolContext 有选定的 Python 虚拟环境，更新 kernelspec 使 notebook 使用该环境。
+        // 这样 Jupyter 打开时会自动使用正确的 kernel，而不是系统默认的 python3。
+        update_kernelspec_from_venv(&mut notebook, &ctx.local_venv_type, &ctx.local_venv_name);
+
         let updated = serde_json::to_string_pretty(&notebook).map_err(|e| FsError::IoError {
             message: format!("Failed to serialize notebook: {}", e),
         })?;
@@ -312,6 +316,51 @@ fn random_cell_id() -> String {
         .chars()
         .take(13)
         .collect()
+}
+
+/// 根据 ToolContext 的虚拟环境设置更新 notebook 的 kernelspec metadata。
+///
+/// - conda env → kernelspec.name = env_name, display_name = "Python (env_name)"
+/// - venv       → kernelspec.name = "python3", display_name 中注明 venv 路径
+/// - pyenv      → kernelspec.name = "python{ver}", display_name 注明版本
+///
+/// 仅在 venv_name 非空且 venv_type 非 "none" 时生效；否则保持原有 kernelspec 不变。
+fn update_kernelspec_from_venv(notebook: &mut Value, venv_type: &str, venv_name: &str) {
+    let name = venv_name.trim();
+    if name.is_empty() || venv_type == "none" || venv_type.is_empty() {
+        return;
+    }
+
+    let (kernel_name, display_name) = match venv_type {
+        "conda" => (
+            name.to_string(),
+            format!("Python (conda: {})", name),
+        ),
+        "venv" => {
+            // venv_name is a directory path; use its basename as display
+            let label = std::path::Path::new(name)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| name.to_string());
+            ("python3".to_string(), format!("Python (venv: {})", label))
+        }
+        "pyenv" => (
+            format!("python{}", name),
+            format!("Python {} (pyenv)", name),
+        ),
+        _ => return,
+    };
+
+    let meta = notebook
+        .get_mut("metadata")
+        .and_then(|m| m.as_object_mut());
+    if let Some(meta) = meta {
+        let mut ks = serde_json::Map::new();
+        ks.insert("display_name".to_string(), Value::String(display_name));
+        ks.insert("language".to_string(), Value::String("python".to_string()));
+        ks.insert("name".to_string(), Value::String(kernel_name));
+        meta.insert("kernelspec".to_string(), Value::Object(ks));
+    }
 }
 
 fn build_new_cell(cell_type: &str, source: &str, id: Option<String>) -> Result<Value, ToolError> {
