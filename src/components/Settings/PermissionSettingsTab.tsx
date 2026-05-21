@@ -293,6 +293,10 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
   const [customBlock, setCustomBlock] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Workspace exclusion paths
+  const [exclusions, setExclusions] = useState<string[]>([]);
+  const [exclusionInput, setExclusionInput] = useState("");
+  const [exclusionSaving, setExclusionSaving] = useState(false);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditEvents, setAuditEvents] = useState<PermissionAuditEvent[]>([]);
   const [auditTotalCount, setAuditTotalCount] = useState(0);
@@ -372,12 +376,14 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
     setLoading(true);
     setMessage(null);
     try {
-      const deny = await invoke<string[]>("get_omiga_permission_denies", {
-        projectRoot: projectPath,
-      });
+      const [deny, excl] = await Promise.all([
+        invoke<string[]>("get_omiga_permission_denies", { projectRoot: projectPath }),
+        invoke<string[]>("permission_get_workspace_exclusions"),
+      ]);
       const { presetChecked: pc, customBlock: cb } = parseDenyIntoState(deny);
       setPresetChecked(pc);
       setCustomBlock(cb);
+      setExclusions(excl);
     } catch (e) {
       setMessage({
         type: "error",
@@ -387,6 +393,38 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
       setLoading(false);
     }
   }, [projectPath]);
+
+  const addExclusion = useCallback(async () => {
+    const trimmed = exclusionInput.trim().replace(/^\/+/, "");
+    if (!trimmed || exclusions.includes(trimmed)) {
+      setExclusionInput("");
+      return;
+    }
+    const next = [...exclusions, trimmed];
+    setExclusionSaving(true);
+    try {
+      await invoke("permission_set_workspace_exclusions", { patterns: next });
+      setExclusions(next);
+      setExclusionInput("");
+    } catch (e) {
+      setMessage({ type: "error", text: `保存排除路径失败: ${String(e)}` });
+    } finally {
+      setExclusionSaving(false);
+    }
+  }, [exclusionInput, exclusions]);
+
+  const removeExclusion = useCallback(async (pattern: string) => {
+    const next = exclusions.filter((p) => p !== pattern);
+    setExclusionSaving(true);
+    try {
+      await invoke("permission_set_workspace_exclusions", { patterns: next });
+      setExclusions(next);
+    } catch (e) {
+      setMessage({ type: "error", text: `删除排除路径失败: ${String(e)}` });
+    } finally {
+      setExclusionSaving(false);
+    }
+  }, [exclusions]);
 
   const loadAuditEvents = useCallback(async (page: number) => {
     if (isUnsetWorkspacePath(projectPath)) {
@@ -653,6 +691,55 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
           </Box>
         </Stack>
       </Box>
+
+      {/* 工作区排除路径 */}
+      {!unset && (
+        <Box sx={{ mb: 3 }}>
+          <Typography variant="body2" fontWeight={700} sx={{ mb: 1 }}>
+            排除路径（始终需要确认）
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5, lineHeight: 1.6 }}>
+            填写相对于工作区根目录的路径前缀。匹配路径即使在智能放行模式下也会弹窗确认。
+            例如：<code>.env</code>、<code>secrets/</code>、<code>dist/</code>
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ mb: 1.5 }}>
+            <TextField
+              size="small"
+              placeholder="例如 secrets/ 或 .env"
+              value={exclusionInput}
+              onChange={(e) => setExclusionInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void addExclusion(); }}
+              sx={{ flex: 1, fontFamily: "monospace" }}
+              disabled={exclusionSaving}
+            />
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => void addExclusion()}
+              disabled={!exclusionInput.trim() || exclusionSaving}
+            >
+              添加
+            </Button>
+          </Stack>
+          {exclusions.length > 0 ? (
+            <Stack direction="row" flexWrap="wrap" spacing={0.75} useFlexGap>
+              {exclusions.map((p) => (
+                <Chip
+                  key={p}
+                  label={p}
+                  size="small"
+                  onDelete={() => void removeExclusion(p)}
+                  sx={{ fontFamily: "monospace", fontSize: "0.72rem" }}
+                />
+              ))}
+            </Stack>
+          ) : (
+            <Typography variant="caption" color="text.disabled">
+              暂无排除路径 — 所有工作区内操作均自动放行
+            </Typography>
+          )}
+        </Box>
+      )}
 
       {loading ? (
         <Box sx={{ display: "flex", justifyContent: "center", py: 6 }}>

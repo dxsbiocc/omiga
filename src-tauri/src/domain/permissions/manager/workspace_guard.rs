@@ -15,28 +15,28 @@ impl super::PermissionManager {
             return canon;
         }
 
-        // 逐级向上寻找可规范化的祖先目录
+        // 逐级向上寻找可规范化的祖先目录。
+        // 注意：先把当前节点的文件名入栈，再尝试规范化父级，
+        // 否则直接父级可以规范化时当前文件名会被漏掉。
         let mut components: Vec<std::ffi::OsString> = Vec::new();
         let mut current = path.to_path_buf();
         loop {
+            // 先把当前文件名压栈
+            if let Some(name) = current.file_name() {
+                components.push(name.to_os_string());
+            }
             let parent = match current.parent() {
                 Some(p) if p != current => p.to_path_buf(),
                 _ => break,
             };
             if let Ok(canon_parent) = std::fs::canonicalize(&parent) {
-                // 找到了可规范化的祖先，将剩余部分附加回去
+                // 找到了可规范化的祖先，将剩余部分（倒序）附加回去
                 let mut result = canon_parent;
                 for component in components.iter().rev() {
                     result.push(component);
                 }
                 return result;
             }
-            components.push(
-                current
-                    .file_name()
-                    .map(|n| n.to_os_string())
-                    .unwrap_or_default(),
-            );
             current = parent;
         }
 
@@ -84,8 +84,13 @@ impl super::PermissionManager {
             }
         }
 
-        // 条件 4：路径范围检查
+        // 条件 4：路径范围检查 + 排除路径检查
         let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        let exclusions = self
+            .workspace_exclusions
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
 
         if let Some(ref paths) = context.file_paths {
             if !paths.is_empty() {
@@ -101,12 +106,23 @@ impl super::PermissionManager {
                     if !canonical_path.starts_with(&canonical_root) {
                         return false;
                     }
+                    // 排除路径检查：如果路径命中排除规则，则需要手动确认
+                    if !exclusions.is_empty() {
+                        // 取路径相对于 project_root 的部分
+                        let rel = canonical_path
+                            .strip_prefix(&canonical_root)
+                            .unwrap_or(&canonical_path);
+                        let rel_str = rel.to_string_lossy();
+                        if exclusions.iter().any(|ex| {
+                            let ex = ex.trim_start_matches('/');
+                            rel_str.starts_with(ex) || rel_str == ex
+                        }) {
+                            return false;
+                        }
+                    }
                 }
             }
-            // paths 为空 Vec 但 Some：视为工作区安全（无显式路径的文件操作）
         }
-        // file_paths 为 None（工具不涉及路径，如 bash 无绝对路径参数）：也视为安全，
-        // 因为危险模式已在条件 3 中过滤。
 
         true
     }

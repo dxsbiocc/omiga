@@ -44,6 +44,9 @@ pub struct PermissionManager {
     recent_denials: Arc<RwLock<VecDeque<DenialRecord>>>,
     /// 会话级 composer「权限模式」：`session_id` → 最近一次 `send_message` 带入的默认拦截立场（无规则匹配时使用）
     session_composer_stance: Arc<RwLock<HashMap<String, ComposerPermissionStance>>>,
+    /// 工作区排除路径：即使在工作区智能放行模式下也需要确认的路径前缀（相对于 project_root）。
+    /// 使用 std::sync::RwLock 而非 tokio::sync::RwLock，因为 is_workspace_safe 是同步方法。
+    workspace_exclusions: Arc<std::sync::RwLock<Vec<String>>>,
 }
 
 impl PermissionManager {
@@ -58,7 +61,27 @@ impl PermissionManager {
             session_denials: Arc::new(RwLock::new(HashMap::new())),
             recent_denials: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
             session_composer_stance: Arc::new(RwLock::new(HashMap::new())),
+            workspace_exclusions: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
+    }
+
+    // =========================================================================
+    // 工作区排除路径 API
+    // =========================================================================
+
+    /// 替换工作区排除路径列表。路径应为相对于 project_root 的前缀，例如 "dist/"、".env"。
+    pub fn set_workspace_exclusions(&self, patterns: Vec<String>) {
+        if let Ok(mut g) = self.workspace_exclusions.write() {
+            *g = patterns;
+        }
+    }
+
+    /// 返回当前工作区排除路径列表的副本。
+    pub fn get_workspace_exclusions(&self) -> Vec<String> {
+        self.workspace_exclusions
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     // =========================================================================

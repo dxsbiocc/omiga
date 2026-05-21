@@ -1019,3 +1019,60 @@
             dec
         );
     }
+
+    #[tokio::test]
+    async fn test_workspace_exclusion_blocks_auto_approve() {
+        // 排除路径 "secrets/" 下的文件即使在工作区内也必须弹窗
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().to_path_buf();
+        let secrets_dir = project_root.join("secrets");
+        std::fs::create_dir_all(&secrets_dir).expect("mkdir secrets");
+        let secret_file = secrets_dir.join("api_key.txt");
+
+        let mgr = PermissionManager::new();
+        mgr.set_workspace_exclusions(vec!["secrets/".to_string()]);
+
+        let ctx = PermissionContext {
+            tool_name: "file_write".to_string(),
+            arguments: serde_json::json!({"path": secret_file.to_str().unwrap()}),
+            session_id: "s_excl".to_string(),
+            file_paths: Some(vec![secret_file.clone()]),
+            timestamp: chrono::Utc::now(),
+            project_root: Some(project_root.clone()),
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::RequireApproval(_)),
+            "排除路径内的文件必须弹窗，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_non_excluded_path_still_auto_approved() {
+        // 未被排除的路径仍然自动放行
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().to_path_buf();
+        let src_file = project_root.join("src").join("main.rs");
+        std::fs::create_dir_all(src_file.parent().unwrap()).expect("mkdir src");
+
+        let mgr = PermissionManager::new();
+        mgr.set_workspace_exclusions(vec!["secrets/".to_string(), "dist/".to_string()]);
+
+        let ctx = PermissionContext {
+            tool_name: "file_write".to_string(),
+            arguments: serde_json::json!({"path": src_file.to_str().unwrap()}),
+            session_id: "s_not_excl".to_string(),
+            file_paths: Some(vec![src_file.clone()]),
+            timestamp: chrono::Utc::now(),
+            project_root: Some(project_root.clone()),
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::Allow),
+            "排除路径之外的工作区文件应自动放行，实际: {:?}",
+            dec
+        );
+    }

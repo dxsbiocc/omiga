@@ -732,3 +732,56 @@ pub async fn permission_clear_session_approvals(
     manager.clear_session_approvals(&session_id).await;
     Ok(())
 }
+
+// ============================================================================
+// 工作区排除路径命令
+// ============================================================================
+
+/// 持久化设置键
+const WORKSPACE_EXCLUSIONS_KEY: &str = "permissions.workspace_exclusions";
+
+/// 获取工作区排除路径列表
+#[tauri::command]
+pub async fn permission_get_workspace_exclusions(
+    manager: State<'_, Arc<PermissionManager>>,
+) -> CommandResult<Vec<String>> {
+    Ok(manager.get_workspace_exclusions())
+}
+
+/// 设置工作区排除路径列表（持久化到 settings 表）
+#[tauri::command]
+pub async fn permission_set_workspace_exclusions(
+    patterns: Vec<String>,
+    manager: State<'_, Arc<PermissionManager>>,
+    app_state: State<'_, OmigaAppState>,
+) -> CommandResult<()> {
+    // 持久化
+    let json = serde_json::to_string(&patterns)
+        .map_err(|e| crate::errors::AppError::Unknown(e.to_string()))?;
+    app_state
+        .repo
+        .set_setting(WORKSPACE_EXCLUSIONS_KEY, &json)
+        .await
+        .map_err(|e| crate::errors::AppError::Persistence(e.to_string()))?;
+    // 更新运行时
+    manager.set_workspace_exclusions(patterns);
+    Ok(())
+}
+
+/// 从数据库加载排除路径并填充 PermissionManager（应用启动时调用）
+pub async fn load_workspace_exclusions(
+    manager: &PermissionManager,
+    repo: &crate::domain::persistence::SessionRepository,
+) {
+    match repo.get_setting(WORKSPACE_EXCLUSIONS_KEY).await {
+        Ok(Some(json)) => {
+            if let Ok(patterns) = serde_json::from_str::<Vec<String>>(&json) {
+                manager.set_workspace_exclusions(patterns);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("Failed to load workspace exclusions: {e}");
+        }
+    }
+}
