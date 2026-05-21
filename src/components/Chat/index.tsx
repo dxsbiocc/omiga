@@ -8322,10 +8322,8 @@ export function Chat({ sessionId }: ChatProps) {
                 sx={{
                   mb: 1.5,
                   borderRadius: 2,
-                  alignItems: "center",
+                  alignItems: "flex-start",
                   "& .MuiAlert-message": {
-                    display: "flex",
-                    alignItems: "center",
                     py: 0.25,
                   },
                   "& .MuiAlert-action": {
@@ -8333,6 +8331,7 @@ export function Chat({ sessionId }: ChatProps) {
                     alignSelf: "center",
                     pt: 0,
                     pb: 0,
+                    pl: 1,
                   },
                 }}
                 action={
@@ -8347,7 +8346,10 @@ export function Chat({ sessionId }: ChatProps) {
                   </Button>
                 }
               >
-                请为此对话选择工作目录（代码与工具将相对于该路径），选择后会自动保存并隐藏此提示。
+                <strong>请选择工作目录</strong> — 代码与工具将相对于该路径运行。
+                <br />
+                设置后还能启用「智能权限放行」：工作区内的文件读写自动批准，
+                删除等危险操作仍会提示确认。
               </Alert>
             </Collapse>
             <Box

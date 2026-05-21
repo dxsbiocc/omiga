@@ -327,14 +327,27 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
           配置完成！
         </Typography>
         <Typography variant="body2" color="text.secondary"
-          sx={{ maxWidth: 380, mx: "auto", lineHeight: 1.9, mb: 1 }}>
+          sx={{ maxWidth: 380, mx: "auto", lineHeight: 1.9, mb: 2 }}>
           发送第一条消息，Agent 会自然地引导你完成个性化设置——
           给它起个名字、告诉它你是谁、确认沟通风格。
         </Typography>
-        <Typography variant="caption" color="text.disabled"
-          sx={{ display: "block", mb: 4 }}>
-          配置保存在 <code>~/.omiga/</code>，随时可在 Settings → Profile 编辑。
-        </Typography>
+        <Box
+          sx={{
+            maxWidth: 360, mx: "auto", mb: 3,
+            bgcolor: (t) => t.palette.mode === "dark"
+              ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)",
+            borderRadius: 2, p: 1.5, textAlign: "left",
+          }}
+        >
+          <Typography variant="caption" fontWeight={700} color="text.secondary"
+            sx={{ display: "block", mb: 0.5 }}>
+            💡 下一步：选择工作目录
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.6 }}>
+            对话界面底部有一个文件夹按钮，点击后选择项目目录。
+            设置后，AI 在该目录内的读写操作会自动批准，无需每次弹窗确认。
+          </Typography>
+        </Box>
         <Button variant="contained" size="large"
           onClick={onComplete}
           sx={{ px: 5, borderRadius: 2, fontWeight: 600 }}>
