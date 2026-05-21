@@ -92,6 +92,8 @@ interface PermissionState {
   ) => Promise<boolean>;
   setPendingRequest: (request: PermissionCheckResult | null) => void;
   approveRequest: (mode: ToolPermissionMode) => Promise<void>;
+  /** 设置会话立场为 auto 并批准当前请求 — 用于"会话内放行工作区"快捷按钮 */
+  approveWorkspaceForSession: () => Promise<void>;
   denyRequest: (reason?: string) => Promise<void>;
   clearPending: () => void;
   clearError: () => void;
@@ -187,6 +189,29 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
       set({ error: `批准失败: ${errorMsg}` });
       throw err;
     }
+  },
+
+  approveWorkspaceForSession: async () => {
+    const { pendingRequest, approveRequest } = get();
+    if (!pendingRequest) return;
+
+    const sessionId =
+      pendingRequest.session_id ??
+      useSessionStore.getState().currentSession?.id ??
+      "default";
+
+    // 1. 将本会话立场切换为 auto（中等风险及以下自动放行）
+    try {
+      await invoke("permission_set_session_stance", {
+        sessionId,
+        stance: "auto",
+      });
+    } catch (err) {
+      console.error("Failed to set session stance:", err);
+    }
+
+    // 2. 批准当前这条请求（Session 模式）
+    await approveRequest("Session");
   },
 
   denyRequest: async (reason = "用户拒绝") => {

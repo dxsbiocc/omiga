@@ -785,3 +785,21 @@ pub async fn load_workspace_exclusions(
         }
     }
 }
+
+// ============================================================================
+// 会话级 composer 权限立场命令
+// ============================================================================
+
+/// 设置当前会话的 composer 权限立场（ask / auto / bypass）。
+/// 用于权限弹窗"本次会话放行工作区"快捷按钮。
+#[tauri::command]
+pub async fn permission_set_session_stance(
+    session_id: String,
+    stance: String, // "ask" | "auto" | "bypass"
+    manager: State<'_, Arc<PermissionManager>>,
+) -> CommandResult<()> {
+    manager
+        .set_session_composer_stance(&session_id, Some(&stance))
+        .await;
+    Ok(())
+}

@@ -213,6 +213,7 @@ pub fn run() {
             commands::permissions::permission_clear_session_approvals,
             commands::permissions::permission_get_workspace_exclusions,
             commands::permissions::permission_set_workspace_exclusions,
+            commands::permissions::permission_set_session_stance,
             commands::permissions::get_omiga_permission_denies,
             commands::permissions::save_omiga_permission_denies,
             app_state::get_app_state_snapshot,
