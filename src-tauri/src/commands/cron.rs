@@ -16,6 +16,8 @@ struct CronJobRow {
     task_description: String,
     session_id: Option<String>,
     created_at: String,
+    last_run_at: Option<String>,
+    run_count: i64,
 }
 
 /// Summary of a cron job returned to the frontend.
@@ -27,6 +29,10 @@ pub struct CronJobSummary {
     pub task: String,
     pub session_id: Option<String>,
     pub created_at: String,
+    /// UTC RFC-3339 timestamp of the last time this job fired. None if never run.
+    pub last_run_at: Option<String>,
+    /// Total number of times this job has fired.
+    pub run_count: i64,
 }
 
 impl From<CronJobRow> for CronJobSummary {
@@ -37,6 +43,8 @@ impl From<CronJobRow> for CronJobSummary {
             task: r.task_description,
             session_id: r.session_id,
             created_at: r.created_at,
+            last_run_at: r.last_run_at,
+            run_count: r.run_count,
         }
     }
 }
@@ -51,7 +59,7 @@ pub async fn list_cron_jobs(state: State<'_, OmigaAppState>) -> CommandResult<Ve
     let pool = state.repo.pool();
     let rows = sqlx::query_as::<_, CronJobRow>(
         r#"
-        SELECT id, schedule, task_description, session_id, created_at
+        SELECT id, schedule, task_description, session_id, created_at, last_run_at, run_count
         FROM cron_jobs
         WHERE enabled = 1
         ORDER BY created_at DESC
@@ -100,6 +108,8 @@ pub async fn create_cron_job(
         task,
         session_id: None,
         created_at,
+        last_run_at: None,
+        run_count: 0,
     })
 }
 
