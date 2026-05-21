@@ -61,7 +61,8 @@ Before spawning an `Agent`, match the task to the table. If a row matches, use t
 | Security audit, vulnerability, injection, secrets | `security-reviewer` | frontier |
 | Architecture, system design, tradeoffs | `architect` | frontier |
 | Write tests, TDD, coverage | `test-engineer` | standard |
-| Performance, profiling, N+1, slow query | `performance-reviewer` | standard |
+| Slow, latency, memory leak, N+1, profiling | `performance-reviewer` | standard |
+| Refactor, clean up, dead code, extract function | `refactor-cleaner` | standard |
 | Research, papers, literature, web survey | `deep-research` | frontier |
 | Data analysis, statistics, Python/R scripts | `data-analysis` | standard |
 | Charts, plots, scientific figures | `data-visual` | standard |
