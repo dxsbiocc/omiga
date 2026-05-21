@@ -48,6 +48,9 @@ import {
   CheckCircle as CheckCircleIcon,
   Cancel as CancelIcon,
   Refresh as RefreshIcon,
+  AutoFixHigh as AutoFixHighIcon,
+  LockOpen as LockOpenIcon,
+  Block as BlockIcon,
 } from "@mui/icons-material";
 import {
   PERMISSION_PRESETS,
@@ -576,6 +579,80 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
           当前会话未选择工作区目录，无法读写权限文件。请在聊天侧选择项目文件夹。
         </Alert>
       )}
+
+      {/* 工作区智能放行说明 */}
+      <Box
+        sx={{
+          borderRadius: 2.5,
+          border: `1px solid ${alpha(unset ? theme.palette.warning.main : theme.palette.success.main, isDark ? 0.3 : 0.35)}`,
+          bgcolor: alpha(unset ? theme.palette.warning.main : theme.palette.success.main, isDark ? 0.07 : 0.05),
+          p: 2,
+          mb: 3,
+        }}
+      >
+        <Stack direction="row" alignItems="flex-start" spacing={1.5}>
+          <Box
+            sx={{
+              width: 40,
+              height: 40,
+              borderRadius: 1.5,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+              bgcolor: alpha(unset ? theme.palette.warning.main : theme.palette.success.main, 0.15),
+              color: unset ? theme.palette.warning.main : theme.palette.success.main,
+            }}
+          >
+            <AutoFixHighIcon sx={{ fontSize: 22 }} />
+          </Box>
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="body2" fontWeight={800} sx={{ mb: 0.5 }}>
+              智能工作区放行
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.6, display: "block" }}>
+              {unset ? (
+                "未设置工作区路径 — 所有文件写入都需要手动确认。在聊天侧选择项目文件夹后，工作区内的操作将自动放行。"
+              ) : (
+                <>
+                  工作区路径已配置：
+                  <Box
+                    component="code"
+                    sx={{
+                      mx: 0.5,
+                      px: 0.6,
+                      py: 0.1,
+                      borderRadius: 0.75,
+                      bgcolor: alpha(theme.palette.text.primary, 0.07),
+                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                      fontSize: "0.72rem",
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {projectPath}
+                  </Box>
+                </>
+              )}
+            </Typography>
+            {!unset && (
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1.25 }} flexWrap="wrap" useFlexGap>
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <LockOpenIcon sx={{ fontSize: 14, color: "success.main" }} />
+                  <Typography variant="caption" color="success.main" fontWeight={700}>
+                    自动放行：路径内读写、编辑、安全 Bash 命令
+                  </Typography>
+                </Stack>
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <BlockIcon sx={{ fontSize: 14, color: "error.main" }} />
+                  <Typography variant="caption" color="error.main" fontWeight={700}>
+                    仍需确认：删除、rm -rf、路径外操作
+                  </Typography>
+                </Stack>
+              </Stack>
+            )}
+          </Box>
+        </Stack>
+      </Box>
 
       {loading ? (
         <Box sx={{ display: "flex", justifyContent: "center", py: 6 }}>

@@ -1064,6 +1064,11 @@ impl PermissionManager {
         context: &PermissionContext,
         risk: &RiskAssessment,
     ) -> PermissionDecision {
+        // 工作区内的非破坏性操作也在 Auto 模式下放行
+        if self.is_workspace_safe(context) {
+            return PermissionDecision::Allow;
+        }
+
         if risk.level >= RiskLevel::High {
             PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -1087,6 +1092,12 @@ impl PermissionManager {
         context: &PermissionContext,
         risk: &RiskAssessment,
     ) -> PermissionDecision {
+        // 工作区智能放行：在已配置项目根目录内的非破坏性写操作自动批准，
+        // 无需每次弹窗——这是最常见的 AI 编码场景。
+        if self.is_workspace_safe(context) {
+            return PermissionDecision::Allow;
+        }
+
         match risk.level {
             // Safe 和 Low 风险自动允许（读取文件、网络搜索等）
             RiskLevel::Safe | RiskLevel::Low => PermissionDecision::Allow,
@@ -1615,6 +1626,113 @@ impl PermissionManager {
                 }],
             },
         }
+    }
+
+    /// 对路径执行尽力而为的规范化：向上寻找最长已存在前缀，再拼接剩余部分。
+    ///
+    /// 解决两个场景：
+    /// 1. 新建文件路径在磁盘上还不存在，`canonicalize` 失败
+    /// 2. macOS `/var` → `/private/var` 符号链接导致 `starts_with` 误判
+    fn canonicalize_best_effort(path: &std::path::Path) -> std::path::PathBuf {
+        // 快路径：路径本身可以直接规范化
+        if let Ok(canon) = std::fs::canonicalize(path) {
+            return canon;
+        }
+
+        // 逐级向上寻找可规范化的祖先目录
+        let mut components: Vec<std::ffi::OsString> = Vec::new();
+        let mut current = path.to_path_buf();
+        loop {
+            let parent = match current.parent() {
+                Some(p) if p != current => p.to_path_buf(),
+                _ => break,
+            };
+            if let Ok(canon_parent) = std::fs::canonicalize(&parent) {
+                // 找到了可规范化的祖先，将剩余部分附加回去
+                let mut result = canon_parent;
+                for component in components.iter().rev() {
+                    result.push(component);
+                }
+                return result;
+            }
+            components.push(
+                current
+                    .file_name()
+                    .map(|n| n.to_os_string())
+                    .unwrap_or_default(),
+            );
+            current = parent;
+        }
+
+        // 完全无法规范化：原样返回
+        path.to_path_buf()
+    }
+
+    /// 判断当前操作是否「工作区安全」——满足所有条件时可无弹窗自动放行：
+    ///
+    /// 1. `project_root` 已配置（用户在输入框设置了工作路径）
+    /// 2. 操作不是破坏性删除（工具名含 `delete`/`remove`，或 bash 中含 DataLoss 风险）
+    /// 3. bash/shell 无 High/Critical 危险模式（rm -rf、fork bomb 等）
+    /// 4. 所有涉及路径均在 `project_root` 之内（或 bash 命令未显式引用任何绝对路径）
+    fn is_workspace_safe(&self, context: &PermissionContext) -> bool {
+        // 条件 1：必须有配置好的项目根目录
+        let Some(ref root) = context.project_root else {
+            return false;
+        };
+
+        let tool = context.tool_name.as_str();
+
+        // 条件 2：破坏性工具名直接排除
+        if tool.contains("delete") || tool.contains("remove") || tool == "file_delete" {
+            return false;
+        }
+
+        // 条件 3：bash/shell 危险模式检测
+        if tool == "bash" || tool == "shell" {
+            if let Some(cmd) = context.arguments.get("command").and_then(|v| v.as_str()) {
+                let pattern_risks = self.patterns.check(cmd);
+                // 任何 High/Critical 模式 → 不放行
+                if pattern_risks
+                    .iter()
+                    .any(|r| r.severity >= RiskLevel::High)
+                {
+                    return false;
+                }
+                // DataLoss 类（rm -rf 是 Medium DataLoss）→ 不放行
+                if pattern_risks
+                    .iter()
+                    .any(|r| r.category == RiskCategory::DataLoss)
+                {
+                    return false;
+                }
+            }
+        }
+
+        // 条件 4：路径范围检查
+        let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+
+        if let Some(ref paths) = context.file_paths {
+            if !paths.is_empty() {
+                for path in paths {
+                    let abs_path = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        root.join(path)
+                    };
+                    // 文件可能还不存在（写新文件场景）——向上逐级找到最长已存在前缀再拼接。
+                    // 这同时解决了 macOS /var → /private/var 符号链接问题。
+                    let canonical_path = Self::canonicalize_best_effort(&abs_path);
+                    if !canonical_path.starts_with(&canonical_root) {
+                        return false;
+                    }
+                }
+            }
+            // paths 为空 Vec 但 Some：视为工作区安全（无显式路径的文件操作）
+        }
+        // file_paths 为 None（工具不涉及路径，如 bash 无绝对路径参数）：也视为安全，
+        // 因为危险模式已在条件 3 中过滤。
+
+        true
     }
 
     /// 从工具参数中提取文件路径
@@ -2502,5 +2620,153 @@ mod tests {
         assert_eq!(denials.len(), 1);
         assert_eq!(denials[0].tool_name, "bash");
         assert_eq!(denials[0].reason, "用户明确拒绝");
+    }
+
+    // -------------------------------------------------------------------------
+    // 工作区智能放行测试
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_workspace_file_write_auto_approved() {
+        // file_write 在项目根目录内 → 自动放行，不弹窗
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().to_path_buf();
+        let file_path = project_root.join("src/main.rs");
+
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "file_write".to_string(),
+            arguments: serde_json::json!({"path": file_path.to_str().unwrap(), "content": "fn main() {}"}),
+            session_id: "s_ws".to_string(),
+            file_paths: Some(vec![file_path.clone()]),
+            timestamp: chrono::Utc::now(),
+            project_root: Some(project_root.clone()),
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::Allow),
+            "工作区内 file_write 应自动放行，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_file_edit_auto_approved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().to_path_buf();
+        let file_path = project_root.join("Cargo.toml");
+
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "file_edit".to_string(),
+            arguments: serde_json::json!({"path": file_path.to_str().unwrap()}),
+            session_id: "s_ws2".to_string(),
+            file_paths: Some(vec![file_path.clone()]),
+            timestamp: chrono::Utc::now(),
+            project_root: Some(project_root.clone()),
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::Allow),
+            "工作区内 file_edit 应自动放行，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_file_write_outside_requires_approval() {
+        // file_write 超出项目根目录 → 必须弹窗
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("mkdir");
+        let outside_path = dir.path().join("outside.txt");
+
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "file_write".to_string(),
+            arguments: serde_json::json!({"path": outside_path.to_str().unwrap()}),
+            session_id: "s_ws3".to_string(),
+            file_paths: Some(vec![outside_path.clone()]),
+            timestamp: chrono::Utc::now(),
+            project_root: Some(project_root.clone()),
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::RequireApproval(_)),
+            "工作区外 file_write 必须弹窗，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_bash_safe_command_auto_approved() {
+        // bash cargo build 在工作区内 → 自动放行
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().to_path_buf();
+
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "bash".to_string(),
+            arguments: serde_json::json!({"command": "cargo build --release"}),
+            session_id: "s_ws4".to_string(),
+            file_paths: None, // 无绝对路径引用
+            timestamp: chrono::Utc::now(),
+            project_root: Some(project_root.clone()),
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::Allow),
+            "工作区内安全 bash 命令应自动放行，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_bash_rm_rf_requires_approval() {
+        // bash rm -rf 在工作区内也需要确认（DataLoss 类危险命令）
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().to_path_buf();
+
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "bash".to_string(),
+            arguments: serde_json::json!({"command": format!("rm -rf {}", project_root.join("target").display())}),
+            session_id: "s_ws5".to_string(),
+            file_paths: None,
+            timestamp: chrono::Utc::now(),
+            project_root: Some(project_root.clone()),
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::RequireApproval(_)),
+            "工作区内 rm -rf 必须弹窗，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_no_root_configured_still_requires_approval() {
+        // 未配置项目根目录时，Medium 风险仍需确认
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "file_write".to_string(),
+            arguments: serde_json::json!({"path": "/tmp/test.txt"}),
+            session_id: "s_ws6".to_string(),
+            file_paths: Some(vec![std::path::PathBuf::from("/tmp/test.txt")]),
+            timestamp: chrono::Utc::now(),
+            project_root: None, // 未配置工作路径
+        };
+
+        let dec = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(dec, PermissionDecision::RequireApproval(_)),
+            "未配置工作区时 file_write 必须弹窗，实际: {:?}",
+            dec
+        );
     }
 }
