@@ -4599,6 +4599,7 @@ function OperatorCatalogSection({
   runs,
   registryPath,
   busy,
+  environments,
   onToggle,
   onSmokeRun,
   onRefreshRuns,
@@ -4612,6 +4613,7 @@ function OperatorCatalogSection({
   runs: OperatorRunSummary[];
   registryPath: string | null;
   busy: boolean;
+  environments?: PluginEnvironmentSummary[];
   onToggle: (operator: OperatorSummary, enabled: boolean) => void;
   onSmokeRun: (operator: OperatorSummary, smokeTestId?: string | null) => void;
   onRefreshRuns: () => void;
@@ -4720,143 +4722,111 @@ function OperatorCatalogSection({
               </Stack>
             </Alert>
           )}
-          <Paper
-            variant="outlined"
-            sx={{
-              p: 1.25,
-              borderRadius: 2.5,
-              bgcolor: alpha(theme.palette.background.default, theme.palette.mode === "dark" ? 0.36 : 0.58),
-            }}
-          >
-            <Stack spacing={1} useFlexGap>
-              <Stack
-                direction={{ xs: "column", sm: "row" }}
-                spacing={1}
-                alignItems={{ xs: "stretch", sm: "center" }}
-                justifyContent="space-between"
-              >
-                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                  <Typography variant="subtitle2" fontWeight={850}>
-                    Recent runs
-                  </Typography>
-                  <Chip size="small" variant="outlined" label={`${runs.length} recorded`} />
-                </Stack>
-                <Stack direction="row" gap={0.75} flexWrap="wrap">
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    startIcon={<RefreshRounded />}
-                    disabled={busy}
-                    onClick={onRefreshRuns}
-                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
-                  >
-                    Refresh runs
-                  </Button>
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    color="warning"
-                    startIcon={<DeleteOutlineRounded />}
-                    disabled={busy || runs.length === 0}
-                    onClick={() => onCleanupRuns()}
-                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
-                  >
-                    Clean old/cache runs
-                  </Button>
-                </Stack>
-              </Stack>
-              {runs.length === 0 ? (
-                <Typography variant="body2" color="text.secondary">
-                  No tool run records yet. SSH/sandbox artifacts stay on the selected remote execution environment and are referenced from the tool result.
-                </Typography>
-              ) : (
-                <Stack spacing={0.75} useFlexGap>
-                  {runs.slice(0, 5).map((run) => {
-                    const timestamp = formatOperatorRunTimestamp(run.updatedAt);
-                    return (
-                      <Box
-                        key={run.runId}
-                        sx={{
-                          p: 1,
-                          borderRadius: 1.5,
-                          bgcolor: "background.paper",
-                          border: 1,
-                          borderColor:
-                            operatorRunStatusColor(run.status) === "error"
-                              ? alpha(theme.palette.error.main, 0.32)
-                              : "divider",
-                        }}
-                      >
-                        <Stack spacing={0.65}>
-                          <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-                            <Typography variant="body2" fontWeight={850} sx={{ wordBreak: "break-all" }}>
-                              {operatorRunTitle(run)}
-                            </Typography>
-                            <Chip
-                              size="small"
-                              color={operatorRunStatusColor(run.status)}
-                              variant={operatorRunStatusColor(run.status) === "default" ? "outlined" : "filled"}
-                              label={run.status}
-                            />
-                            <Chip size="small" variant="outlined" label={run.runId} />
-                            <Chip size="small" variant="outlined" label={run.location} />
-                            {operatorRunIsSmoke(run) && (
-                              <Chip
-                                size="small"
-                                color="info"
-                                variant="outlined"
-                                label={run.smokeTestName || run.smokeTestId || "smoke"}
-                              />
-                            )}
-                            {run.outputCount > 0 && (
-                              <Chip size="small" color="success" variant="outlined" label={`${run.outputCount} output${run.outputCount === 1 ? "" : "s"}`} />
-                            )}
-                            {(run.structuredOutputCount ?? 0) > 0 && (
-                              <Chip size="small" color="info" variant="outlined" label={`${run.structuredOutputCount} structured`} />
-                            )}
-                            {operatorRunIsCacheHit(run) && (
-                              <Chip size="small" color="success" variant="outlined" label="cache hit" />
-                            )}
-                            {run.sourcePlugin && (
-                              <Chip size="small" variant="outlined" label={run.sourcePlugin} />
-                            )}
-                          </Stack>
-                          {run.errorMessage && (
-                            <Typography variant="caption" color="error.main" sx={{ wordBreak: "break-word" }}>
-                              {run.errorMessage}
-                            </Typography>
-                          )}
-                          <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                            {timestamp ? `${timestamp} · ` : ""}{run.runDir}
-                          </Typography>
-                          {operatorRunIsCacheHit(run) && (
-                            <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                              Reused source run {run.cacheSourceRunId || "unknown"}{run.cacheSourceRunDir ? ` · ${run.cacheSourceRunDir}` : ""}
-                            </Typography>
-                          )}
-                          <Button
-                            size="small"
-                            variant="text"
-                            startIcon={<TroubleshootRounded />}
-                            disabled={busy}
-                            onClick={() => onOpenRun(run)}
-                            sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-                          >
-                            View run detail
-                          </Button>
-                        </Stack>
-                      </Box>
-                    );
-                  })}
-                  {runs.length > 5 && (
-                    <Typography variant="caption" color="text.secondary">
-                      Showing latest 5 runs.
+          {runs.length > 0 && (
+            <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
+              <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={1}
+                  alignItems={{ xs: "stretch", sm: "center" }}
+                  justifyContent="space-between"
+                  sx={{ width: "100%" }}
+                >
+                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                    <Typography variant="subtitle2" fontWeight={850}>
+                      Recent Runs
                     </Typography>
-                  )}
+                    <Chip size="small" variant="outlined" label={`${runs.length} recorded`} />
+                  </Stack>
+                  <Stack direction="row" gap={0.75} flexWrap="wrap">
+                    <IconButton
+                      size="small"
+                      aria-label="Refresh runs"
+                      disabled={busy}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onRefreshRuns();
+                      }}
+                    >
+                      <RefreshRounded fontSize="small" />
+                    </IconButton>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="warning"
+                      startIcon={<DeleteOutlineRounded />}
+                      disabled={busy}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onCleanupRuns();
+                      }}
+                      sx={{ textTransform: "none", borderRadius: 1.5 }}
+                    >
+                      Clear old runs
+                    </Button>
+                  </Stack>
                 </Stack>
-              )}
-            </Stack>
-          </Paper>
+              </AccordionSummary>
+              <AccordionDetails sx={{ px: 1.25, pt: 0, pb: 1.25 }}>
+                <Stack spacing={0.75} useFlexGap>
+                  {sortedOperators
+                    .map((operator) => ({
+                      operator,
+                      operatorRuns: operatorRunsForOperator(operator, runs),
+                    }))
+                    .filter(({ operatorRuns }) => operatorRuns.length > 0)
+                    .map(({ operator }) => {
+                      const stats = operatorRunStats(operator, runs);
+                      return (
+                        <Box
+                          key={operatorCatalogKey(operator)}
+                          sx={{
+                            p: 1,
+                            borderRadius: 1.5,
+                            bgcolor: "background.paper",
+                            border: 1,
+                            borderColor: "divider",
+                          }}
+                        >
+                          <Stack
+                            direction={{ xs: "column", sm: "row" }}
+                            gap={0.75}
+                            alignItems={{ xs: "stretch", sm: "center" }}
+                            justifyContent="space-between"
+                          >
+                            <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+                              <Typography variant="body2" fontWeight={850} sx={{ wordBreak: "break-all" }}>
+                                {operatorDisplayName(operator)}
+                              </Typography>
+                              {stats.succeeded > 0 && (
+                                <Chip size="small" color="success" variant="outlined" label={`${stats.succeeded} succeeded`} />
+                              )}
+                              {stats.failed > 0 && (
+                                <Chip size="small" color="error" variant="outlined" label={`${stats.failed} failed`} />
+                              )}
+                              {stats.running > 0 && (
+                                <Chip size="small" color="info" variant="outlined" label={`${stats.running} running`} />
+                              )}
+                              {stats.cacheHits > 0 && (
+                                <Chip size="small" color="secondary" variant="outlined" label={`${stats.cacheHits} cached`} />
+                              )}
+                            </Stack>
+                            <Button
+                              size="small"
+                              variant="text"
+                              onClick={() => setDetailOperator(operator)}
+                              sx={{ alignSelf: { xs: "flex-start", sm: "center" }, textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap" }}
+                            >
+                              View details →
+                            </Button>
+                          </Stack>
+                        </Box>
+                      );
+                    })}
+                </Stack>
+              </AccordionDetails>
+            </Accordion>
+          )}
           {operators.length === 0 ? (
             <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
               <ExtensionRounded sx={{ color: "text.secondary", mb: 1 }} />
@@ -4974,6 +4944,28 @@ function OperatorCatalogSection({
                         )}
                         <Chip size="small" variant="outlined" label={operator.sourcePlugin} />
                         {operatorResourceProfileChip(operator)}
+                        {(() => {
+                          const envRef = operatorEnvironmentRef(operator);
+                          if (!envRef) return null;
+                          const env = (environments ?? []).find(
+                            (e) => e.id === envRef || e.canonicalId === envRef,
+                          );
+                          const color = env
+                            ? pluginEnvironmentStatusColor(env.availabilityStatus)
+                            : "default";
+                          const label = env ? pluginEnvironmentDisplayName(env) : envRef;
+                          return (
+                            <Tooltip title={`Environment: ${label}${env ? ` (${env.availabilityStatus})` : " — not resolved"}`}>
+                              <Chip
+                                size="small"
+                                color={color}
+                                variant="outlined"
+                                label={`env: ${label}`}
+                                sx={{ maxWidth: 160 }}
+                              />
+                            </Tooltip>
+                          );
+                        })()}
                         {smokeCount > 0 && (
                           <Chip
                             size="small"
@@ -5164,6 +5156,10 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   }, [loadPlugins, operatorSurface, projectRoot]);
 
   const allPlugins = useMemo(() => flattenMarketplacePlugins(marketplaces), [marketplaces]);
+  const allPluginEnvironments = useMemo(
+    () => allPlugins.flatMap((plugin) => plugin.environments ?? []),
+    [allPlugins],
+  );
   const remoteMarketplaceCount = useMemo(
     () => marketplaces.filter((marketplace) => marketplace.remote?.url?.trim()).length,
     [marketplaces],
@@ -6162,6 +6158,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         runs={operatorRuns}
         registryPath={operatorRegistryPath}
         busy={isMutating}
+        environments={allPluginEnvironments}
         onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
         onSmokeRun={(operator, smokeTestId) => void handleOperatorSmokeRun(operator, smokeTestId)}
         onRefreshRuns={() => void handleRefreshOperatorRuns()}
@@ -6211,6 +6208,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           runs={operatorRuns}
           registryPath={operatorRegistryPath}
           busy={isMutating}
+          environments={allPluginEnvironments}
           onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
           onSmokeRun={(operator, smokeTestId) => void handleOperatorSmokeRun(operator, smokeTestId)}
           onRefreshRuns={() => void handleRefreshOperatorRuns()}
