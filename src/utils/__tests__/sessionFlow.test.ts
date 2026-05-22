@@ -198,6 +198,69 @@ describe('Session Flow Integration', () => {
   });
 
   describe('setCurrentSession', () => {
+    it('should restore persisted failed tool rows as error after loading a session', async () => {
+      const mockInvoke = vi.mocked(invoke);
+      mockInvoke.mockImplementation(async (command) => {
+        if (command === 'load_session') {
+          return {
+            id: 'session-error',
+            name: 'Session error',
+            messages: [
+              {
+                id: 'assistant-1',
+                role: 'assistant',
+                content: '',
+                tool_calls: [
+                  {
+                    id: 'call-timeout',
+                    name: 'glob',
+                    arguments: '{"pattern":"**/*.fq.gz"}',
+                  },
+                ],
+                created_at: '2026-04-16T00:00:00.000Z',
+              },
+              {
+                id: 'tool-1',
+                role: 'tool',
+                tool_call_id: 'call-timeout',
+                output: 'Tool `glob` timed out after 45s',
+                is_error: true,
+                created_at: '2026-04-16T00:00:45.000Z',
+              },
+            ],
+            project_path: '/tmp/project',
+            created_at: '2026-04-16T00:00:00.000Z',
+            updated_at: '2026-04-16T00:00:45.000Z',
+            active_provider_entry_name: null,
+            has_more_messages: false,
+          };
+        }
+        if (command === 'prewarm_session') return undefined;
+        throw new Error(`unexpected invoke: ${command}`);
+      });
+
+      useSessionStore.setState({
+        currentSession: {
+          id: 'session-error',
+          name: 'Session error',
+          projectPath: '/tmp/project',
+          workingDirectory: '/tmp/project',
+          createdAt: '2026-04-16T00:00:00.000Z',
+          updatedAt: '2026-04-16T00:00:00.000Z',
+          messageCount: 2,
+        },
+      });
+
+      await useSessionStore.getState().loadSession('session-error');
+
+      const toolRow = useSessionStore
+        .getState()
+        .storeMessages.find((message) => message.role === 'tool');
+      expect(toolRow?.toolCall?.name).toBe('glob');
+      expect(toolRow?.toolCall?.status).toBe('error');
+      expect(toolRow?.toolCall?.output).toBe('Tool `glob` timed out after 45s');
+    });
+
     it('should switch into loading state immediately on cache miss', async () => {
       const mockInvoke = vi.mocked(invoke);
       const loadDeferred = deferred<{

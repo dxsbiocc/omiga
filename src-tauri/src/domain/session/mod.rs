@@ -70,9 +70,20 @@ impl Session {
 
     /// Add a tool result
     pub fn add_tool_result(&mut self, tool_call_id: impl Into<String>, output: impl Into<String>) {
+        self.add_tool_result_with_error(tool_call_id, output, None);
+    }
+
+    /// Add a tool result and preserve provider-level error semantics when known.
+    pub fn add_tool_result_with_error(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        output: impl Into<String>,
+        is_error: Option<bool>,
+    ) {
         self.messages.push(Message::Tool {
             tool_call_id: tool_call_id.into(),
             output: output.into(),
+            is_error,
         });
         self.updated_at = chrono::Utc::now();
     }
@@ -99,9 +110,17 @@ impl Session {
                     content: vec![crate::api::ContentBlock::text(content.clone())],
                     reasoning_content: reasoning_content.clone(),
                 },
-                Message::Tool { output, .. } => crate::api::Message {
+                Message::Tool {
+                    tool_call_id,
+                    output,
+                    is_error,
+                } => crate::api::Message {
                     role: crate::api::Role::User,
-                    content: vec![crate::api::ContentBlock::text(output.clone())],
+                    content: vec![crate::api::ContentBlock::ToolResult {
+                        tool_use_id: tool_call_id.clone(),
+                        content: output.clone(),
+                        is_error: *is_error,
+                    }],
                     reasoning_content: None,
                 },
             })
@@ -146,6 +165,8 @@ pub enum Message {
     Tool {
         tool_call_id: String,
         output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
     },
 }
 
@@ -231,9 +252,11 @@ pub fn sanitize_background_sidechain_message(message: &Message) -> Message {
         Message::Tool {
             tool_call_id,
             output,
+            is_error,
         } => Message::Tool {
             tool_call_id: tool_call_id.clone(),
             output: sanitize_sidechain_text(output, "工具输出"),
+            is_error: *is_error,
         },
     }
 }
@@ -267,11 +290,18 @@ pub fn to_anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
             Message::Tool {
                 tool_call_id,
                 output,
-            } => serde_json::json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": output
-            }),
+                is_error,
+            } => {
+                let mut msg = serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": output
+                });
+                if let Some(value) = is_error {
+                    msg["is_error"] = serde_json::json!(value);
+                }
+                msg
+            }
         })
         .collect()
 }

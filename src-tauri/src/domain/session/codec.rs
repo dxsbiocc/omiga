@@ -90,6 +90,7 @@ impl SessionCodec {
             "tool" => Message::Tool {
                 tool_call_id: record.tool_call_id.unwrap_or_default(),
                 output: record.content,
+                is_error: record.tool_is_error.map(|value| value != 0),
             },
             _ => Message::User {
                 content: record.content,
@@ -157,6 +158,7 @@ impl SessionCodec {
             Message::Tool {
                 tool_call_id,
                 output,
+                is_error: _,
             } => EncodedMessageRecord {
                 id: id.to_string(),
                 session_id: session_id.to_string(),
@@ -212,12 +214,13 @@ impl SessionCodec {
                 Message::Tool {
                     tool_call_id,
                     output,
+                    is_error,
                 } => ApiMessage {
                     role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: tool_call_id.clone(),
                         content: output.clone(),
-                        is_error: None,
+                        is_error: *is_error,
                     }],
                     reasoning_content: None,
                 },
@@ -328,6 +331,7 @@ mod tests {
             content: "File contents".to_string(),
             tool_calls: None,
             tool_call_id: Some("call-1".to_string()),
+            tool_is_error: Some(1),
             token_usage_json: None,
             reasoning_content: None,
             follow_up_suggestions_json: None,
@@ -340,9 +344,11 @@ mod tests {
             Message::Tool {
                 tool_call_id,
                 output,
+                is_error,
             } => {
                 assert_eq!(tool_call_id, "call-1");
                 assert_eq!(output, "File contents");
+                assert_eq!(is_error, Some(true));
             }
             _ => panic!("Expected Tool message"),
         }

@@ -8,13 +8,8 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
-import { alpha } from "@mui/material/styles";
+import { alpha, useTheme, type Theme } from "@mui/material/styles";
 import { compactLabel } from "../../utils/compactLabel";
-
-const ACCENT = "#6f8a64";
-const INK = "#0f172a";
-const MUTED = "#64748b";
-const BORDER = "#dbe4d8";
 
 export interface ExecutionRecordDto {
   id: string;
@@ -183,6 +178,9 @@ export function ExecutionRecordBrowserView({
   onRefresh,
   onSelect,
 }: ExecutionRecordBrowserViewProps) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+  const accent = theme.palette.primary.main;
   const records = response?.records ?? [];
   const visibleRecords = rootExecutionRecords(records);
   const childCounts = useMemo(() => executionChildCounts(records), [records]);
@@ -192,26 +190,30 @@ export function ExecutionRecordBrowserView({
       <Box
         sx={{
           p: 1,
-          borderRadius: 2.25,
-          border: `1px solid ${alpha(ACCENT, 0.16)}`,
-          background: `linear-gradient(135deg, ${alpha("#ffffff", 0.98)} 0%, ${alpha(
-            ACCENT,
-            0.06,
+          borderRadius: 1,
+          border: `1px solid ${alpha(accent, isDark ? 0.28 : 0.16)}`,
+          background: `linear-gradient(135deg, ${alpha(
+            theme.palette.background.paper,
+            isDark ? 0.82 : 0.98,
+          )} 0%, ${alpha(
+            accent,
+            isDark ? 0.14 : 0.06,
           )} 100%)`,
-          boxShadow: `0 8px 24px ${alpha("#0f172a", 0.035)}`,
+          bgcolor: alpha(theme.palette.background.paper, isDark ? 0.7 : 0.92),
+          boxShadow: `0 8px 24px ${alpha(theme.palette.common.black, isDark ? 0.18 : 0.04)}`,
         }}
       >
         <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
           <Box sx={{ minWidth: 0 }}>
             <Typography
               variant="caption"
-              sx={{ display: "block", color: INK, fontSize: 12, fontWeight: 950, lineHeight: 1.2 }}
+              sx={{ display: "block", color: "text.primary", fontSize: 12, fontWeight: 950, lineHeight: 1.2 }}
             >
               运行记录
             </Typography>
             <Typography
               variant="caption"
-              sx={{ display: "block", color: MUTED, fontSize: 9.5, lineHeight: 1.4, mt: 0.25 }}
+              sx={{ display: "block", color: "text.secondary", fontSize: 9.5, lineHeight: 1.4, mt: 0.25 }}
             >
               查看最近任务的结果和状态；后台 Operator 只作为排错信息保留。
             </Typography>
@@ -226,14 +228,14 @@ export function ExecutionRecordBrowserView({
               px: 1.15,
               py: 0.25,
               borderRadius: 999,
-              borderColor: alpha(ACCENT, 0.34),
-              color: ACCENT,
+              borderColor: alpha(accent, 0.34),
+              color: accent,
               fontSize: 10,
               fontWeight: 900,
               whiteSpace: "nowrap",
               "&:hover": {
-                borderColor: alpha(ACCENT, 0.5),
-                bgcolor: alpha(ACCENT, 0.06),
+                borderColor: alpha(accent, 0.5),
+                bgcolor: alpha(accent, isDark ? 0.12 : 0.06),
               },
             }}
           >
@@ -299,6 +301,9 @@ function MetricPill({
   label: string;
   emphasized?: boolean;
 }) {
+  const theme = useTheme();
+  const accent = theme.palette.primary.main;
+  const isDark = theme.palette.mode === "dark";
   return (
     <Box
       component="span"
@@ -309,9 +314,13 @@ function MetricPill({
         fontSize: 9,
         fontWeight: 800,
         lineHeight: 1.4,
-        bgcolor: emphasized ? alpha(ACCENT, 0.11) : alpha("#ffffff", 0.72),
-        color: emphasized ? "#4f6f48" : MUTED,
-        border: `1px solid ${emphasized ? alpha(ACCENT, 0.2) : alpha("#94a3b8", 0.18)}`,
+        bgcolor: emphasized
+          ? alpha(accent, isDark ? 0.18 : 0.11)
+          : alpha(theme.palette.background.paper, isDark ? 0.48 : 0.72),
+        color: emphasized ? accent : theme.palette.text.secondary,
+        border: `1px solid ${
+          emphasized ? alpha(accent, 0.24) : alpha(theme.palette.divider, 0.85)
+        }`,
       }}
     >
       {label}
@@ -336,9 +345,12 @@ function ExecutionRecordItem({
   detailLoading: boolean;
   onToggle: () => void;
 }) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+  const accent = theme.palette.primary.main;
   const when = formatRecordTime(record.endedAt ?? record.startedAt);
   const unit = record.unitId ?? record.canonicalId ?? record.id;
-  const tone = statusTone(record.status);
+  const tone = statusTone(record.status, theme);
   const childLabel = `${childCount} 个后台步骤`;
 
   return (
@@ -346,18 +358,18 @@ function ExecutionRecordItem({
       sx={{
         position: "relative",
         overflow: "hidden",
-        borderRadius: 2.25,
-        border: `1px solid ${open ? alpha(ACCENT, 0.42) : alpha("#94a3b8", 0.18)}`,
+        borderRadius: 1,
+        border: `1px solid ${open ? alpha(accent, 0.42) : alpha(theme.palette.divider, 0.88)}`,
         background: open
-          ? `linear-gradient(180deg, ${alpha("#ffffff", 0.98)} 0%, ${alpha(ACCENT, 0.045)} 100%)`
-          : alpha("#ffffff", 0.92),
+          ? `linear-gradient(180deg, ${alpha(theme.palette.background.paper, isDark ? 0.88 : 0.96)} 0%, ${alpha(accent, isDark ? 0.12 : 0.045)} 100%)`
+          : alpha(theme.palette.background.paper, isDark ? 0.68 : 0.92),
         boxShadow: open
-          ? `0 12px 28px ${alpha("#0f172a", 0.075)}`
-          : `0 1px 2px ${alpha("#0f172a", 0.035)}`,
+          ? `0 12px 28px ${alpha(theme.palette.common.black, isDark ? 0.26 : 0.075)}`
+          : `0 1px 2px ${alpha(theme.palette.common.black, isDark ? 0.18 : 0.035)}`,
         transition: "border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease",
         "&:hover": {
-          borderColor: open ? alpha(ACCENT, 0.48) : alpha(ACCENT, 0.28),
-          boxShadow: `0 10px 24px ${alpha("#0f172a", 0.06)}`,
+          borderColor: open ? alpha(accent, 0.48) : alpha(accent, 0.28),
+          boxShadow: `0 10px 24px ${alpha(theme.palette.common.black, isDark ? 0.24 : 0.06)}`,
         },
       }}
     >
@@ -393,7 +405,7 @@ function ExecutionRecordItem({
           cursor: "pointer",
           outline: "none",
           "&:focus-visible": {
-            boxShadow: `inset 0 0 0 2px ${alpha(ACCENT, 0.36)}`,
+            boxShadow: `inset 0 0 0 2px ${alpha(accent, 0.36)}`,
           },
         }}
       >
@@ -414,11 +426,11 @@ function ExecutionRecordItem({
               sx={{
                 minWidth: 0,
                 display: "block",
-                color: INK,
+                color: "text.primary",
                 fontSize: 12,
                 fontWeight: 950,
                 lineHeight: 1.25,
-                letterSpacing: 0.05,
+                letterSpacing: 0,
               }}
             >
               {compactLabel(unit, 58)}
@@ -429,13 +441,13 @@ function ExecutionRecordItem({
             sx={{
               display: "block",
               mt: 0.35,
-              color: MUTED,
+              color: "text.secondary",
               fontSize: 9.5,
               lineHeight: 1.35,
               pl: 1.65,
             }}
           >
-            <Box component="span" sx={{ fontWeight: 900, color: alpha(INK, 0.62) }}>
+            <Box component="span" sx={{ fontWeight: 900, color: alpha(theme.palette.text.primary, 0.72) }}>
               {recordKindLabel(record.kind)}
             </Box>
             {when ? ` · ${when}` : ""}
@@ -447,7 +459,7 @@ function ExecutionRecordItem({
           <Typography
             variant="caption"
             sx={{
-              color: open ? "#4f6f48" : MUTED,
+              color: open ? accent : theme.palette.text.secondary,
               fontSize: 9.5,
               fontWeight: 850,
               lineHeight: 1,
@@ -489,13 +501,14 @@ function ExecutionRecordDetailCollapse({
   detail: ExecutionRecordDetailResponse | null;
   loading: boolean;
 }) {
+  const theme = useTheme();
   const summary = detail?.found && detail.record ? userExecutionSummary(detail) : null;
 
   return (
     <Collapse in={open} timeout={180} unmountOnExit>
       {loading ? (
         <Box sx={{ px: 1.2, pb: 1 }}>
-          <Typography variant="caption" sx={{ color: MUTED, fontSize: 10 }}>
+          <Typography variant="caption" sx={{ color: "text.secondary", fontSize: 10 }}>
             正在读取记录详情…
           </Typography>
         </Box>
@@ -505,14 +518,14 @@ function ExecutionRecordDetailCollapse({
             mx: 1.15,
             pb: 1,
             pt: 0.75,
-            borderTop: `1px solid ${alpha(BORDER, 0.9)}`,
+            borderTop: `1px solid ${alpha(theme.palette.divider, 0.9)}`,
           }}
         >
           {summary ? <UserExecutionSummaryPanel summary={summary} /> : null}
         </Box>
       ) : selectedId ? (
         <Box sx={{ px: 1.25, pb: 1 }}>
-          <Typography variant="caption" sx={{ color: MUTED, fontSize: 10 }}>
+          <Typography variant="caption" sx={{ color: "text.secondary", fontSize: 10 }}>
             记录未找到：{selectedId}
           </Typography>
         </Box>
@@ -558,14 +571,15 @@ interface UserExecutionSummary {
 }
 
 function UserExecutionSummaryPanel({ summary }: { summary: UserExecutionSummary }) {
+  const theme = useTheme();
   return (
     <Box
       sx={{
         mt: 0.65,
         p: 0.8,
-        borderRadius: 1.5,
-        border: `1px solid ${alpha("#94a3b8", 0.13)}`,
-        bgcolor: alpha("#f8fafc", 0.72),
+        borderRadius: 1,
+        border: `1px solid ${alpha(theme.palette.divider, 0.75)}`,
+        bgcolor: alpha(theme.palette.background.default, theme.palette.mode === "dark" ? 0.28 : 0.72),
       }}
     >
       <Stack spacing={0.45}>
@@ -587,6 +601,7 @@ function SummaryLine({
   value: string;
   emphasized?: boolean;
 }) {
+  const theme = useTheme();
   return (
     <Box
       sx={{
@@ -599,7 +614,7 @@ function SummaryLine({
       <Typography
         variant="caption"
         sx={{
-          color: alpha(INK, 0.5),
+          color: alpha(theme.palette.text.primary, 0.58),
           display: "block",
           fontSize: 8.8,
           fontWeight: 950,
@@ -610,7 +625,7 @@ function SummaryLine({
       <Typography
         variant="caption"
         sx={{
-          color: emphasized ? "#2f7d4f" : MUTED,
+          color: emphasized ? theme.palette.success.main : theme.palette.text.secondary,
           display: "block",
           fontSize: 9.5,
           fontWeight: emphasized ? 900 : 700,
@@ -714,16 +729,17 @@ function formatRecordTime(value?: string | null): string | null {
   return new Date(timestamp).toLocaleString();
 }
 
-function statusTone(status: string): { color: string; tint: string } {
+function statusTone(status: string, theme: Theme): { color: string; tint: string } {
   const normalized = status.trim().toLowerCase();
+  const tintAlpha = theme.palette.mode === "dark" ? 0.18 : 0.1;
   if (normalized === "success" || normalized === "succeeded") {
-    return { color: "#2f7d4f", tint: alpha("#2f7d4f", 0.09) };
+    return { color: theme.palette.success.main, tint: alpha(theme.palette.success.main, tintAlpha) };
   }
   if (normalized === "failed" || normalized === "error") {
-    return { color: "#b4532a", tint: alpha("#b4532a", 0.1) };
+    return { color: theme.palette.error.main, tint: alpha(theme.palette.error.main, tintAlpha) };
   }
   if (normalized === "running" || normalized === "pending") {
-    return { color: "#7c6f2d", tint: alpha("#7c6f2d", 0.1) };
+    return { color: theme.palette.warning.main, tint: alpha(theme.palette.warning.main, tintAlpha) };
   }
-  return { color: "#64748b", tint: alpha("#64748b", 0.08) };
+  return { color: theme.palette.text.secondary, tint: alpha(theme.palette.text.secondary, tintAlpha * 0.8) };
 }

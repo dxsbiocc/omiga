@@ -383,6 +383,7 @@ pub(super) async fn run_skill_forked(request: ForkedSkillRequest<'_>) -> Result<
                 transcript.push(Message::Tool {
                     tool_call_id: tool_use_id.clone(),
                     output: block.tool_result_message.clone(),
+                    is_error: Some(true),
                 });
             }
             transcript.push(Message::Assistant {
@@ -485,10 +486,11 @@ pub(super) async fn run_skill_forked(request: ForkedSkillRequest<'_>) -> Result<
         })
         .await;
 
-        for (tool_use_id, output, _) in &results {
+        for (tool_use_id, output, is_error) in &results {
             transcript.push(Message::Tool {
                 tool_call_id: tool_use_id.clone(),
                 output: output.clone(),
+                is_error: Some(*is_error),
             });
         }
     }
@@ -802,6 +804,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
                 .map(|(tool_use_id, _name, _arguments)| Message::Tool {
                     tool_call_id: tool_use_id.clone(),
                     output: block.tool_result_message.clone(),
+                    is_error: Some(true),
                 })
                 .collect();
             if let Some(tid) = background_task_id {
@@ -972,9 +975,10 @@ pub(super) async fn run_subagent_session_foreground_inner(
         .await;
         let tool_messages: Vec<Message> = results
             .iter()
-            .map(|(tool_use_id, output, _)| Message::Tool {
+            .map(|(tool_use_id, output, is_error)| Message::Tool {
                 tool_call_id: tool_use_id.clone(),
                 output: output.clone(),
+                is_error: Some(*is_error),
             })
             .collect();
         if let Some(tid) = background_task_id {

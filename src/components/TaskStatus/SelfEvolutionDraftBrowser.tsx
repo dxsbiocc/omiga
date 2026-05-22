@@ -11,10 +11,42 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { alpha } from "@mui/material/styles";
+import { alpha, type Theme } from "@mui/material/styles";
 import { compactLabel } from "../../utils/compactLabel";
 
-const ACCENT = "#8b5cf6";
+type PanelTone = "primary" | "success" | "warning" | "info";
+
+function toneColor(theme: Theme, tone: PanelTone): string {
+  return theme.palette[tone].main;
+}
+
+function toneSurface(
+  theme: Theme,
+  tone: PanelTone,
+  options: { dashed?: boolean; strong?: boolean } = {},
+) {
+  const isDark = theme.palette.mode === "dark";
+  const color = toneColor(theme, tone);
+  return {
+    border: `${options.dashed ? "1px dashed" : "1px solid"} ${alpha(
+      color,
+      options.strong ? 0.36 : isDark ? 0.32 : 0.2,
+    )}`,
+    bgcolor: alpha(color, options.strong ? (isDark ? 0.16 : 0.07) : isDark ? 0.11 : 0.04),
+  };
+}
+
+function neutralSurface(theme: Theme, selected = false) {
+  const isDark = theme.palette.mode === "dark";
+  return {
+    border: `1px solid ${
+      selected ? alpha(theme.palette.primary.main, 0.42) : alpha(theme.palette.divider, 0.88)
+    }`,
+    bgcolor: selected
+      ? alpha(theme.palette.primary.main, isDark ? 0.16 : 0.075)
+      : alpha(theme.palette.background.paper, isDark ? 0.5 : 0.72),
+  };
+}
 
 export interface SelfEvolutionDraftSummary {
   draftDir: string;
@@ -1006,46 +1038,77 @@ export function SelfEvolutionDraftBrowserView({
   const drafts = response?.batches.flatMap((batch) => batch.drafts) ?? [];
   return (
     <Stack spacing={1}>
-      <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-        <Box sx={{ minWidth: 0 }}>
-          <Typography variant="caption" sx={{ display: "block", fontSize: 10, fontWeight: 800 }}>
-            Self-evolution Draft Review
-          </Typography>
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{ display: "block", fontSize: 9.5, lineHeight: 1.35 }}
+      <Box
+        sx={(theme) => ({
+          p: 1,
+          borderRadius: 1,
+          border: `1px solid ${alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.28 : 0.16)}`,
+          background: `linear-gradient(135deg, ${alpha(
+            theme.palette.background.paper,
+            theme.palette.mode === "dark" ? 0.82 : 0.98,
+          )} 0%, ${alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.14 : 0.06)} 100%)`,
+          bgcolor: alpha(theme.palette.background.paper, theme.palette.mode === "dark" ? 0.7 : 0.92),
+          boxShadow: `0 8px 24px ${alpha(theme.palette.common.black, theme.palette.mode === "dark" ? 0.18 : 0.04)}`,
+        })}
+      >
+        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography
+              variant="caption"
+              sx={{ display: "block", color: "text.primary", fontSize: 12, fontWeight: 950, lineHeight: 1.2 }}
+            >
+              演化草稿审阅
+            </Typography>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", fontSize: 9.5, lineHeight: 1.4, mt: 0.25 }}
+            >
+              默认只读审阅草稿；显式 apply 只写确认的单个文件，不注册单元或修改配置。
+            </Typography>
+          </Box>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={onRefresh}
+            disabled={loading}
+            sx={(theme) => ({
+              minWidth: 0,
+              px: 1.15,
+              py: 0.25,
+              borderRadius: 999,
+              borderColor: alpha(theme.palette.primary.main, 0.34),
+              color: "primary.main",
+              fontSize: 10,
+              fontWeight: 900,
+              whiteSpace: "nowrap",
+              "&:hover": {
+                borderColor: alpha(theme.palette.primary.main, 0.5),
+                bgcolor: alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.12 : 0.06),
+              },
+            })}
           >
-            默认只读审阅草稿；显式 apply 只写确认的单个文件，不注册单元或修改配置。
-          </Typography>
-        </Box>
-        <Button
-          size="small"
-          variant="outlined"
-          onClick={onRefresh}
-          disabled={loading}
-          sx={{ minWidth: 0, fontSize: 10, py: 0.15 }}
-        >
-          {loading ? "刷新中" : "刷新"}
-        </Button>
-      </Stack>
+            {loading ? "刷新中" : "刷新"}
+          </Button>
+        </Stack>
+
+        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mt: 0.85 }}>
+          <Chip size="small" label={`${response?.batchCount ?? 0} batches`} sx={{ height: 18, fontSize: 9 }} />
+          <Chip size="small" label={`${drafts.length} drafts`} variant="outlined" sx={{ height: 18, fontSize: 9 }} />
+          <Chip
+            size="small"
+            label={`${artifactList?.artifactCount ?? 0} review artifacts`}
+            variant="outlined"
+            sx={{ height: 18, fontSize: 9 }}
+          />
+        </Stack>
+      </Box>
 
       {error ? (
         <Typography variant="caption" color="error" sx={{ fontSize: 10 }}>
           {error}
         </Typography>
       ) : null}
-
-      <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
-        <Chip size="small" label={`${response?.batchCount ?? 0} batches`} sx={{ height: 18, fontSize: 9 }} />
-        <Chip size="small" label={`${drafts.length} drafts`} variant="outlined" sx={{ height: 18, fontSize: 9 }} />
-        <Chip
-          size="small"
-          label={`${artifactList?.artifactCount ?? 0} review artifacts`}
-          variant="outlined"
-          sx={{ height: 18, fontSize: 9 }}
-        />
-      </Stack>
 
       {artifactList?.artifacts.length ? (
         <PromotionArtifactListPanel
@@ -1169,12 +1232,11 @@ function PromotionArtifactListPanel({
 }) {
   return (
     <Box
-      sx={{
+      sx={(theme) => ({
         p: 0.75,
         borderRadius: 1,
-        border: `1px solid ${alpha("#10b981", 0.18)}`,
-        bgcolor: alpha("#10b981", 0.035),
-      }}
+        ...toneSurface(theme, "success"),
+      })}
     >
       <Typography variant="caption" sx={{ display: "block", fontSize: 9.5, fontWeight: 900 }}>
         Saved promotion review artifacts
@@ -1196,13 +1258,19 @@ function PromotionArtifactListPanel({
                 onSelectArtifact?.(artifact.artifactDir);
               }
             }}
-            sx={{
+            sx={(theme) => ({
               p: 0.45,
               borderRadius: 0.8,
-              border: `1px solid ${alpha(selected ? "#10b981" : "#64748b", selected ? 0.28 : 0.1)}`,
-              bgcolor: selected ? alpha("#10b981", 0.075) : "transparent",
+              border: `1px solid ${
+                selected
+                  ? alpha(theme.palette.success.main, 0.34)
+                  : alpha(theme.palette.divider, 0.8)
+              }`,
+              bgcolor: selected
+                ? alpha(theme.palette.success.main, theme.palette.mode === "dark" ? 0.16 : 0.075)
+                : "transparent",
               cursor: "pointer",
-            }}
+            })}
           >
             <Stack direction="row" spacing={0.4} alignItems="center" flexWrap="wrap" useFlexGap>
               {selected ? (
@@ -1271,12 +1339,11 @@ function PromotionArtifactDetailPanel({
       : "artifact_detail";
   return (
     <Box
-      sx={{
+      sx={(theme) => ({
         p: 0.75,
         borderRadius: 1,
-        border: `1px solid ${alpha("#10b981", 0.2)}`,
-        bgcolor: alpha("#10b981", 0.04),
-      }}
+        ...toneSurface(theme, "success"),
+      })}
     >
       <Typography variant="caption" sx={{ display: "block", fontSize: 9.5, fontWeight: 900 }}>
         Saved artifact detail (read-only)
@@ -1409,12 +1476,11 @@ function PromotionApplyPlanPanel({
   );
   return (
     <Box
-      sx={{
+      sx={(theme) => ({
         p: 0.75,
         borderRadius: 1,
-        border: `1px solid ${alpha(blockedCount ? "#f59e0b" : "#10b981", 0.24)}`,
-        bgcolor: alpha(blockedCount ? "#f59e0b" : "#10b981", 0.045),
-      }}
+        ...toneSurface(theme, blockedCount ? "warning" : "success"),
+      })}
     >
       <Typography variant="caption" sx={{ display: "block", fontSize: 9.5, fontWeight: 900 }}>
         Promotion apply readiness gate
@@ -1623,13 +1689,12 @@ function MultiFilePromotionPlanPanel({
   };
   return (
     <Box
-      sx={{
+      sx={(theme) => ({
         mt: 0.75,
         p: 0.75,
         borderRadius: 1,
-        border: `1px dashed ${alpha("#0ea5e9", 0.28)}`,
-        bgcolor: alpha("#0ea5e9", 0.035),
-      }}
+        ...toneSurface(theme, "info", { dashed: true }),
+      })}
     >
       <Typography variant="caption" sx={{ display: "block", fontSize: 9, fontWeight: 900 }}>
         Multi-file companion promotion plan
@@ -1807,13 +1872,12 @@ function PromotionApplyRequestGate({
   const canApply = request?.status === "ready_for_explicit_apply" && request.applyCommandAvailable;
   return (
     <Box
-      sx={{
+      sx={(theme) => ({
         mt: 0.75,
         p: 0.75,
         borderRadius: 1,
-        border: `1px dashed ${alpha("#f59e0b", 0.3)}`,
-        bgcolor: alpha("#f59e0b", 0.035),
-      }}
+        ...toneSurface(theme, "warning", { dashed: true }),
+      })}
     >
       <Typography variant="caption" sx={{ display: "block", fontSize: 9, fontWeight: 900 }}>
         Apply request confirmation gate
@@ -2026,13 +2090,12 @@ function SelfEvolutionDraftRow({
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") onClick?.();
       }}
-      sx={{
+      sx={(theme) => ({
         p: 0.75,
-        borderRadius: 1.25,
-        border: `1px solid ${alpha(selected ? ACCENT : "#64748b", selected ? 0.34 : 0.16)}`,
-        bgcolor: selected ? alpha(ACCENT, 0.075) : alpha("#64748b", 0.025),
+        borderRadius: 1,
+        ...neutralSurface(theme, selected),
         cursor: "pointer",
-      }}
+      })}
     >
       <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
         <Chip size="small" label={draft.kind} sx={{ height: 16, fontSize: 8.5 }} />
@@ -2088,13 +2151,12 @@ function SelfEvolutionDraftDetailPanel({
   const creatorPackage = isCreatorDraft(detail.candidate);
   return (
     <Box
-      sx={{
+      sx={(theme) => ({
         mt: 0.25,
         p: 1,
-        borderRadius: 1.25,
-        border: `1px solid ${alpha(ACCENT, 0.18)}`,
-        bgcolor: alpha(ACCENT, 0.04),
-      }}
+        borderRadius: 1,
+        ...toneSurface(theme, "primary"),
+      })}
     >
       <Typography variant="caption" sx={{ display: "block", fontSize: 10, fontWeight: 800 }}>
         草稿详情 · {compactLabel(detail.reviewPreview.title ?? detail.reviewPreview.candidateId ?? detail.draftDir, 42)}
@@ -2206,12 +2268,11 @@ function CompanionDraftChecklist({
         Companion draft checklist
       </Typography>
       <Box
-        sx={{
+        sx={(theme) => ({
           p: 0.65,
           borderRadius: 1,
-          border: `1px dashed ${alpha("#f59e0b", 0.28)}`,
-          bgcolor: alpha("#f59e0b", 0.04),
-        }}
+          ...toneSurface(theme, "warning", { dashed: true }),
+        })}
       >
         <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontSize: 8.6, lineHeight: 1.35 }}>
           Single-file promotion writes only the primary manifest target; move companion scripts,
@@ -2236,13 +2297,12 @@ function PromotionArtifactPanel({
 }) {
   return (
     <Box
-      sx={{
+      sx={(theme) => ({
         mt: 0.75,
         p: 0.75,
         borderRadius: 1,
-        border: `1px solid ${alpha("#10b981", 0.28)}`,
-        bgcolor: alpha("#10b981", 0.055),
-      }}
+        ...toneSurface(theme, "success", { strong: true }),
+      })}
     >
       <Typography variant="caption" sx={{ display: "block", fontSize: 9.5, fontWeight: 900 }}>
         Saved promotion review artifact
@@ -2291,13 +2351,12 @@ function PromotionPreviewPanel({
 }) {
   return (
     <Box
-      sx={{
+      sx={(theme) => ({
         mt: 0.75,
         p: 0.8,
         borderRadius: 1,
-        border: `1px dashed ${alpha(ACCENT, 0.28)}`,
-        bgcolor: alpha("#f59e0b", 0.045),
-      }}
+        ...toneSurface(theme, "warning", { dashed: true }),
+      })}
     >
       <Typography variant="caption" sx={{ display: "block", fontSize: 9.5, fontWeight: 900 }}>
         Promotion patch dry-run
@@ -2394,18 +2453,21 @@ function PreviewBlock({
       </Typography>
       <Box
         component="pre"
-        sx={{
+        sx={(theme) => ({
           m: 0,
           p: 0.75,
           borderRadius: 1,
-          bgcolor: alpha("#0f172a", 0.06),
+          bgcolor: alpha(theme.palette.text.primary, theme.palette.mode === "dark" ? 0.12 : 0.06),
+          color: "text.primary",
+          border: `1px solid ${alpha(theme.palette.divider, 0.75)}`,
+          fontFamily: '"JetBrains Mono", "SFMono-Regular", Consolas, monospace',
           fontSize: 9,
           lineHeight: 1.35,
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",
           maxHeight: 220,
           overflow: "auto",
-        }}
+        })}
       >
         {preview}
       </Box>

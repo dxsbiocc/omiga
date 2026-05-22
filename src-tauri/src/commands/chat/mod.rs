@@ -630,12 +630,13 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             }
         }
 
-        let blocked_batch: Vec<(String, String, Option<String>)> = tool_calls
+        let blocked_batch: Vec<(String, String, bool, Option<String>)> = tool_calls
             .iter()
             .map(|(id, _name, _arguments)| {
                 (
                     id.clone(),
                     block.tool_result_message.to_string(),
+                    true,
                     None,
                 )
             })
@@ -654,9 +655,10 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             let mut sessions_guard = sessions.write().await;
             if let Some(runtime) = sessions_guard.get_mut(session_id) {
                 for (tool_use_id, tool_name, arguments) in tool_calls {
-                    runtime.session.add_tool_result(
+                    runtime.session.add_tool_result_with_error(
                         tool_use_id.clone(),
                         block.tool_result_message.to_string(),
+                        Some(true),
                     );
                     let _ = app.emit(
                         &format!("chat-stream-{}", message_id),
@@ -750,7 +752,7 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             if let Err(e) = repo
                 .save_tool_results_batch(
                     session_id,
-                    &[(returned_tool_id.clone(), output.clone(), None)],
+                    &[(returned_tool_id.clone(), output.clone(), is_error, None)],
                 )
                 .await
             {
@@ -759,9 +761,10 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             {
                 let mut sessions_guard = sessions.write().await;
                 if let Some(runtime) = sessions_guard.get_mut(session_id) {
-                    runtime.session.add_tool_result(
+                    runtime.session.add_tool_result_with_error(
                         returned_tool_id,
                         output,
+                        Some(is_error),
                     );
                 }
             }
@@ -4178,9 +4181,9 @@ pub async fn send_message(
             {
                 let repo = &*repo_clone;
                 // Write all tool results in a single transaction (one fsync instead of N).
-                let batch: Vec<(String, String, Option<String>)> = tool_results
+                let batch: Vec<(String, String, bool, Option<String>)> = tool_results
                     .iter()
-                    .map(|(id, out, _is_error)| (id.clone(), out.clone(), None))
+                    .map(|(id, out, is_error)| (id.clone(), out.clone(), *is_error, None))
                     .collect();
                 if let Err(e) = repo
                     .save_tool_results_batch(&session_id_clone, &batch)
@@ -4193,10 +4196,11 @@ pub async fn send_message(
             {
                 let mut sessions = sessions_clone.write().await;
                 if let Some(runtime) = sessions.get_mut(&session_id_clone) {
-                    for (tool_use_id, output, _is_error) in &tool_results {
-                        runtime.session.add_tool_result(
+                    for (tool_use_id, output, is_error) in &tool_results {
+                        runtime.session.add_tool_result_with_error(
                             tool_use_id,
                             output,
+                            Some(*is_error),
                         );
                     }
                 }

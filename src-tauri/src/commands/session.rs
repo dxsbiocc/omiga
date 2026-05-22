@@ -47,6 +47,7 @@ fn message_record_to_api(rec: MessageRecord) -> Message {
         "tool" => Message::Tool {
             tool_call_id: rec.tool_call_id.unwrap_or_default(),
             output: rec.content,
+            is_error: rec.tool_is_error.map(|value| value != 0),
             id,
             created_at,
         },
@@ -301,10 +302,12 @@ pub async fn save_session(state: State<'_, AppState>, session: SessionData) -> C
             Message::Tool {
                 tool_call_id,
                 output,
+                is_error,
                 ..
             } => DomainMessage::Tool {
                 tool_call_id: tool_call_id.clone(),
                 output: output.clone(),
+                is_error: *is_error,
             },
         };
 
@@ -452,10 +455,12 @@ pub async fn save_message(
         Message::Tool {
             tool_call_id,
             output,
+            is_error,
             ..
         } => DomainMessage::Tool {
             tool_call_id,
             output,
+            is_error,
         },
     };
 
@@ -1138,6 +1143,8 @@ pub enum Message {
     Tool {
         tool_call_id: String,
         output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         /// RFC3339 creation timestamp from DB; used by frontend for elapsed-time display.
