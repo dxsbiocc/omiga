@@ -1174,9 +1174,9 @@ fn composer_execution_addendum(
         if !name.is_empty() && venv_type != "none" && !venv_type.is_empty() {
             let kind_label = match venv_type {
                 "conda" => "conda env",
-                "venv"  => "venv",
+                "venv" => "venv",
                 "pyenv" => "pyenv",
-                other   => other,
+                other => other,
             };
             format!(
                 "\nActive Python environment: **{kind_label} `{name}`** — \
@@ -1648,6 +1648,15 @@ pub async fn send_message(
                                 e
                             )))
                         })?;
+                    // Consume the pre-warmed EnvStore from load_session if available,
+                    // so the SSH connection is already established on first tool use.
+                    let env_store = app_state
+                        .chat
+                        .pending_env_stores
+                        .lock()
+                        .await
+                        .remove(&session.id)
+                        .unwrap_or_else(crate::domain::tools::env_store::EnvStore::new);
                     sessions.insert(
                         session.id.clone(),
                         SessionRuntimeState {
@@ -1661,7 +1670,7 @@ pub async fn send_message(
                             sandbox_backend: sandbox_backend.clone(),
                             local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
                             local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
-                            env_store: crate::domain::tools::env_store::EnvStore::new(),
+                            env_store,
                             artifact_registry:
                                 crate::domain::session::artifacts::ArtifactRegistry::default(),
                         },
@@ -1719,8 +1728,15 @@ pub async fn send_message(
             )))
         })?;
 
-        // Cache in memory
+        // Cache in memory — reuse pre-warmed EnvStore from load_session if present
         let ssh_server = request.ssh_server.clone();
+        let env_store_for_new = app_state
+            .chat
+            .pending_env_stores
+            .lock()
+            .await
+            .remove(&session.id)
+            .unwrap_or_else(crate::domain::tools::env_store::EnvStore::new);
         let runtime_state = SessionRuntimeState {
             session: session.clone(),
             active_round_ids: vec![],
@@ -1732,7 +1748,7 @@ pub async fn send_message(
             sandbox_backend: sandbox_backend.clone(),
             local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
             local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
-            env_store: crate::domain::tools::env_store::EnvStore::new(),
+            env_store: env_store_for_new,
             artifact_registry: crate::domain::session::artifacts::ArtifactRegistry::default(),
         };
         {
@@ -3367,8 +3383,7 @@ pub async fn send_message(
             reasoning_content: msg.reasoning_content.clone(),
         })
         .collect();
-    let request_image_attachments =
-        load_request_image_attachments(&project_root, &[]).await;
+    let request_image_attachments = load_request_image_attachments(&project_root, &[]).await;
     append_image_attachments_to_latest_user_message(&mut llm_messages, &request_image_attachments);
 
     // Start streaming in background
@@ -3494,6 +3509,17 @@ pub async fn send_message(
                     .unwrap_or_else(crate::domain::tools::env_store::EnvStore::new),
             )
         };
+
+        // Pre-warm the SSH/sandbox connection so the first tool call doesn't pay the
+        // full SSH handshake cost on top of the 45 s outer tool timeout.
+        // warmup() is fire-and-forget (non-blocking) — the session continues immediately.
+        if execution_environment != "local" {
+            let warmup_ctx = ToolContext::new(project_root.clone())
+                .with_execution_environment(execution_environment.clone())
+                .with_ssh_server(ssh_server_rt.clone())
+                .with_sandbox_backend(sandbox_backend_rt.clone());
+            env_store_rt.warmup(&warmup_ctx).await;
+        }
 
         let agent_runtime = AgentLlmRuntime {
             llm_config: llm_config_for_spawn.clone(),

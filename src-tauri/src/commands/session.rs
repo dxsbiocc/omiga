@@ -189,6 +189,57 @@ pub async fn load_session(
 
     // spawn_blocking only fails if the thread panicked — fall back to defaults.
     let session_config = config_result.unwrap_or_else(|_| load_session_config(&session_id));
+
+    // ── Eager SSH/sandbox connection warm-up ───────────────────────────────────
+    // If this session uses a non-local execution environment, pre-establish the
+    // SSH control socket NOW (in the background) so it's ready by the time the
+    // user sends their first message. Without this, the handshake + rsync happen
+    // inside the first tool call, racing against the 45 s outer tool timeout.
+    //
+    // Strategy: if the session already has a live SessionRuntimeState, reuse its
+    // env_store; otherwise create a fresh one and register it. Either way,
+    // warmup() fires asynchronously and does not block load_session.
+    if session_config.execution_environment != "local"
+        && !session_config.execution_environment.is_empty()
+    {
+        use crate::domain::tools::env_store::EnvStore;
+        use crate::domain::tools::ToolContext;
+
+        // Get the existing env_store if session is already in memory, or create
+        // a fresh one and register it in `pending_env_stores` so `send_message`
+        // picks it up instead of calling `EnvStore::new()` cold.
+        let env_store: EnvStore = {
+            let sessions_read = state.chat.sessions.read().await;
+            if let Some(rs) = sessions_read.get(&session_id) {
+                rs.env_store.clone()
+            } else {
+                drop(sessions_read);
+                let fresh = EnvStore::new();
+                // Park the fresh store so send_message can reuse it.
+                state
+                    .chat
+                    .pending_env_stores
+                    .lock()
+                    .await
+                    .insert(session_id.clone(), fresh.clone());
+                fresh
+            }
+        };
+
+        let project_path = session.project_path.clone();
+        let exec_env = session_config.execution_environment.clone();
+        let ssh_server = session_config.ssh_server.clone();
+        let sandbox_backend = session_config.sandbox_backend.clone();
+
+        tokio::spawn(async move {
+            let warmup_ctx = ToolContext::new(std::path::PathBuf::from(&project_path))
+                .with_execution_environment(exec_env)
+                .with_ssh_server(ssh_server)
+                .with_sandbox_backend(sandbox_backend);
+            env_store.warmup(&warmup_ctx).await;
+        });
+    }
+
     let config_response = SessionConfigResponse::from(session_config);
 
     let total = start.elapsed();
