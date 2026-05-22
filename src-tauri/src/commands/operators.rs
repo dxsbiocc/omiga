@@ -220,6 +220,7 @@ pub async fn list_operator_runs(
     execution_environment: Option<String>,
     ssh_server: Option<String>,
     sandbox_backend: Option<String>,
+    status_filter: Option<String>,
 ) -> CommandResult<Vec<OperatorRunSummary>> {
     let ctx = build_operator_context(
         &state,
@@ -231,9 +232,13 @@ pub async fn list_operator_runs(
         30,
     )
     .await;
-    operators::list_operator_runs_for_context(&ctx, 25)
+    let mut runs = operators::list_operator_runs_for_context(&ctx, 100)
         .await
-        .map_err(operator_error)
+        .map_err(operator_error)?;
+    if let Some(filter) = status_filter.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        runs.retain(|run| run.status.trim().eq_ignore_ascii_case(filter));
+    }
+    Ok(runs)
 }
 
 #[tauri::command]

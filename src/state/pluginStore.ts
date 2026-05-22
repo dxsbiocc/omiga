@@ -999,6 +999,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         invoke<OperatorRunSummary[]>("list_operator_runs", {
           projectRoot,
           ...operatorSurfacePayload(surface),
+          statusFilter: undefined,
         }),
       ]);
       set({
