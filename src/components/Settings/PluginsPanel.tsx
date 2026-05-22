@@ -5004,7 +5004,7 @@ function OperatorCatalogSection({
   busy: boolean;
   environments?: PluginEnvironmentSummary[];
   onToggle: (operator: OperatorSummary, enabled: boolean) => void;
-  onSmokeRun: (operator: OperatorSummary, smokeTestId?: string | null) => void;
+  onSmokeRun: (operator: OperatorSummary, smokeTestId?: string | null, bypassCache?: boolean) => void;
   onRefreshRuns: () => void;
   onCleanupRuns: (operator?: OperatorSummary) => void;
   onOpenRun: (run: OperatorRunSummary) => void;
@@ -5015,6 +5015,7 @@ function OperatorCatalogSection({
   const [selectedSmokeTests, setSelectedSmokeTests] = useState<Record<string, string>>({});
   const [detailOperator, setDetailOperator] = useState<OperatorSummary | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [bypassCacheOperators, setBypassCacheOperators] = useState<Record<string, boolean>>({});
   const sortedOperators = [...operators].sort((left, right) =>
     left.id
       .localeCompare(right.id)
@@ -5448,12 +5449,34 @@ function OperatorCatalogSection({
                             disabled={busy || !operator.exposed}
                             onClick={(event) => {
                               event.stopPropagation();
-                              onSmokeRun(operator, selectedSmokeTestId);
+                              onSmokeRun(operator, selectedSmokeTestId, bypassCacheOperators[operatorKey] ?? false);
                             }}
                             sx={{ alignSelf: { xs: "flex-start", sm: "center" }, textTransform: "none", borderRadius: 1.5 }}
                           >
                             {operator.exposed ? `Run ${smokeLabel}` : "Register to run smoke test"}
                           </Button>
+                          <Tooltip title="Skip cache lookup and force a fresh execution">
+                            <Stack
+                              direction="row"
+                              alignItems="center"
+                              spacing={0.5}
+                              onClick={(e) => e.stopPropagation()}
+                              sx={{ cursor: "pointer", userSelect: "none" }}
+                            >
+                              <Switch
+                                size="small"
+                                checked={bypassCacheOperators[operatorKey] ?? false}
+                                onChange={(e) => setBypassCacheOperators((prev) => ({
+                                  ...prev,
+                                  [operatorKey]: e.target.checked,
+                                }))}
+                                inputProps={{ "aria-label": "Force re-run (bypass cache)" }}
+                              />
+                              <Typography variant="caption" color="text.secondary">
+                                Force re-run
+                              </Typography>
+                            </Stack>
+                          </Tooltip>
                         </Stack>
                       )}
 
@@ -5947,6 +5970,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const handleOperatorSmokeRun = async (
     operator: OperatorSummary,
     smokeTestId?: string | null,
+    bypassCache?: boolean,
   ) => {
     const alias = operatorPrimaryAlias(operator);
     const smokeTest = operatorSmokeTestForRun(operator, smokeTestId);
@@ -5975,6 +5999,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           kind: "smoke",
           smokeTestId: smokeTest?.id ?? smokeTestId ?? null,
           smokeTestName: smokeTest?.name ?? null,
+          bypassCache: bypassCache ?? false,
         },
       );
       const runDir = response.result.runDir;

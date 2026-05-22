@@ -318,6 +318,7 @@ export interface OperatorRunContext {
   kind?: string | null;
   smokeTestId?: string | null;
   smokeTestName?: string | null;
+  bypassCache?: boolean;
 }
 
 export interface OperatorRunSummary {
@@ -1428,6 +1429,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         runKind: runContext?.kind ?? null,
         smokeTestId: runContext?.smokeTestId ?? null,
         smokeTestName: runContext?.smokeTestName ?? null,
+        bypassCache: runContext?.bypassCache ?? false,
       });
       await get().loadOperatorRuns(projectRoot, surface);
       const summary = summarizeOperatorRunResult(response.result);

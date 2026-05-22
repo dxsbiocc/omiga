@@ -163,6 +163,7 @@ pub async fn run_operator(
     run_kind: Option<String>,
     smoke_test_id: Option<String>,
     smoke_test_name: Option<String>,
+    bypass_cache: Option<bool>,
 ) -> CommandResult<OperatorRunResponse> {
     let alias = alias.trim();
     if alias.is_empty() {
@@ -197,6 +198,7 @@ pub async fn run_operator(
         smoke_test_id,
         smoke_test_name,
         parent_execution_id: None,
+        bypass_cache: bypass_cache.unwrap_or(false),
     };
     let (raw, is_error) = operators::execute_operator_tool_call_with_context(
         &ctx,

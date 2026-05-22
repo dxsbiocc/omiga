@@ -2480,6 +2480,9 @@ pub struct OperatorRunContext {
     pub smoke_test_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_execution_id: Option<String>,
+    /// When true, skip cache lookup even if the operator manifest enables caching.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bypass_cache: bool,
 }
 
 impl OperatorRunContext {
@@ -3373,6 +3376,9 @@ fn operator_cache_metadata(
 }
 
 fn operator_cache_enabled(spec: &OperatorSpec, run_context: Option<&OperatorRunContext>) -> bool {
+    if run_context.map(|ctx| ctx.bypass_cache).unwrap_or(false) {
+        return false;
+    }
     if run_context
         .and_then(|context| context.kind.as_deref())
         .map(|kind| kind.eq_ignore_ascii_case("smoke"))
