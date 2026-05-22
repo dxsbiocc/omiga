@@ -46,7 +46,7 @@ impl super::ToolImpl for FileEditTool {
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         // Remote/SSH/sandbox: delegate to shell-based edit through the cached environment
         if ctx.execution_environment != "local" {
-            if let Some(ref store) = ctx.env_store {
+            return if let Some(ref store) = ctx.env_store {
                 let remote_path =
                     crate::domain::tools::env_store::remote_path(ctx, &args.file_path);
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
@@ -62,15 +62,22 @@ impl super::ToolImpl for FileEditTool {
                     )
                     .await?;
                 }
-                return Ok(FileEditOutput {
+                Ok(FileEditOutput {
                     path: args.file_path,
                     replaced: 1,
                     replace_all: args.replace_all,
                     created: false,
                     created_bytes: 0,
                 }
-                .into_stream());
-            }
+                .into_stream())
+            } else {
+                Err(ToolError::ExecutionFailed {
+                    message: format!(
+                        "远程执行环境 '{}' 下 env_store 未初始化，无法访问远程文件系统",
+                        ctx.execution_environment
+                    ),
+                })
+            };
         }
 
         let path = resolve_path(&ctx.project_root, &args.file_path)?;

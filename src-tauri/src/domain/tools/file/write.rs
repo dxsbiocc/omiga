@@ -69,7 +69,7 @@ impl super::ToolImpl for FileWriteTool {
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         // Remote/SSH/sandbox: use shell-based file ops through the cached environment
         if ctx.execution_environment != "local" {
-            if let Some(ref store) = ctx.env_store {
+            return if let Some(ref store) = ctx.env_store {
                 let remote_path = crate::domain::tools::env_store::remote_path(ctx, &args.path);
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
                 let bytes_written = {
@@ -85,8 +85,15 @@ impl super::ToolImpl for FileWriteTool {
                     new_hash,
                     created: true, // we can't cheaply know if it existed remotely
                 };
-                return Ok(output.into_stream());
-            }
+                Ok(output.into_stream())
+            } else {
+                Err(ToolError::ExecutionFailed {
+                    message: format!(
+                        "远程执行环境 '{}' 下 env_store 未初始化，无法访问远程文件系统",
+                        ctx.execution_environment
+                    ),
+                })
+            };
         }
 
         let path = resolve_path(&ctx.project_root, &args.path)?;

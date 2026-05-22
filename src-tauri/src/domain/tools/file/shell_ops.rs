@@ -38,7 +38,13 @@ impl<'a> ShellFileOps<'a> {
     // ── Read ──────────────────────────────────────────────────────────────────
 
     /// Read file with 0-indexed line pagination.
-    /// Returns lines formatted as `"<lineno>\t<text>"` (same as `awk` output).
+    ///
+    /// Uses a **single awk pass** that simultaneously counts total lines and extracts the
+    /// requested range. This halves SSH round-trips compared to a separate `wc -l` pass,
+    /// which is critical for avoiding timeouts on the first tool call of a session
+    /// (when the SSH connection is still being established and each RTT is expensive).
+    ///
+    /// Output format: `"<lineno>\t<text>"` per line (same as previous awk output).
     pub async fn read_file(
         &mut self,
         path: &str,
@@ -46,31 +52,38 @@ impl<'a> ShellFileOps<'a> {
         limit: usize,
     ) -> Result<ShellReadResult, ToolError> {
         let q = shell_quote(path);
+        let start = offset + 1; // awk is 1-indexed; offset is 0-indexed
+        let end = if limit == usize::MAX {
+            usize::MAX / 2 // awk-safe large number, avoids overflow in format string
+        } else {
+            offset + limit
+        };
 
-        // Total lines
-        let total_res = self
-            .run(&format!("wc -l < {q} 2>/dev/null || echo 0"))
-            .await?;
-        let total_lines: usize = total_res
-            .split_whitespace()
-            .next()
-            .unwrap_or("0")
-            .parse()
-            .unwrap_or(0);
+        // Single awk pass: collects paginated lines AND total line count.
+        // Output: zero or more "lineno\tcontent" lines, then a final "@TOTAL\t<n>" sentinel.
+        let cmd = format!(
+            r#"awk 'NR>={start}&&NR<={end}{{printf "%d\t%s\n",NR,$0}} END{{printf "@TOTAL\t%d\n",NR}}' {q}"#
+        );
+        let raw = self.run(&cmd).await?;
 
-        // Paginated content: awk is 1-indexed; offset is 0-indexed
-        let start = offset + 1;
-        let end = offset + limit;
-        let content = self
-            .run(&format!(
-                r#"awk 'NR>={start} && NR<={end} {{printf "%d\t%s\n", NR, $0}}' {q}"#
-            ))
-            .await?;
+        // Parse sentinel and body
+        let mut total_lines: usize = 0;
+        let mut body_lines = Vec::new();
+        for line in raw.lines() {
+            if let Some(rest) = line.strip_prefix("@TOTAL\t") {
+                total_lines = rest.trim().parse().unwrap_or(0);
+            } else {
+                body_lines.push(line);
+            }
+        }
+
+        let content = body_lines.join("\n");
+        let has_more = offset + limit < total_lines;
 
         Ok(ShellReadResult {
             content,
             total_lines,
-            has_more: offset + limit < total_lines,
+            has_more,
         })
     }
 
