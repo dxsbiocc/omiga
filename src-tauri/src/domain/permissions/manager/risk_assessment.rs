@@ -1,9 +1,9 @@
 //! 风险评估逻辑：工具风险分类、路径越界检测、文件路径提取。
 //! 这是 `PermissionManager` 的子模块，可访问父模块的私有字段。
 
-use crate::domain::connectors;
 use super::super::types::*;
 use super::bash_path_regex;
+use crate::domain::connectors;
 
 impl super::PermissionManager {
     /// 风险评估

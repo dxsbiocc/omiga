@@ -68,10 +68,7 @@ impl super::PermissionManager {
             if let Some(cmd) = context.arguments.get("command").and_then(|v| v.as_str()) {
                 let pattern_risks = self.patterns.check(cmd);
                 // 任何 High/Critical 模式 → 不放行
-                if pattern_risks
-                    .iter()
-                    .any(|r| r.severity >= RiskLevel::High)
-                {
+                if pattern_risks.iter().any(|r| r.severity >= RiskLevel::High) {
                     return false;
                 }
                 // DataLoss 类（rm -rf 是 Medium DataLoss）→ 不放行

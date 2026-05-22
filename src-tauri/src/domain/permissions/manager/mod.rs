@@ -1294,6 +1294,5 @@ impl Default for PermissionManager {
     }
 }
 
-
 #[cfg(test)]
 mod tests;
