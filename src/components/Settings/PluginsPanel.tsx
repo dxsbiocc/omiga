@@ -7,6 +7,7 @@ import {
   Alert,
   Box,
   Button,
+  Checkbox,
   Chip,
   CircularProgress,
   Dialog,
@@ -4080,6 +4081,8 @@ function OperatorRunDetailsDialog({
   );
 }
 
+type RunStatusFilter = "all" | "succeeded" | "failed" | "running" | "smoke" | "cache";
+
 function OperatorDetailsDialog({
   operator,
   runs,
@@ -4097,14 +4100,27 @@ function OperatorDetailsDialog({
   onCleanupRuns: (operator: OperatorSummary) => void;
   onCopy: (text: string, successMessage: string) => void;
 }) {
+  const [showAllRuns, setShowAllRuns] = useState(false);
+  const [runStatusFilter, setRunStatusFilter] = useState<RunStatusFilter>("all");
+
   if (!operator) return null;
   const title = operatorDisplayName(operator);
   const aliases = operator.enabledAliases.filter((value) => value.trim().length > 0);
   const smokeTests = operator.smokeTests ?? [];
-  const operatorRuns = operatorRunsForOperator(operator, runs);
+  const allOperatorRuns = operatorRunsForOperator(operator, runs);
+  const operatorRuns = allOperatorRuns.filter((run) => {
+    if (runStatusFilter === "all") return true;
+    if (runStatusFilter === "smoke") return operatorRunIsSmoke(run);
+    if (runStatusFilter === "cache") return operatorRunIsCacheHit(run);
+    if (runStatusFilter === "succeeded") return operatorRunStatusColor(run.status) === "success";
+    if (runStatusFilter === "failed") return operatorRunStatusColor(run.status) === "error";
+    return operatorRunStatusColor(run.status) === "info";
+  });
+  const RUN_PAGE_SIZE = 8;
+  const visibleRuns = showAllRuns ? operatorRuns : operatorRuns.slice(0, RUN_PAGE_SIZE);
   const stats = operatorRunStats(operator, runs);
   const latestRun = stats.latestRun;
-  const latestFailedRun = operatorRuns.find((run) => operatorRunStatusColor(run.status) === "error") ?? null;
+  const latestFailedRun = allOperatorRuns.find((run) => operatorRunStatusColor(run.status) === "error") ?? null;
   return (
     <Dialog open={Boolean(operator)} onClose={onClose} fullWidth maxWidth="md" aria-labelledby="operator-details-title">
       <DialogTitle id="operator-details-title" sx={{ px: 3, py: 2, pr: 7 }}>
@@ -4339,16 +4355,42 @@ function OperatorDetailsDialog({
 
           <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}>
             <Stack spacing={1}>
-              <Typography variant="caption" fontWeight={850}>
-                Recent tool runs
-              </Typography>
+              <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+                <Typography variant="caption" fontWeight={850}>
+                  Recent tool runs
+                </Typography>
+                {allOperatorRuns.length > 0 && (
+                  <Chip size="small" variant="outlined" label={`${allOperatorRuns.length} total`} />
+                )}
+              </Stack>
+              {allOperatorRuns.length > 0 && (
+                <Stack direction="row" gap={0.5} flexWrap="wrap">
+                  {(["all", "succeeded", "failed", "running", "smoke", "cache"] as RunStatusFilter[]).map((f) => (
+                    <Chip
+                      key={f}
+                      size="small"
+                      variant={runStatusFilter === f ? "filled" : "outlined"}
+                      color={
+                        f === "succeeded" ? "success" :
+                        f === "failed" ? "error" :
+                        f === "running" ? "info" :
+                        f === "cache" ? "secondary" :
+                        "default"
+                      }
+                      label={f === "all" ? `All (${allOperatorRuns.length})` : f}
+                      onClick={() => { setRunStatusFilter(f); setShowAllRuns(false); }}
+                      sx={{ cursor: "pointer", textTransform: "capitalize" }}
+                    />
+                  ))}
+                </Stack>
+              )}
               {operatorRuns.length === 0 ? (
                 <Typography variant="caption" color="text.secondary">
-                  No matching runs yet.
+                  {runStatusFilter === "all" ? "No matching runs yet." : `No ${runStatusFilter} runs.`}
                 </Typography>
               ) : (
                 <Stack spacing={0.75}>
-                  {operatorRuns.slice(0, 8).map((run) => (
+                  {visibleRuns.map((run) => (
                     <Box key={run.runId} sx={{ p: 1, borderRadius: 1.5, border: 1, borderColor: "divider" }}>
                       <Stack spacing={0.5}>
                         <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
@@ -4444,6 +4486,16 @@ function OperatorDetailsDialog({
                       </Stack>
                     </Box>
                   ))}
+                  {operatorRuns.length > RUN_PAGE_SIZE && (
+                    <Button
+                      size="small"
+                      variant="text"
+                      onClick={() => setShowAllRuns((prev) => !prev)}
+                      sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
+                    >
+                      {showAllRuns ? "Show less" : `Show all ${operatorRuns.length} runs`}
+                    </Button>
+                  )}
                 </Stack>
               )}
             </Stack>
@@ -4455,6 +4507,26 @@ function OperatorDetailsDialog({
 }
 
 const OPERATOR_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
+
+type UserOperatorInputDeclarationKind = "file" | "file_array" | "directory" | "string";
+type UserOperatorParamDeclarationKind = "string" | "integer" | "number" | "boolean";
+
+interface UserOperatorInputDeclarationRow {
+  name: string;
+  kind: UserOperatorInputDeclarationKind;
+  required: boolean;
+}
+
+interface UserOperatorParamDeclarationRow {
+  name: string;
+  kind: UserOperatorParamDeclarationKind;
+  default: string;
+}
+
+interface UserOperatorOutputDeclarationRow {
+  name: string;
+  glob: string;
+}
 
 function CreateUserOperatorDialog({
   open,
@@ -4469,14 +4541,110 @@ function CreateUserOperatorDialog({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [command, setCommand] = useState("");
+  const [inputDeclarations, setInputDeclarations] = useState<UserOperatorInputDeclarationRow[]>([]);
+  const [paramDeclarations, setParamDeclarations] = useState<UserOperatorParamDeclarationRow[]>([]);
+  const [outputDeclarations, setOutputDeclarations] = useState<UserOperatorOutputDeclarationRow[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const inputKindOptions: UserOperatorInputDeclarationKind[] = ["file", "file_array", "directory", "string"];
+  const paramKindOptions: UserOperatorParamDeclarationKind[] = ["string", "integer", "number", "boolean"];
 
   const idError = id.length > 0 && !OPERATOR_ID_PATTERN.test(id)
     ? "Must start with a letter and contain only letters, digits, hyphens, and underscores (max 64 chars)"
     : null;
   const argv = command.trim().split(/\s+/).filter(Boolean);
   const canSubmit = OPERATOR_ID_PATTERN.test(id) && name.trim().length > 0 && argv.length > 0;
+  const generatedYaml = useMemo(() => {
+    const yamlScalar = (value: string) => {
+      const trimmedValue = value.trim();
+      if (!trimmedValue) return "\"\"";
+      if (/^[A-Za-z0-9_./-]+$/.test(trimmedValue)) return trimmedValue;
+      return JSON.stringify(trimmedValue);
+    };
+    const yamlKey = (value: string) => {
+      const trimmedValue = value.trim();
+      if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(trimmedValue)) return trimmedValue;
+      return JSON.stringify(trimmedValue);
+    };
+
+    const declaredInputs = inputDeclarations.filter((row) => row.name.trim().length > 0);
+    const declaredParams = paramDeclarations.filter((row) => row.name.trim().length > 0);
+    const declaredOutputs = outputDeclarations.filter((row) => row.name.trim().length > 0);
+    const lines = [
+      "apiVersion: omiga.ai/operator/v1alpha1",
+      "kind: Operator",
+      "metadata:",
+      `  id: ${yamlScalar(id)}`,
+      "  version: 0.1.0",
+      `  name: ${yamlScalar(name)}`,
+      `  description: ${yamlScalar(description)}`,
+      "interface:",
+    ];
+
+    if (declaredInputs.length > 0) {
+      lines.push("  inputs:");
+      declaredInputs.forEach((row) => {
+        lines.push(
+          `    ${yamlKey(row.name)}:`,
+          `      kind: ${row.kind}`,
+          `      required: ${row.required ? "true" : "false"}`,
+        );
+      });
+    }
+
+    if (declaredParams.length > 0) {
+      lines.push("  params:");
+      declaredParams.forEach((row) => {
+        lines.push(
+          `    ${yamlKey(row.name)}:`,
+          `      kind: ${row.kind}`,
+        );
+        if (row.default.trim().length > 0) {
+          lines.push(`      default: ${yamlScalar(row.default)}`);
+        }
+      });
+    }
+
+    if (declaredOutputs.length > 0) {
+      lines.push("  outputs:");
+      declaredOutputs.forEach((row) => {
+        lines.push(
+          `    ${yamlKey(row.name)}:`,
+          "      kind: file",
+          `      glob: ${yamlScalar(row.glob)}`,
+        );
+      });
+    }
+
+    lines.push(
+      "execution:",
+      "  argv:",
+      "    - /bin/sh",
+      "    - -c",
+      `    - ${yamlScalar(command)}`,
+    );
+
+    return lines.join("\n");
+  }, [command, description, id, inputDeclarations, name, outputDeclarations, paramDeclarations]);
+
+  function updateInputDeclaration(index: number, patch: Partial<UserOperatorInputDeclarationRow>) {
+    setInputDeclarations((rows) => rows.map((row, rowIndex) => (
+      rowIndex === index ? { ...row, ...patch } : row
+    )));
+  }
+
+  function updateParamDeclaration(index: number, patch: Partial<UserOperatorParamDeclarationRow>) {
+    setParamDeclarations((rows) => rows.map((row, rowIndex) => (
+      rowIndex === index ? { ...row, ...patch } : row
+    )));
+  }
+
+  function updateOutputDeclaration(index: number, patch: Partial<UserOperatorOutputDeclarationRow>) {
+    setOutputDeclarations((rows) => rows.map((row, rowIndex) => (
+      rowIndex === index ? { ...row, ...patch } : row
+    )));
+  }
 
   function handleClose() {
     if (submitting) return;
@@ -4484,6 +4652,9 @@ function CreateUserOperatorDialog({
     setName("");
     setDescription("");
     setCommand("");
+    setInputDeclarations([]);
+    setParamDeclarations([]);
+    setOutputDeclarations([]);
     setSubmitError(null);
     onClose();
   }
@@ -4503,6 +4674,9 @@ function CreateUserOperatorDialog({
       setName("");
       setDescription("");
       setCommand("");
+      setInputDeclarations([]);
+      setParamDeclarations([]);
+      setOutputDeclarations([]);
       onCreated();
       onClose();
     } catch (e) {
@@ -4574,6 +4748,221 @@ function CreateUserOperatorDialog({
             helperText={`Shell command to run, e.g. bash -c "echo hello"`}
             disabled={submitting}
           />
+          <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
+            <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
+              <Typography variant="subtitle2" fontWeight={700}>Inputs</Typography>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
+              <Stack spacing={1.25}>
+                {inputDeclarations.map((row, index) => (
+                  <Stack
+                    key={index}
+                    direction={{ xs: "column", sm: "row" }}
+                    spacing={1}
+                    alignItems={{ xs: "stretch", sm: "center" }}
+                  >
+                    <TextField
+                      label="Name"
+                      value={row.name}
+                      onChange={(e) => updateInputDeclaration(index, { name: e.target.value })}
+                      size="small"
+                      disabled={submitting}
+                      sx={{ flex: 1 }}
+                    />
+                    <TextField
+                      select
+                      label="Kind"
+                      value={row.kind}
+                      onChange={(e) => updateInputDeclaration(index, { kind: e.target.value as UserOperatorInputDeclarationKind })}
+                      size="small"
+                      disabled={submitting}
+                      sx={{ minWidth: { xs: "100%", sm: 150 } }}
+                    >
+                      {inputKindOptions.map((kind) => (
+                        <MenuItem key={kind} value={kind}>
+                          {kind}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                    <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 112 }}>
+                      <Checkbox
+                        checked={row.required}
+                        onChange={(e) => updateInputDeclaration(index, { required: e.target.checked })}
+                        disabled={submitting}
+                        size="small"
+                        inputProps={{ "aria-label": `Input ${row.name || index + 1} required` }}
+                      />
+                      <Typography variant="body2">Required</Typography>
+                    </Stack>
+                    <IconButton
+                      aria-label="Remove input"
+                      onClick={() => setInputDeclarations((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}
+                      disabled={submitting}
+                      size="small"
+                      sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
+                    >
+                      <DeleteOutlineRounded fontSize="small" />
+                    </IconButton>
+                  </Stack>
+                ))}
+                <Button
+                  variant="text"
+                  size="small"
+                  startIcon={<AddRounded />}
+                  onClick={() => setInputDeclarations((rows) => [...rows, { name: "", kind: "file", required: true }])}
+                  disabled={submitting}
+                  sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
+                >
+                  Add input
+                </Button>
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
+          <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
+            <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
+              <Typography variant="subtitle2" fontWeight={700}>Parameters</Typography>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
+              <Stack spacing={1.25}>
+                {paramDeclarations.map((row, index) => (
+                  <Stack
+                    key={index}
+                    direction={{ xs: "column", sm: "row" }}
+                    spacing={1}
+                    alignItems={{ xs: "stretch", sm: "center" }}
+                  >
+                    <TextField
+                      label="Name"
+                      value={row.name}
+                      onChange={(e) => updateParamDeclaration(index, { name: e.target.value })}
+                      size="small"
+                      disabled={submitting}
+                      sx={{ flex: 1 }}
+                    />
+                    <TextField
+                      select
+                      label="Kind"
+                      value={row.kind}
+                      onChange={(e) => updateParamDeclaration(index, { kind: e.target.value as UserOperatorParamDeclarationKind })}
+                      size="small"
+                      disabled={submitting}
+                      sx={{ minWidth: { xs: "100%", sm: 150 } }}
+                    >
+                      {paramKindOptions.map((kind) => (
+                        <MenuItem key={kind} value={kind}>
+                          {kind}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                    <TextField
+                      label="Default"
+                      value={row.default}
+                      onChange={(e) => updateParamDeclaration(index, { default: e.target.value })}
+                      size="small"
+                      disabled={submitting}
+                      sx={{ flex: 1 }}
+                    />
+                    <IconButton
+                      aria-label="Remove parameter"
+                      onClick={() => setParamDeclarations((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}
+                      disabled={submitting}
+                      size="small"
+                      sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
+                    >
+                      <DeleteOutlineRounded fontSize="small" />
+                    </IconButton>
+                  </Stack>
+                ))}
+                <Button
+                  variant="text"
+                  size="small"
+                  startIcon={<AddRounded />}
+                  onClick={() => setParamDeclarations((rows) => [...rows, { name: "", kind: "string", default: "" }])}
+                  disabled={submitting}
+                  sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
+                >
+                  Add parameter
+                </Button>
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
+          <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
+            <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
+              <Typography variant="subtitle2" fontWeight={700}>Outputs</Typography>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
+              <Stack spacing={1.25}>
+                {outputDeclarations.map((row, index) => (
+                  <Stack
+                    key={index}
+                    direction={{ xs: "column", sm: "row" }}
+                    spacing={1}
+                    alignItems={{ xs: "stretch", sm: "center" }}
+                  >
+                    <TextField
+                      label="Name"
+                      value={row.name}
+                      onChange={(e) => updateOutputDeclaration(index, { name: e.target.value })}
+                      size="small"
+                      disabled={submitting}
+                      sx={{ flex: 1 }}
+                    />
+                    <TextField
+                      label="Glob"
+                      value={row.glob}
+                      onChange={(e) => updateOutputDeclaration(index, { glob: e.target.value })}
+                      size="small"
+                      placeholder="output.txt"
+                      disabled={submitting}
+                      sx={{ flex: 1 }}
+                    />
+                    <IconButton
+                      aria-label="Remove output"
+                      onClick={() => setOutputDeclarations((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}
+                      disabled={submitting}
+                      size="small"
+                      sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
+                    >
+                      <DeleteOutlineRounded fontSize="small" />
+                    </IconButton>
+                  </Stack>
+                ))}
+                <Button
+                  variant="text"
+                  size="small"
+                  startIcon={<AddRounded />}
+                  onClick={() => setOutputDeclarations((rows) => [...rows, { name: "", glob: "" }])}
+                  disabled={submitting}
+                  sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
+                >
+                  Add output
+                </Button>
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
+          <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
+            <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
+              <Typography variant="caption" color="text.secondary">Generated YAML</Typography>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
+              <Box
+                component="pre"
+                sx={{
+                  m: 0,
+                  p: 1.5,
+                  maxHeight: 200,
+                  overflow: "auto",
+                  borderRadius: 1.5,
+                  bgcolor: "background.paper",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace",
+                  fontSize: "0.75rem",
+                  lineHeight: 1.6,
+                }}
+              >
+                {generatedYaml}
+              </Box>
+            </AccordionDetails>
+          </Accordion>
         </Stack>
       </DialogContent>
       <DialogActions sx={{ px: 3, py: 2 }}>
