@@ -225,12 +225,41 @@ pub fn merged_ssh_configs() -> Result<HashMap<String, SshExecConfig>, String> {
     Ok(merged)
 }
 
-/// Optional `terminal` section (parity with hermes-agent `terminal.credential_files`).
+/// Optional `terminal` section — controls what gets synchronised to SSH remote hosts.
+///
+/// # Sync policy
+///
+/// Only files that the **remote shell** needs are synced. The AI's context files
+/// (skills, memory, user profile) are injected locally and never need to live on
+/// the remote server.
+///
+/// | Content | Default | Why |
+/// |---------|---------|-----|
+/// | `credential_files` | synced | remote tools (git, curl) may need API tokens |
+/// | `remote_scripts` | synced | shell helpers the AI will invoke over SSH |
+/// | `skills/` | **not synced** | read locally for system-prompt injection only |
+/// | `cache/` | **not synced** | local UI assets |
+/// | `SOUL/MEMORY/USER.md` | **not synced** | local AI context |
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TerminalSettings {
-    /// Paths **relative to `~/.omiga`** to rsync to the SSH host under `~/.omiga/<path>`.
+    /// Credential file paths **relative to `~/.omiga`** synced to `~/.omiga/<path>`
+    /// on the remote host (e.g. `["credentials/github.token"]`).
     #[serde(default)]
     pub credential_files: Vec<String>,
+
+    /// Script/tool paths **relative to `~/.omiga/scripts/`** synced to
+    /// `~/.omiga/scripts/<path>` on the remote host and made executable.
+    /// The AI can invoke them from bash as `~/.omiga/scripts/<path>`.
+    ///
+    /// Example: `["helpers/activate_env.sh", "helpers/check_deps.py"]`
+    #[serde(default)]
+    pub remote_scripts: Vec<String>,
+
+    /// Set to `true` to also sync `~/.omiga/skills/` to the remote host.
+    /// Only needed when a remote sub-agent must access skill instructions.
+    /// Expensive for large skill libraries — disabled by default.
+    #[serde(default)]
+    pub sync_skills_to_remote: bool,
 }
 
 /// Configuration file structure

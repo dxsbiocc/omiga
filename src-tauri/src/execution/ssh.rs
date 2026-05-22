@@ -7,6 +7,7 @@
 //! `~/.omiga` 下凭证、skills、cache 子目录及用户上下文 Markdown 到远端 `~/.omiga`。
 
 use super::base::{generate_session_id, BaseEnvironment};
+use super::ssh_sync_manifest::{SyncEntry, SyncManifest};
 use super::types::{ExecResult, ExecutionError, ProcessHandle};
 use crate::utils::shell::shell_single_quote;
 use async_trait::async_trait;
@@ -27,13 +28,15 @@ fn shell_escape_for_rsync_engine(path: &str) -> String {
 }
 
 fn load_terminal_credential_rel_paths() -> Vec<String> {
-    let Some(cfg_path) = crate::llm::config::find_config_file() else {
-        return Vec::new();
-    };
-    let Ok(cfg) = crate::llm::config::load_config_file_at(&cfg_path) else {
-        return Vec::new();
-    };
-    cfg.terminal.map(|t| t.credential_files).unwrap_or_default()
+    load_terminal_settings()
+        .map(|t| t.credential_files)
+        .unwrap_or_default()
+}
+
+fn load_terminal_settings() -> Option<crate::llm::config::TerminalSettings> {
+    let cfg_path = crate::llm::config::find_config_file()?;
+    let cfg = crate::llm::config::load_config_file_at(&cfg_path).ok()?;
+    cfg.terminal
 }
 
 /// Resolve `rel` under `~/.omiga`; reject traversal and non-files (parity with hermes credential_files).
@@ -164,16 +167,30 @@ impl SshEnvironment {
         // 检测远程 home 目录
         me.remote_home = me.detect_remote_home().await;
 
-        // 同步文件（与 hermes ssh._sync_files 一致：rsync skills + credentials）
-        me.sync_omiga_files_to_remote().await;
+        // 初始化会话快照（必须在 rsync 前完成，工具可立即使用连接）
+        me.init_session().await?;
+
+        // 同步文件：放入后台任务，不阻塞连接可用时间
+        // 工具调用无需等待 rsync 完成（rsync 仅同步 skills/credentials，不影响命令执行）
+        {
+            let worker = SshRsyncWorker {
+                host: me.host.clone(),
+                user: me.user.clone(),
+                port: me.port,
+                key_path: me.key_path.clone(),
+                control_socket: me.control_socket.clone(),
+                remote_home: me.remote_home.clone(),
+                ssh_project_root: me.ssh_project_root.clone(),
+            };
+            tokio::spawn(async move {
+                worker.run().await;
+            });
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         me.last_sync_time = Some(now);
-
-        // 初始化会话快照
-        me.init_session().await?;
 
         Ok(me)
     }
@@ -667,6 +684,329 @@ impl BaseEnvironment for SshEnvironment {
             .await;
 
         Ok(())
+    }
+}
+
+// ─── Background rsync worker ─────────────────────────────────────────────────
+
+/// Carries the minimal SSH config needed to run rsync synchronisation in a
+/// background task, decoupled from `SshEnvironment` so it can be `Send + 'static`.
+///
+/// Mirrors `SshEnvironment::sync_omiga_files_to_remote` but runs independently
+/// after the SSH control socket is established, letting tools start immediately
+/// instead of waiting 30-90 s for rsync to finish.
+struct SshRsyncWorker {
+    host: String,
+    user: String,
+    port: u16,
+    key_path: Option<String>,
+    control_socket: PathBuf,
+    remote_home: String,
+    ssh_project_root: Option<PathBuf>,
+}
+
+impl SshRsyncWorker {
+    /// Sync only what the remote shell genuinely needs, using manifest-based
+    /// differential detection to avoid redundant transfers.
+    ///
+    /// **Sync policy:**
+    /// - `credential_files` (from `omiga.yaml → terminal.credential_files`) — API
+    ///   tokens, SSH keys, etc. that remote tools (git, curl) may need.
+    /// - `remote_scripts` (from `omiga.yaml → terminal.remote_scripts`) — helper
+    ///   scripts the AI invokes over SSH; synced to `~/.omiga/scripts/` and made `+x`.
+    /// - `skills/` — only when `sync_skills_to_remote: true` (default false).
+    ///
+    /// **NOT synced:** `cache/`, `SOUL/MEMORY/USER.md` (local AI context only).
+    ///
+    /// **Diff algorithm:**
+    /// 1. Fetch remote manifest (one SSH `cat` command, ~50 ms).
+    /// 2. Compute local SHA-256 manifest (~10 ms for typical file sets).
+    /// 3. Transfer only changed files via `tar` pipe through ControlMaster socket.
+    /// 4. Write updated manifest to remote.
+    async fn run(&self) {
+        let Some(omiga_home) = dirs::home_dir().map(|h| h.join(".omiga")) else {
+            return;
+        };
+
+        let terminal = load_terminal_settings().unwrap_or_default();
+
+        // ── Collect entries to sync ───────────────────────────────────────────
+        let mut entries: Vec<SyncEntry> = Vec::new();
+
+        // Credential files: ~/.omiga/<rel> → remote ~/.omiga/<rel>
+        for rel in &terminal.credential_files {
+            if let Some(abs) = resolve_safe_omiga_file(rel, &omiga_home) {
+                entries.push((format!(".omiga/{}", rel.replace('\\', "/")), abs));
+            }
+        }
+
+        // Remote scripts: ~/.omiga/scripts/<rel> → remote ~/.omiga/scripts/<rel>
+        let scripts_dir = omiga_home.join("scripts");
+        for rel in &terminal.remote_scripts {
+            let abs = scripts_dir.join(rel);
+            if abs.is_file() {
+                entries.push((format!(".omiga/scripts/{}", rel.replace('\\', "/")), abs));
+            } else {
+                tracing::debug!(script = %rel, "SSH sync: remote_scripts entry not found, skipping");
+            }
+        }
+
+        // Optional: skills directory
+        if terminal.sync_skills_to_remote {
+            let skills_dir = omiga_home.join("skills");
+            if skills_dir.is_dir() {
+                for entry in walkdir::WalkDir::new(&skills_dir)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                {
+                    if let Ok(rel) = entry.path().strip_prefix(&omiga_home) {
+                        entries.push((
+                            format!(".omiga/{}", rel.to_string_lossy().replace('\\', "/")),
+                            entry.path().to_path_buf(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if entries.is_empty() {
+            tracing::debug!("SSH sync: nothing configured to sync");
+            return;
+        }
+
+        // ── Fetch remote manifest (one SSH command) ───────────────────────────
+        let remote_manifest_json = self
+            .ssh_cat_file(
+                &format!("~/{}", SyncManifest::REMOTE_REL_PATH),
+                5_000,
+            )
+            .await
+            .unwrap_or_else(|| "{}".to_string());
+        let remote_manifest = SyncManifest::from_json(&remote_manifest_json);
+
+        // ── Compute local manifest and diff ───────────────────────────────────
+        let local_manifest = SyncManifest::compute(&entries);
+        let changed_rels: std::collections::HashSet<&str> =
+            local_manifest.changed_vs(&remote_manifest).into_iter().collect();
+
+        if changed_rels.is_empty() {
+            tracing::debug!(
+                "SSH sync: all {} file(s) up to date for {}@{}",
+                entries.len(), self.user, self.host
+            );
+            return;
+        }
+
+        let changed_entries: Vec<&SyncEntry> = entries
+            .iter()
+            .filter(|(rel, _)| changed_rels.contains(rel.as_str()))
+            .collect();
+
+        tracing::info!(
+            "SSH sync: {}/{} file(s) changed, transferring to {}@{}",
+            changed_entries.len(), entries.len(), self.user, self.host
+        );
+
+        // ── Transfer via tar pipe through ControlMaster socket ────────────────
+        if self.transfer_via_tar(&changed_entries).await {
+            // Make remote_scripts executable on the remote
+            if !terminal.remote_scripts.is_empty() {
+                let chmod_cmd = format!(
+                    "find ~/.omiga/scripts -type f \\( -name '*.sh' -o -name '*.py' -o -name '*.rb' \\) -exec chmod +x {{}} +"
+                );
+                let _ = self.ssh_run_cmd(&chmod_cmd, 10_000).await;
+            }
+
+            // Write updated manifest
+            self.write_remote_manifest(&local_manifest).await;
+            tracing::debug!("SSH sync: manifest updated for {}@{}", self.user, self.host);
+        } else {
+            tracing::warn!("SSH sync: tar transfer failed for {}@{}", self.user, self.host);
+        }
+    }
+
+    /// Transfer files to the remote using tar piped through the ControlMaster socket.
+    /// Single SSH round-trip — much faster than per-file rsync.
+    async fn transfer_via_tar(&self, entries: &[&SyncEntry]) -> bool {
+        use std::io::Write;
+        use tokio::io::AsyncWriteExt;
+
+        // Build tar archive in-process (avoids shelling out to tar locally)
+        let mut archive_bytes = Vec::<u8>::new();
+        {
+            let mut builder = tar::Builder::new(&mut archive_bytes);
+            for (rel, abs_path) in entries {
+                if let Ok(mut f) = std::fs::File::open(abs_path) {
+                    let meta = match f.metadata() {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(meta.len());
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    // entry path is relative to ~ (e.g. ".omiga/credentials/token")
+                    let _ = builder.append_data(&mut header, rel, &mut f);
+                }
+            }
+            if builder.finish().is_err() {
+                return false;
+            }
+        }
+
+        if archive_bytes.is_empty() {
+            return false;
+        }
+
+        // Pipe archive bytes through SSH to remote tar
+        let mut args = self.build_ssh_args();
+        args.push(format!("{}@{}", self.user, self.host));
+        args.push("mkdir -p ~ && tar xf - -C ~".to_string());
+
+        let mut child = match tokio::process::Command::new("ssh")
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("SSH tar transfer: failed to spawn: {}", e);
+                return false;
+            }
+        };
+
+        if let Some(mut stdin) = child.stdin.take() {
+            if stdin.write_all(&archive_bytes).await.is_err() {
+                return false;
+            }
+        }
+
+        matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(RSYNC_TIMEOUT_DIR_MS),
+                child.wait(),
+            ).await,
+            Ok(Ok(status)) if status.success()
+        )
+    }
+
+    /// Fetch a small text file from the remote via SSH.
+    async fn ssh_cat_file(&self, remote_path: &str, timeout_ms: u64) -> Option<String> {
+        self.ssh_run_cmd(
+            &format!("cat {} 2>/dev/null || echo '{{}}'", sh_single_quote(remote_path)),
+            timeout_ms,
+        )
+        .await
+    }
+
+    /// Run a single command over SSH and return stdout.
+    async fn ssh_run_cmd(&self, cmd: &str, timeout_ms: u64) -> Option<String> {
+        use tokio::time::{timeout, Duration};
+        let mut args = self.build_ssh_args();
+        args.push(format!("{}@{}", self.user, self.host));
+        args.push(cmd.to_string());
+        let result = timeout(
+            Duration::from_millis(timeout_ms),
+            Command::new("ssh").args(&args).output(),
+        )
+        .await;
+        match result {
+            Ok(Ok(out)) if out.status.success() => {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Write the sync manifest to the remote host.
+    async fn write_remote_manifest(&self, manifest: &SyncManifest) {
+        let json = manifest.to_json();
+        // Encode as base64 to avoid shell quoting issues with JSON content
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let b64 = STANDARD.encode(json.as_bytes());
+        let cmd = format!(
+            "mkdir -p ~/.omiga && printf '%s' {} | base64 -d > ~/{}",
+            sh_single_quote(&b64),
+            SyncManifest::REMOTE_REL_PATH,
+        );
+        let _ = self.ssh_run_cmd(&cmd, 10_000).await;
+    }
+
+    fn rsync_ssh_engine_arg(&self) -> String {
+        let mut s = format!(
+            "ssh -o ControlPath={} -o ControlMaster=auto",
+            shell_escape_for_rsync_engine(&self.control_socket.to_string_lossy())
+        );
+        if self.port != 22 {
+            s.push_str(&format!(" -p {}", self.port));
+        }
+        if let Some(ref key) = self.key_path {
+            s.push_str(&format!(" -i {}", shell_escape_for_rsync_engine(key)));
+        }
+        s
+    }
+
+    async fn ssh_mkdir(&self, remote_dir: &str, timeout_ms: u64) {
+        use tokio::time::{timeout, Duration};
+        let mut args = self.build_ssh_args();
+        args.push(format!("{}@{}", self.user, self.host));
+        args.push(format!("mkdir -p {}", sh_single_quote(remote_dir)));
+        let _ = timeout(
+            Duration::from_millis(timeout_ms),
+            Command::new("ssh").args(&args).output(),
+        )
+        .await;
+    }
+
+    async fn run_rsync(&self, engine: &str, src: &str, dest: &str, timeout_ms: u64) -> bool {
+        use tokio::time::{timeout, Duration};
+        let mut cmd = Command::new("rsync");
+        cmd.arg("-az")
+            .arg("--timeout=30")
+            .arg("--safe-links")
+            .arg("-e")
+            .arg(engine)
+            .arg(src)
+            .arg(dest);
+        matches!(
+            timeout(Duration::from_millis(timeout_ms), cmd.output()).await,
+            Ok(Ok(o)) if o.status.success()
+        )
+    }
+
+    fn build_ssh_args(&self) -> Vec<String> {
+        let mut args = vec![
+            "-o".to_string(),
+            format!("ControlPath={}", self.control_socket.display()),
+            "-o".to_string(),
+            "ControlMaster=auto".to_string(),
+            "-o".to_string(),
+            "BatchMode=yes".to_string(),
+            "-o".to_string(),
+            "StrictHostKeyChecking=yes".to_string(),
+            "-o".to_string(),
+            "ConnectTimeout=10".to_string(),
+        ];
+        if self.port != 22 {
+            args.push("-p".to_string());
+            args.push(self.port.to_string());
+        }
+        if let Some(ref key) = self.key_path {
+            args.push("-i".to_string());
+            args.push(key.clone());
+        }
+        args
+    }
+
+    async fn ensure_rsync_available() -> Result<(), ()> {
+        match Command::new("rsync").arg("--version").output().await {
+            Ok(o) if o.status.success() => Ok(()),
+            _ => Err(()),
+        }
     }
 }
 

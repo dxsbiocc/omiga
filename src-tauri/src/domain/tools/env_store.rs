@@ -34,7 +34,12 @@ impl std::fmt::Debug for EnvStore {
 }
 
 struct StoreInner {
+    /// Cached, ready-to-use environments keyed by canonical env key.
     envs: Mutex<HashMap<String, Arc<Mutex<dyn BaseEnvironment>>>>,
+    /// In-flight creation signals: concurrent callers wait on the Notify
+    /// instead of each launching their own `create_environment` call.
+    /// Ensures at most one SSH handshake per key, even under concurrent tool calls.
+    creating: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 impl Default for EnvStore {
@@ -47,6 +52,7 @@ impl EnvStore {
     pub fn new() -> Self {
         Self(Arc::new(StoreInner {
             envs: Mutex::new(HashMap::new()),
+            creating: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -61,8 +67,9 @@ impl EnvStore {
 
     /// Get an existing or lazily-create a new environment for this context.
     ///
-    /// Thread-safe: concurrent callers for the same key will both call
-    /// `create_environment`, but only the first result is stored (second is dropped).
+    /// **Concurrent-safe with deduplication**: if two callers race on the same key,
+    /// only ONE `create_environment` call is made. The second caller waits on a
+    /// `Notify` and retries the fast path when creation completes.
     pub async fn get_or_create(
         &self,
         ctx: &ToolContext,
@@ -70,27 +77,95 @@ impl EnvStore {
     ) -> Result<Arc<Mutex<dyn BaseEnvironment>>, ToolError> {
         let key = Self::key(ctx);
 
-        // Fast path — already cached
-        {
-            let guard = self.0.envs.lock().await;
-            if let Some(env) = guard.get(&key) {
-                return Ok(env.clone());
+        loop {
+            // ── Fast path: already cached ────────────────────────────────────
+            {
+                let guard = self.0.envs.lock().await;
+                if let Some(env) = guard.get(&key) {
+                    return Ok(env.clone());
+                }
             }
-        }
 
-        // Slow path — create and cache
-        let config = build_env_config(ctx, timeout_ms)?;
-        let env = create_environment(config)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("执行环境初始化失败 ({}): {}", key, e),
-            })?;
+            // ── In-flight check: another caller is already creating this key ─
+            let notify = {
+                let mut creating = self.0.creating.lock().await;
+                if let Some(existing_notify) = creating.get(&key) {
+                    // Another caller is creating — wait for it, then retry fast path
+                    existing_notify.clone()
+                } else {
+                    // We are the creator — register our Notify and break to slow path
+                    let notify = Arc::new(tokio::sync::Notify::new());
+                    creating.insert(key.clone(), notify.clone());
+                    // Return a sentinel that signals "we are the creator"
+                    // (break out of loop by dropping into creation code below)
+                    drop(creating);
 
-        {
-            let mut guard = self.0.envs.lock().await;
-            // A racing caller may have inserted already; use whichever got in first
-            Ok(guard.entry(key).or_insert(env).clone())
+                    // ── Slow path: create the environment ────────────────────
+                    let config = build_env_config(ctx, timeout_ms)?;
+                    let create_result =
+                        create_environment(config)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed {
+                                message: format!("执行环境初始化失败 ({}): {}", key, e),
+                            });
+
+                    // Remove from creating map and notify waiters regardless of outcome
+                    {
+                        let mut creating = self.0.creating.lock().await;
+                        if let Some(n) = creating.remove(&key) {
+                            n.notify_waiters();
+                        }
+                    }
+
+                    let env = create_result?;
+
+                    // Cache and return
+                    let mut guard = self.0.envs.lock().await;
+                    return Ok(guard.entry(key).or_insert(env).clone());
+                }
+            };
+
+            // Wait for in-flight creation to finish, then retry the fast path
+            notify.notified().await;
         }
+    }
+
+    /// Eagerly pre-warm the connection for non-local execution environments.
+    ///
+    /// Call this once at session start (before the first LLM turn) so that the SSH
+    /// handshake / sandbox spin-up is already complete when the AI's first tool call
+    /// arrives.  The first tool call in a session is the most latency-sensitive one —
+    /// lazy init adds ~10–30 s of SSH negotiation on top of the already-running 45 s
+    /// outer tool timeout.
+    ///
+    /// A connection failure here is logged but **not** propagated — the session should
+    /// still start, and a proper error will be surfaced when the first tool actually runs.
+    pub async fn warmup(&self, ctx: &ToolContext) {
+        if ctx.execution_environment == "local" {
+            return; // Nothing to warm up for local sessions
+        }
+        let store = self.clone();
+        let ctx_key = Self::key(ctx);
+        // Clone ctx fields needed for build_env_config (ToolContext is not Clone)
+        let env_type = ctx.execution_environment.clone();
+        let ssh_server = ctx.ssh_server.clone();
+        let sandbox_backend = ctx.sandbox_backend.clone();
+        let cwd = ctx.cwd.clone();
+        let project_root = ctx.project_root.clone();
+
+        tokio::spawn(async move {
+            // Build a minimal ToolContext for config construction — only env fields matter
+            let mut mini_ctx = ToolContext::new(project_root);
+            mini_ctx.cwd = cwd;
+            mini_ctx.execution_environment = env_type;
+            mini_ctx.ssh_server = ssh_server;
+            mini_ctx.sandbox_backend = sandbox_backend;
+
+            match store.get_or_create(&mini_ctx, 60_000).await {
+                Ok(_) => tracing::debug!("env_store: pre-warmed {}", ctx_key),
+                Err(e) => tracing::warn!("env_store: warmup failed for {}: {}", ctx_key, e),
+            }
+        });
     }
 
     /// Call on session teardown to release remote connections / sandbox containers.
