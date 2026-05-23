@@ -982,6 +982,7 @@ pub fn list_operator_authoring_diagnostics() -> Vec<OperatorManifestDiagnostic> 
             operator_preflight_authoring_diagnostics(spec)
                 .into_iter()
                 .chain(operator_external_network_authoring_diagnostics(spec))
+                .chain(operator_interface_authoring_diagnostics(spec))
         })
         .collect::<Vec<_>>();
     diagnostics.sort_by(|left, right| {
@@ -1076,6 +1077,44 @@ fn operator_external_network_authoring_diagnostics(
         });
     }
 
+    diagnostics
+}
+
+fn operator_interface_authoring_diagnostics(spec: &OperatorSpec) -> Vec<OperatorManifestDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let preflight_param_ids: std::collections::HashSet<&str> = spec
+        .preflight
+        .as_ref()
+        .map(|pf| pf.questions.iter().map(|q| q.param.as_str()).collect())
+        .unwrap_or_default();
+    for (param_name, param_spec) in &spec.interface.params {
+        if param_spec.required && !preflight_param_ids.contains(param_name.as_str()) {
+            diagnostics.push(OperatorManifestDiagnostic {
+                source_plugin: spec.source.source_plugin.clone(),
+                manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+                severity: "warning".to_string(),
+                message: format!(
+                    "param `{param_name}` is required but has no preflight question; non-interactive callers must always supply it",
+                ),
+            });
+        }
+    }
+    for (output_name, output_spec) in &spec.interface.outputs {
+        let is_file_like = matches!(
+            output_spec.kind,
+            OperatorFieldKind::File | OperatorFieldKind::FileArray
+        );
+        if is_file_like && output_spec.glob.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            diagnostics.push(OperatorManifestDiagnostic {
+                source_plugin: spec.source.source_plugin.clone(),
+                manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+                severity: "warning".to_string(),
+                message: format!(
+                    "output `{output_name}` is a file kind but has no glob pattern; the runtime cannot collect it",
+                ),
+            });
+        }
+    }
     diagnostics
 }
 
