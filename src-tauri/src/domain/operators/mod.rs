@@ -2514,6 +2514,7 @@ impl OperatorRunContext {
             smoke_test_id: normalize_optional_string(self.smoke_test_id),
             smoke_test_name: normalize_optional_string(self.smoke_test_name),
             parent_execution_id: normalize_optional_string(self.parent_execution_id),
+            bypass_cache: self.bypass_cache,
         };
         (!normalized.is_empty()).then_some(normalized)
     }
@@ -9485,6 +9486,7 @@ execution:
                 smoke_test_id: Some("default".to_string()),
                 smoke_test_name: Some("Active container smoke".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
@@ -10773,6 +10775,7 @@ runtime:
                 smoke_test_id: Some("default".to_string()),
                 smoke_test_name: Some("Write text report smoke".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
@@ -10991,6 +10994,7 @@ runtime:
                 smoke_test_id: Some("offline-fixture".to_string()),
                 smoke_test_name: Some("PubMed offline fixture".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
@@ -11047,6 +11051,7 @@ runtime:
                 smoke_test_id: Some("offline-fixture".to_string()),
                 smoke_test_name: Some("GEO offline fixture".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
@@ -11105,6 +11110,7 @@ runtime:
                 smoke_test_id: Some("offline-fixture".to_string()),
                 smoke_test_name: Some("UniProt offline fixture".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
