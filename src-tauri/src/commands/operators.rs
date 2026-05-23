@@ -223,6 +223,7 @@ pub async fn list_operator_runs(
     ssh_server: Option<String>,
     sandbox_backend: Option<String>,
     status_filter: Option<String>,
+    after_ms: Option<u64>,
 ) -> CommandResult<Vec<OperatorRunSummary>> {
     let ctx = build_operator_context(
         &state,
@@ -243,6 +244,15 @@ pub async fn list_operator_runs(
         .filter(|s| !s.is_empty())
     {
         runs.retain(|run| run.status.trim().eq_ignore_ascii_case(filter));
+    }
+    if let Some(after_ms) = after_ms {
+        runs.retain(|run| {
+            run.updated_at
+                .as_deref()
+                .and_then(|updated_at| chrono::DateTime::parse_from_rfc3339(updated_at).ok())
+                .map(|updated_at| updated_at.timestamp_millis() >= after_ms as i64)
+                .unwrap_or(true)
+        });
     }
     Ok(runs)
 }

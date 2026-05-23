@@ -1001,6 +1001,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           projectRoot,
           ...operatorSurfacePayload(surface),
           statusFilter: undefined,
+          afterMs: undefined,
         }),
       ]);
       set({
@@ -1041,6 +1042,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         {
           projectRoot,
           ...operatorSurfacePayload(surface),
+          afterMs: undefined,
         },
       );
       set({ operatorRuns });
