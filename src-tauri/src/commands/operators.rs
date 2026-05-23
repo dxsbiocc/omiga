@@ -237,7 +237,11 @@ pub async fn list_operator_runs(
     let mut runs = operators::list_operator_runs_for_context(&ctx, 100)
         .await
         .map_err(operator_error)?;
-    if let Some(filter) = status_filter.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(filter) = status_filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         runs.retain(|run| run.status.trim().eq_ignore_ascii_case(filter));
     }
     Ok(runs)
