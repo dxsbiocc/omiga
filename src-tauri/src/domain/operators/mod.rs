@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 pub const OPERATOR_API_VERSION_V1ALPHA1: &str = "omiga.ai/operator/v1alpha1";
@@ -40,6 +41,28 @@ const OPERATOR_PARAM_SOURCE_USER_PREFLIGHT: &str = "user_preflight";
 const OPERATOR_PARAM_SOURCE_CALLER: &str = "caller";
 const OPERATOR_PARAM_SOURCE_DEFAULT: &str = "default";
 const OPERATOR_PARAM_SOURCE_SYSTEM: &str = "system";
+
+pub type OperatorQueueStatusSender = tokio::sync::mpsc::UnboundedSender<(String, String)>;
+
+tokio::task_local! {
+    static OPERATOR_QUEUE_STATUS_SENDER: OperatorQueueStatusSender;
+}
+
+pub async fn with_operator_queue_status_sender<F>(
+    sender: OperatorQueueStatusSender,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    OPERATOR_QUEUE_STATUS_SENDER.scope(sender, future).await
+}
+
+fn current_operator_queue_status_sender() -> Option<OperatorQueueStatusSender> {
+    OPERATOR_QUEUE_STATUS_SENDER
+        .try_with(|sender| sender.clone())
+        .ok()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -5142,6 +5165,7 @@ async fn execute_in_environment(
             walltime_secs,
             cpu_count,
             &resolved.spec.metadata.id,
+            current_operator_queue_status_sender(),
         )
         .await?
     } else {
@@ -5410,6 +5434,7 @@ async fn execute_via_slurm(
     walltime_secs: u64,
     cpus: u32,
     operator_id: &str,
+    queue_status_sender: Option<OperatorQueueStatusSender>,
 ) -> Result<crate::execution::ExecResult, OperatorToolError> {
     let safe_id = operator_id
         .chars()
@@ -5482,8 +5507,8 @@ async fn execute_via_slurm(
         sh_quote(run_dir)
     );
     let _ = execute_env_command(ctx, run_dir, &record_cmd, 10).await;
-    // Poll squeue every 15 seconds
-    let poll_interval = std::time::Duration::from_secs(15);
+    // Poll squeue frequently enough for the async operator UI to show live SLURM state.
+    let poll_interval = std::time::Duration::from_secs(5);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(walltime_secs + 120);
     loop {
         if std::time::Instant::now() >= deadline {
@@ -5499,16 +5524,23 @@ async fn execute_via_slurm(
             .with_run_dir(run_dir));
         }
         let poll_cmd = format!(
-            "squeue --noheader -j {} -o '%T' 2>/dev/null || true",
+            "squeue --noheader -j {} -o '%t' 2>/dev/null || true",
             sh_quote(&job_id)
         );
         let poll = execute_env_command(ctx, run_dir, &poll_cmd, 30).await?;
         let state = poll.output.trim().to_ascii_uppercase();
-        if state.contains("FAILED")
-            || state.contains("CANCELLED")
-            || state.contains("TIMEOUT")
-            || state.contains("NODE_FAIL")
-        {
+        if !state.is_empty() {
+            if let Some(sender) = queue_status_sender.as_ref() {
+                let _ = sender.send((job_id.clone(), state.clone()));
+            }
+        }
+        let failed_state = state.split_whitespace().any(|part| {
+            matches!(
+                part,
+                "F" | "FAILED" | "CA" | "CANCELLED" | "TO" | "TIMEOUT" | "NF" | "NODE_FAIL"
+            )
+        });
+        if failed_state {
             return Err(OperatorToolError::new(
                 "slurm_job_failed",
                 false,

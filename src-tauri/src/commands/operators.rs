@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio_util::sync::CancellationToken;
 
 static OPERATOR_TASK_MAP: OnceLock<TokioMutex<HashMap<String, CancellationToken>>> =
@@ -244,6 +244,12 @@ pub enum OperatorTaskEvent {
         task_id: String,
         alias: String,
     },
+    QueueStatus {
+        task_id: String,
+        scheduler: String,
+        job_id: Option<String>,
+        state: String,
+    },
     Completed {
         task_id: String,
         ok: bool,
@@ -327,6 +333,23 @@ pub async fn run_operator_async(
 
     tokio::spawn(async move {
         let event = format!("operator-task-{}", task_id_clone);
+        let (queue_status_tx, mut queue_status_rx) = mpsc::unbounded_channel::<(String, String)>();
+        let queue_status_event = event.clone();
+        let queue_status_task_id = task_id_clone.clone();
+        let queue_status_app = app.clone();
+        let queue_status_forwarder = tokio::spawn(async move {
+            while let Some((job_id, state)) = queue_status_rx.recv().await {
+                let _ = queue_status_app.emit(
+                    &queue_status_event,
+                    &OperatorTaskEvent::QueueStatus {
+                        task_id: queue_status_task_id.clone(),
+                        scheduler: "slurm".to_string(),
+                        job_id: Some(job_id),
+                        state,
+                    },
+                );
+            }
+        });
 
         let _ = app.emit(
             &event,
@@ -336,8 +359,23 @@ pub async fn run_operator_async(
             },
         );
 
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
+        let operator_result = tokio::select! {
+            _ = cancel_token.cancelled() => None,
+            result = operators::with_operator_queue_status_sender(
+                queue_status_tx,
+                operators::execute_operator_tool_call_with_context(
+                    &ctx,
+                    &tool_name,
+                    &arguments_str,
+                    Some(run_context),
+                ),
+            ) => Some(result),
+        };
+
+        let _ = queue_status_forwarder.await;
+
+        match operator_result {
+            None => {
                 let _ = app.emit(
                     &event,
                     &OperatorTaskEvent::Cancelled {
@@ -345,15 +383,10 @@ pub async fn run_operator_async(
                     },
                 );
             }
-            result = operators::execute_operator_tool_call_with_context(
-                &ctx,
-                &tool_name,
-                &arguments_str,
-                Some(run_context),
-            ) => {
+            Some(result) => {
                 let (raw, is_error) = result;
-                let parsed =
-                    serde_json::from_str::<JsonValue>(&raw).unwrap_or_else(|_| json!({ "raw": raw }));
+                let parsed = serde_json::from_str::<JsonValue>(&raw)
+                    .unwrap_or_else(|_| json!({ "raw": raw }));
                 let _ = app.emit(
                     &event,
                     &OperatorTaskEvent::Completed {

@@ -568,6 +568,8 @@ interface PluginState {
   ) => Promise<OperatorRunResponse>;
   /** Active async operator tasks keyed by alias. */
   activeOperatorTasks: Record<string, string>;
+  /** Latest async operator scheduler status keyed by alias. */
+  activeOperatorTaskStatus: Record<string, OperatorTaskQueueStatus>;
   runOperatorAsync: (
     alias: string,
     invocation: OperatorInvocationArguments,
@@ -582,6 +584,13 @@ interface PluginState {
 export type OperatorTaskEvent =
   | { type: "started"; taskId: string; alias: string }
   | {
+      type: "queueStatus";
+      taskId: string;
+      scheduler: string;
+      jobId?: string | null;
+      state: string;
+    }
+  | {
       type: "completed";
       taskId: string;
       ok: boolean;
@@ -589,6 +598,12 @@ export type OperatorTaskEvent =
     }
   | { type: "failed"; taskId: string; error: string }
   | { type: "cancelled"; taskId: string };
+
+export type OperatorTaskQueueStatus = {
+  state: string;
+  jobId?: string;
+  scheduler: string;
+};
 
 export function flattenMarketplacePlugins(
   marketplaces: PluginMarketplaceEntry[],
@@ -1003,6 +1018,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   operatorRegistryPath: null,
   operatorRuns: [],
   activeOperatorTasks: {},
+  activeOperatorTaskStatus: {},
   envCheckResults: new Map(),
   retrievalStatuses: [],
   processPoolStatuses: [],
@@ -1529,10 +1545,15 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     });
     const { taskId } = response;
 
-    // Mark task active
-    set((state) => ({
-      activeOperatorTasks: { ...state.activeOperatorTasks, [alias]: taskId },
-    }));
+    // Mark task active and clear stale scheduler state from any prior run.
+    set((state) => {
+      const nextStatus = { ...state.activeOperatorTaskStatus };
+      delete nextStatus[alias];
+      return {
+        activeOperatorTasks: { ...state.activeOperatorTasks, [alias]: taskId },
+        activeOperatorTaskStatus: nextStatus,
+      };
+    });
 
     const eventName = `operator-task-${taskId}`;
     const unlisten = await listenTauriEvent<OperatorTaskEvent>(
@@ -1543,13 +1564,34 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           payload.type === "completed" ||
           payload.type === "failed" ||
           payload.type === "cancelled";
+        if (payload.type === "queueStatus") {
+          set((state) => {
+            if (state.activeOperatorTasks[alias] !== taskId) return state;
+            return {
+              activeOperatorTaskStatus: {
+                ...state.activeOperatorTaskStatus,
+                [alias]: {
+                  state: payload.state,
+                  scheduler: payload.scheduler,
+                  ...(payload.jobId ? { jobId: payload.jobId } : {}),
+                },
+              },
+            };
+          });
+          return;
+        }
         if (isTerminal) {
           // Clear active task entry only if it still matches this taskId
           set((state) => {
             if (state.activeOperatorTasks[alias] !== taskId) return state;
             const next = { ...state.activeOperatorTasks };
+            const nextStatus = { ...state.activeOperatorTaskStatus };
             delete next[alias];
-            return { activeOperatorTasks: next };
+            delete nextStatus[alias];
+            return {
+              activeOperatorTasks: next,
+              activeOperatorTaskStatus: nextStatus,
+            };
           });
           await get().loadOperatorRuns(projectRoot, surface);
           await onTerminal?.(payload);
