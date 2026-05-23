@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { extractErrorMessage } from "../utils/errorMessage";
+import { listenTauriEvent } from "../utils/tauriEvents";
 
 export type PluginInstallPolicy = "NOT_AVAILABLE" | "AVAILABLE" | "INSTALLED_BY_DEFAULT";
 export type PluginAuthPolicy = "ON_INSTALL" | "ON_USE";
@@ -565,7 +566,28 @@ interface PluginState {
     surface?: OperatorExecutionSurfaceArgs,
     runContext?: OperatorRunContext,
   ) => Promise<OperatorRunResponse>;
+  /** Active async operator tasks keyed by alias. */
+  activeOperatorTasks: Record<string, string>;
+  runOperatorAsync: (
+    alias: string,
+    invocation: OperatorInvocationArguments,
+    projectRoot?: string,
+    surface?: OperatorExecutionSurfaceArgs,
+    runContext?: OperatorRunContext,
+  ) => Promise<{ taskId: string }>;
+  cancelOperatorTask: (taskId: string) => Promise<void>;
 }
+
+export type OperatorTaskEvent =
+  | { type: "started"; taskId: string; alias: string }
+  | {
+      type: "completed";
+      taskId: string;
+      ok: boolean;
+      result: unknown;
+    }
+  | { type: "failed"; taskId: string; error: string }
+  | { type: "cancelled"; taskId: string };
 
 export function flattenMarketplacePlugins(
   marketplaces: PluginMarketplaceEntry[],
@@ -979,6 +1001,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   operatorDiagnostics: [],
   operatorRegistryPath: null,
   operatorRuns: [],
+  activeOperatorTasks: {},
   envCheckResults: new Map(),
   retrievalStatuses: [],
   processPoolStatuses: [],
@@ -1482,6 +1505,65 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       const error = extractErrorMessage(e);
       set({ isMutating: false, error });
       throw new Error(error);
+    }
+  },
+
+  runOperatorAsync: async (
+    alias: string,
+    invocation: OperatorInvocationArguments,
+    projectRoot?: string,
+    surface?: OperatorExecutionSurfaceArgs,
+    runContext?: OperatorRunContext,
+  ) => {
+    const response = await invoke<{ taskId: string }>("run_operator_async", {
+      alias,
+      arguments: invocation,
+      projectRoot,
+      ...operatorSurfacePayload(surface),
+      runKind: runContext?.kind ?? null,
+      smokeTestId: runContext?.smokeTestId ?? null,
+      smokeTestName: runContext?.smokeTestName ?? null,
+      bypassCache: runContext?.bypassCache ?? false,
+    });
+    const { taskId } = response;
+
+    // Mark task active
+    set((state) => ({
+      activeOperatorTasks: { ...state.activeOperatorTasks, [alias]: taskId },
+    }));
+
+    const eventName = `operator-task-${taskId}`;
+    const unlisten = await listenTauriEvent<OperatorTaskEvent>(
+      eventName,
+      async (event) => {
+        const payload = event.payload;
+        const isTerminal =
+          payload.type === "completed" ||
+          payload.type === "failed" ||
+          payload.type === "cancelled";
+        if (isTerminal) {
+          // Clear active task entry only if it still matches this taskId
+          set((state) => {
+            if (state.activeOperatorTasks[alias] !== taskId) return state;
+            const next = { ...state.activeOperatorTasks };
+            delete next[alias];
+            return { activeOperatorTasks: next };
+          });
+          await get().loadOperatorRuns(projectRoot, surface);
+          unlisten();
+        }
+      },
+    );
+
+    return response;
+  },
+
+  cancelOperatorTask: async (taskId: string) => {
+    try {
+      await invoke("cancel_operator_task", { taskId });
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ error });
     }
   },
 }));
