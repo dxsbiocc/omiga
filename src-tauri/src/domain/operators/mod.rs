@@ -27,6 +27,8 @@ const OPERATOR_STATE_DIR_NAME: &str = ".omiga";
 const REGISTRY_RELATIVE_PATH: &str = "operators/registry.json";
 /// Directory for user-created script operators: `~/.omiga/user-operators/`
 const USER_OPERATORS_SUBDIR: &str = "user-operators";
+/// Directory for user-created operator chain templates: `~/.omiga/user-chains/`
+const USER_CHAINS_SUBDIR: &str = "user-chains";
 const RUNS_RELATIVE_PATH: &str = "runs";
 const OPERATOR_DEFAULT_MAX_ATTEMPTS: u32 = 2;
 const OPERATOR_MAX_MAX_ATTEMPTS: u32 = 5;
@@ -62,6 +64,13 @@ fn current_operator_queue_status_sender() -> Option<OperatorQueueStatusSender> {
     OPERATOR_QUEUE_STATUS_SENDER
         .try_with(|sender| sender.clone())
         .ok()
+}
+
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -884,6 +893,18 @@ pub fn user_operators_dir() -> PathBuf {
         .join(USER_OPERATORS_SUBDIR)
 }
 
+/// `~/.omiga/user-chains/` — where user-created operator chain templates live.
+pub fn user_chains_dir() -> PathBuf {
+    let dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(OPERATOR_STATE_DIR_NAME)
+        .join(USER_CHAINS_SUBDIR);
+    if let Err(err) = fs::create_dir_all(&dir) {
+        tracing::warn!("create user chains dir {:?}: {}", dir, err);
+    }
+    dir
+}
+
 /// Scan `~/.omiga/user-operators/*.yaml` and load each as an OperatorSpec.
 fn discover_user_operator_candidates() -> Vec<OperatorSpec> {
     let dir = user_operators_dir();
@@ -931,6 +952,122 @@ pub struct UserOperatorParam {
 pub struct UserOperatorOutput {
     pub name: String,
     pub glob: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainStep {
+    pub alias: String,
+    pub arguments: JsonValue,
+    /// Optional input field name that should receive the previous step's outputDir.
+    pub inherit_prev_output_as: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainTemplate {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub steps: Vec<ChainStep>,
+    pub updated_at_ms: u64,
+}
+
+/// Create or replace an operator chain template YAML in `~/.omiga/user-chains/`.
+pub fn save_user_chain_template(
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    steps: &[ChainStep],
+) -> Result<PathBuf, String> {
+    let id = id.trim();
+    let name = name.trim();
+    if id.is_empty() {
+        return Err("chain template id must not be empty".to_string());
+    }
+    if name.is_empty() {
+        return Err("chain template name must not be empty".to_string());
+    }
+    if steps.is_empty() {
+        return Err("chain template must include at least one step".to_string());
+    }
+
+    let template = ChainTemplate {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: description
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        steps: steps.to_vec(),
+        updated_at_ms: current_epoch_ms(),
+    };
+
+    let dir = user_chains_dir();
+    fs::create_dir_all(&dir).map_err(|err| format!("create user-chains dir: {err}"))?;
+    let path = dir.join(format!("{}.yaml", sanitize_id(id)));
+    let raw = serde_yaml::to_string(&template)
+        .map_err(|err| format!("serialize chain template: {err}"))?;
+    fs::write(&path, raw).map_err(|err| format!("write chain template: {err}"))?;
+    tracing::info!("user chain template saved: {:?}", path);
+    Ok(path)
+}
+
+/// Scan `~/.omiga/user-chains/*.yaml` and load chain templates.
+pub fn list_user_chain_templates() -> Vec<ChainTemplate> {
+    let dir = user_chains_dir();
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut templates = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "yaml" || ext == "yml")
+        })
+        .filter_map(|entry| {
+            let path = entry.path();
+            match fs::read_to_string(&path)
+                .map_err(|err| err.to_string())
+                .and_then(|raw| {
+                    serde_yaml::from_str::<ChainTemplate>(&raw).map_err(|err| err.to_string())
+                }) {
+                Ok(template) => Some(template),
+                Err(err) => {
+                    tracing::warn!("user chain template {:?}: {}", path, err);
+                    None
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    templates.sort_by(|left, right| {
+        right
+            .updated_at_ms
+            .cmp(&left.updated_at_ms)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    templates
+}
+
+pub fn delete_user_chain_template(id: &str) -> Result<(), String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("chain template id must not be empty".to_string());
+    }
+
+    let path = user_chains_dir().join(format!("{}.yaml", sanitize_id(id)));
+    match fs::remove_file(&path) {
+        Ok(()) => {
+            tracing::info!("user chain template deleted: {:?}", path);
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("delete chain template: {err}")),
+    }
 }
 
 /// Create or replace a user script operator YAML in `~/.omiga/user-operators/`.
