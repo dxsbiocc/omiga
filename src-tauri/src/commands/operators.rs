@@ -9,7 +9,7 @@ use crate::domain::operators::{
 };
 use crate::domain::tools::{env_store::EnvStore, ToolContext};
 use crate::errors::AppError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,6 +52,33 @@ pub struct OperatorDescribeResponse {
 pub struct OperatorRunResponse {
     pub ok: bool,
     pub result: JsonValue,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainStep {
+    pub alias: String,
+    pub arguments: JsonValue,
+    /// Optional input field name that should receive the previous step's outputDir.
+    pub inherit_prev_output_as: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainStepResult {
+    pub alias: String,
+    pub ok: bool,
+    pub run_dir: Option<String>,
+    pub result: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorChainResult {
+    pub steps: Vec<ChainStepResult>,
+    pub ok: bool,
 }
 
 fn resolve_project_root(project_root: Option<String>) -> PathBuf {
@@ -371,6 +398,194 @@ pub async fn run_operator_async(
     Ok(json!({ "taskId": task_id }))
 }
 
+fn operator_run_dir(result: &JsonValue) -> Option<String> {
+    result
+        .get("runDir")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn operator_result_error_message(result: &JsonValue) -> Option<String> {
+    result
+        .get("error")
+        .and_then(JsonValue::as_object)
+        .and_then(|error| error.get("message"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn inject_previous_run_dir(
+    arguments: &mut JsonValue,
+    field: &str,
+    run_dir: &str,
+) -> Result<(), String> {
+    let field = field.trim();
+    if field.is_empty() {
+        return Err("previous output input field must not be empty".to_string());
+    }
+    if arguments.is_null() {
+        *arguments = json!({});
+    }
+    let object = arguments.as_object_mut().ok_or_else(|| {
+        "operator arguments must be a JSON object to inherit chain input".to_string()
+    })?;
+    let inputs = object.entry("inputs").or_insert_with(|| json!({}));
+    if inputs.is_null() {
+        *inputs = json!({});
+    }
+    let input_object = inputs.as_object_mut().ok_or_else(|| {
+        "operator arguments.inputs must be a JSON object to inherit chain input".to_string()
+    })?;
+    input_object.insert(field.to_string(), JsonValue::String(run_dir.to_string()));
+    Ok(())
+}
+
+fn chain_step_failure(alias: String, error: String) -> ChainStepResult {
+    ChainStepResult {
+        alias: alias.clone(),
+        ok: false,
+        run_dir: None,
+        result: json!({
+            "status": "failed",
+            "operator": {
+                "alias": alias,
+            },
+            "error": {
+                "kind": "chain_input_injection_failed",
+                "retryable": false,
+                "message": error,
+            },
+        }),
+        error: Some(error),
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_operator_chain(
+    state: State<'_, OmigaAppState>,
+    steps: Vec<ChainStep>,
+    project_root: Option<String>,
+    session_id: Option<String>,
+    execution_environment: Option<String>,
+    ssh_server: Option<String>,
+    sandbox_backend: Option<String>,
+) -> CommandResult<OperatorChainResult> {
+    if steps.len() < 2 {
+        return Err(AppError::Config(
+            "operator chain requires at least two steps".to_string(),
+        ));
+    }
+
+    let ctx = build_operator_context(
+        &state,
+        project_root,
+        session_id,
+        execution_environment,
+        ssh_server,
+        sandbox_backend,
+        120,
+    )
+    .await;
+
+    let mut results = Vec::with_capacity(steps.len());
+    let mut previous_run_dir: Option<String> = None;
+
+    for (index, step) in steps.into_iter().enumerate() {
+        let alias = step.alias.trim().to_string();
+        if alias.is_empty() {
+            return Err(AppError::Config(
+                "operator chain step alias must not be empty".to_string(),
+            ));
+        }
+
+        let mut arguments = if step.arguments.is_null() {
+            json!({})
+        } else {
+            step.arguments
+        };
+
+        if index > 0 {
+            if let Some(field) = step
+                .inherit_prev_output_as
+                .as_deref()
+                .map(str::trim)
+                .filter(|field| !field.is_empty())
+            {
+                let Some(run_dir) = previous_run_dir.as_deref() else {
+                    results.push(chain_step_failure(
+                        alias,
+                        "previous operator step did not return runDir".to_string(),
+                    ));
+                    return Ok(OperatorChainResult {
+                        steps: results,
+                        ok: false,
+                    });
+                };
+                if let Err(error) = inject_previous_run_dir(&mut arguments, field, run_dir) {
+                    results.push(chain_step_failure(alias, error));
+                    return Ok(OperatorChainResult {
+                        steps: results,
+                        ok: false,
+                    });
+                }
+            }
+        }
+
+        let tool_name = if alias.starts_with(operators::OPERATOR_TOOL_PREFIX) {
+            alias.clone()
+        } else {
+            format!("{}{}", operators::OPERATOR_TOOL_PREFIX, alias)
+        };
+        let arguments = serde_json::to_string(&arguments)
+            .map_err(|err| AppError::Config(format!("serialize operator arguments: {err}")))?;
+        let run_context = OperatorRunContext {
+            kind: Some("chain".to_string()),
+            smoke_test_id: None,
+            smoke_test_name: None,
+            parent_execution_id: None,
+            bypass_cache: false,
+        };
+        let (raw, is_error) = operators::execute_operator_tool_call_with_context(
+            &ctx,
+            &tool_name,
+            &arguments,
+            Some(run_context),
+        )
+        .await;
+        let result =
+            serde_json::from_str::<JsonValue>(&raw).unwrap_or_else(|_| json!({ "raw": raw }));
+        let run_dir = operator_run_dir(&result);
+        let error = is_error.then(|| {
+            operator_result_error_message(&result)
+                .unwrap_or_else(|| "operator chain step failed".to_string())
+        });
+        results.push(ChainStepResult {
+            alias,
+            ok: !is_error,
+            run_dir: run_dir.clone(),
+            result,
+            error,
+        });
+        if is_error {
+            return Ok(OperatorChainResult {
+                steps: results,
+                ok: false,
+            });
+        }
+        previous_run_dir = run_dir;
+    }
+
+    Ok(OperatorChainResult {
+        steps: results,
+        ok: true,
+    })
+}
+
 /// Cancel an in-progress async operator task by its `task_id`.
 #[tauri::command]
 pub async fn cancel_operator_task(task_id: String) -> CommandResult<()> {
@@ -533,7 +748,8 @@ pub async fn cleanup_operator_runs(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_project_root;
+    use super::{inject_previous_run_dir, resolve_project_root};
+    use serde_json::json;
 
     #[test]
     fn resolve_project_root_treats_empty_or_dot_as_current_directory() {
@@ -546,5 +762,51 @@ mod tests {
         assert_eq!(resolve_project_root(Some(String::new())), current);
         assert_eq!(resolve_project_root(Some(".".to_string())), current);
         assert_eq!(resolve_project_root(Some("   ".to_string())), current);
+    }
+
+    #[test]
+    fn inject_previous_run_dir_preserves_existing_invocation_shape() {
+        let mut arguments = json!({
+            "inputs": {
+                "reads": "/tmp/reads",
+            },
+            "params": {
+                "threshold": 0.8,
+            },
+            "resources": {},
+        });
+
+        inject_previous_run_dir(&mut arguments, "previous", "/tmp/oprun_1").unwrap();
+
+        assert_eq!(
+            arguments,
+            json!({
+                "inputs": {
+                    "reads": "/tmp/reads",
+                    "previous": "/tmp/oprun_1",
+                },
+                "params": {
+                    "threshold": 0.8,
+                },
+                "resources": {},
+            })
+        );
+    }
+
+    #[test]
+    fn inject_previous_run_dir_initializes_missing_inputs() {
+        let mut arguments = json!({ "params": {} });
+
+        inject_previous_run_dir(&mut arguments, "source", "/tmp/oprun_1").unwrap();
+
+        assert_eq!(
+            arguments,
+            json!({
+                "inputs": {
+                    "source": "/tmp/oprun_1",
+                },
+                "params": {},
+            })
+        );
     }
 }

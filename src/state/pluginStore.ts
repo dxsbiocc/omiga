@@ -315,6 +315,25 @@ export interface OperatorRunResponse {
   result: Record<string, unknown>;
 }
 
+export interface OperatorChainStep {
+  alias: string;
+  arguments: OperatorInvocationArguments;
+  inheritPrevOutputAs?: string | null;
+}
+
+export interface OperatorChainStepResult {
+  alias: string;
+  ok: boolean;
+  runDir?: string | null;
+  result: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface OperatorChainResult {
+  steps: OperatorChainStepResult[];
+  ok: boolean;
+}
+
 export interface OperatorRunContext {
   kind?: string | null;
   smokeTestId?: string | null;
@@ -566,6 +585,11 @@ interface PluginState {
     surface?: OperatorExecutionSurfaceArgs,
     runContext?: OperatorRunContext,
   ) => Promise<OperatorRunResponse>;
+  runOperatorChain: (
+    steps: OperatorChainStep[],
+    projectRoot?: string,
+    surface?: OperatorExecutionSurfaceArgs,
+  ) => Promise<OperatorChainResult>;
   /** Active async operator tasks keyed by alias. */
   activeOperatorTasks: Record<string, string>;
   runOperatorAsync: (
@@ -1498,6 +1522,39 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         const error = operatorRunErrorMessage(response.result);
         set({ isMutating: false, error });
         throw new Error(error);
+      }
+      set({ isMutating: false });
+      return response;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
+
+  runOperatorChain: async (
+    steps: OperatorChainStep[],
+    projectRoot?: string,
+    surface?: OperatorExecutionSurfaceArgs,
+  ) => {
+    set({ isMutating: true, error: null });
+    try {
+      const response = await invoke<OperatorChainResult>("run_operator_chain", {
+        steps,
+        projectRoot,
+        ...operatorSurfacePayload(surface),
+      });
+      await get().loadOperatorRuns(projectRoot, surface);
+      const summaries = response.steps
+        .map((step) => summarizeOperatorRunResult(step.result))
+        .filter((summary): summary is OperatorRunSummary => Boolean(summary));
+      if (summaries.length > 0) {
+        const existingRunIds = new Set(get().operatorRuns.map((run) => run.runId));
+        const nextRuns = [
+          ...summaries.filter((summary) => !existingRunIds.has(summary.runId)),
+          ...get().operatorRuns,
+        ].slice(0, 25);
+        set({ operatorRuns: nextRuns });
       }
       set({ isMutating: false });
       return response;
