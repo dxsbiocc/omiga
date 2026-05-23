@@ -1,3 +1,5 @@
+import type { Page } from "@playwright/test";
+
 /**
  * Tauri IPC mock for Playwright E2E tests.
  *
@@ -5,6 +7,23 @@
  * passes and all `invoke()` calls resolve with sensible default data instead
  * of throwing. Tests run against the Vite dev server without the native binary.
  */
+
+export type TauriMockEvent = {
+  event: string;
+  payload: unknown;
+  delayMs?: number;
+};
+
+export type TauriCommandMock =
+  | unknown
+  | {
+      response?: unknown;
+      events?: TauriMockEvent[];
+    };
+
+export type TauriMockOptions = {
+  commandMocks?: Record<string, TauriCommandMock>;
+};
 
 export const TAURI_MOCK_SCRIPT = `
 (function () {
@@ -34,7 +53,7 @@ export const TAURI_MOCK_SCRIPT = `
     save_message: () => null,
     clear_session_messages: () => null,
     get_session_artifacts: () => ([]),
-    export_session_markdown: () => "# Session Export\n\nNo messages.",
+    export_session_markdown: () => "# Session Export\\n\\nNo messages.",
     refresh_session_mcp_connections: () => null,
     get_mcp_connection_stats: () => ({}),
     prewarm_session: () => null,
@@ -296,18 +315,86 @@ export const TAURI_MOCK_SCRIPT = `
     send_notification: () => null,
   };
 
+  const callbackMap = new Map();
+  const eventListeners = new Map();
   let _nextEventId = 1;
+
+  function getCommandMock(command) {
+    const config = window.__TAURI_MOCK_CONFIG__ || {};
+    const commandMocks = config.commandMocks || {};
+    if (Object.prototype.hasOwnProperty.call(commandMocks, command)) {
+      return commandMocks[command];
+    }
+    return undefined;
+  }
+
+  function isCommandMockConfig(value) {
+    return Boolean(
+      value &&
+        typeof value === 'object' &&
+        (Object.prototype.hasOwnProperty.call(value, 'response') ||
+          Object.prototype.hasOwnProperty.call(value, 'events'))
+    );
+  }
+
+  function runCallback(callbackId, data) {
+    const callback = callbackMap.get(callbackId) || window['_' + callbackId];
+    if (callback) {
+      callback(data);
+      return;
+    }
+    console.warn('[tauri-mock] missing callback:', callbackId);
+  }
+
+  function emitTauriEvent(eventName, payload) {
+    const listenerIds = Array.from(eventListeners.get(eventName) || []);
+    for (const listenerId of listenerIds) {
+      runCallback(listenerId, {
+        event: eventName,
+        id: listenerId,
+        payload,
+      });
+    }
+  }
+
+  function scheduleEvents(events) {
+    for (const event of events || []) {
+      const delayMs = typeof event.delayMs === 'number' ? event.delayMs : 0;
+      window.setTimeout(() => emitTauriEvent(event.event, event.payload), delayMs);
+    }
+  }
 
   const invoke = function (command, args) {
     // Tauri 2.x event plugin IPC — needed by @tauri-apps/api/event listen/unlisten
     if (command === 'plugin:event|listen') {
-      return Promise.resolve(_nextEventId++);
+      const listenerId = args && typeof args.handler === 'number' ? args.handler : _nextEventId++;
+      const listeners = eventListeners.get(args.event) || new Set();
+      listeners.add(listenerId);
+      eventListeners.set(args.event, listeners);
+      return Promise.resolve(listenerId);
     }
     if (command === 'plugin:event|unlisten') {
+      const listenerId = args && (args.eventId || args.id);
+      const listeners = eventListeners.get(args.event);
+      if (listeners && listenerId) listeners.delete(listenerId);
       return Promise.resolve(null);
     }
     if (command === 'plugin:event|emit' || command === 'plugin:event|emit_to') {
+      emitTauriEvent(args.event, args.payload);
       return Promise.resolve(null);
+    }
+
+    const commandMock = getCommandMock(command);
+    if (commandMock !== undefined) {
+      if (isCommandMockConfig(commandMock)) {
+        scheduleEvents(commandMock.events);
+        return Promise.resolve(
+          Object.prototype.hasOwnProperty.call(commandMock, 'response')
+            ? commandMock.response
+            : null
+        );
+      }
+      return Promise.resolve(commandMock);
     }
 
     const handler = defaultHandlers[command];
@@ -326,9 +413,23 @@ export const TAURI_MOCK_SCRIPT = `
   window.__TAURI_INTERNALS__ = {
     transformCallback: function (cb, once) {
       const id = Math.floor(Math.random() * 2 ** 31);
-      window['_' + id] = cb;
+      const callback = function (data) {
+        if (once) {
+          callbackMap.delete(id);
+          delete window['_' + id];
+        }
+        return cb(data);
+      };
+      callbackMap.set(id, callback);
+      window['_' + id] = callback;
       return id;
     },
+    unregisterCallback: function (id) {
+      callbackMap.delete(id);
+      delete window['_' + id];
+    },
+    runCallback: runCallback,
+    callbacks: callbackMap,
     invoke: invoke,
     metadata: {},
     plugins: {},
@@ -337,10 +438,36 @@ export const TAURI_MOCK_SCRIPT = `
   // @tauri-apps/api/event calls window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener
   // during cleanup (component unmount). Stub it so no TypeError is thrown.
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
-    unregisterListener: function () {},
+    unregisterListener: function (event, eventId) {
+      const listeners = eventListeners.get(event);
+      if (listeners) listeners.delete(eventId);
+      callbackMap.delete(eventId);
+      delete window['_' + eventId];
+    },
   };
 
   // Also expose on window for direct access in tests
   window.__tauriMockInvoke = invoke;
+  window.__tauriMockEmit = emitTauriEvent;
 })();
 `;
+
+export async function mountTauriMock(
+  page: Page,
+  options: TauriMockOptions = {},
+): Promise<void> {
+  await page.addInitScript((config) => {
+    (window as typeof window & { __TAURI_MOCK_CONFIG__?: TauriMockOptions })
+      .__TAURI_MOCK_CONFIG__ = config;
+
+    try {
+      const stored = localStorage.getItem("omiga-ui");
+      const parsed = stored ? JSON.parse(stored) : { state: {}, version: 0 };
+      parsed.state = { ...parsed.state, onboardingCompleted: true };
+      localStorage.setItem("omiga-ui", JSON.stringify(parsed));
+    } catch {
+      // Some synthetic pages disable storage; the app page supports it.
+    }
+  }, options);
+  await page.addInitScript(TAURI_MOCK_SCRIPT);
+}
