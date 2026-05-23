@@ -1,4 +1,9 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Accordion,
@@ -6109,7 +6114,33 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           `${smokeLabel} succeeded and ${verifyStatus} for ${operatorToolName(alias)}${typeof runDir === "string" ? ` · ${runDir}` : ""}`,
         );
       }
+      try {
+        let granted = await isPermissionGranted();
+        if (!granted) {
+          const permission = await requestPermission();
+          granted = permission === "granted";
+        }
+        if (granted) {
+          sendNotification({
+            title: "Operator run complete",
+            body: `${operatorToolName(alias)} finished successfully`,
+          });
+        }
+      } catch {
+        /* ignore */
+      }
     } catch {
+      try {
+        const granted = await isPermissionGranted().catch(() => false);
+        if (granted) {
+          sendNotification({
+            title: "Operator run failed",
+            body: `${operatorToolName(alias)} failed`,
+          });
+        }
+      } catch {
+        /* ignore */
+      }
       // Store exposes the error banner.
     }
   };
@@ -6154,7 +6185,10 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       }
       const candidateLines = preview.candidates
         .slice(0, 8)
-        .map((candidate) => `• ${candidate.runId} (${candidate.status}, ${candidate.reason})`)
+        .map((candidate) => {
+          const size = candidate.estimatedBytes != null ? ` · ${formatBytes(candidate.estimatedBytes)}` : "";
+          return `• ${candidate.runId} (${candidate.status}, ${candidate.reason}${size})`;
+        })
         .join("\n");
       const remaining = preview.candidates.length > 8
         ? `\n… and ${preview.candidates.length - 8} more`

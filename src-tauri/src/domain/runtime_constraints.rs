@@ -689,6 +689,8 @@ fn build_clarification_first_block(
                 .to_string(),
             header: "Clarify".to_string(),
             multi_select: false,
+            param: None,
+            show_when: None,
             options: vec![
                 ask_user_question::QuestionOption {
                     label: "Scope".to_string(),
