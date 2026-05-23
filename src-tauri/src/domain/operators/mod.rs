@@ -1080,7 +1080,9 @@ fn operator_external_network_authoring_diagnostics(
     diagnostics
 }
 
-fn operator_interface_authoring_diagnostics(spec: &OperatorSpec) -> Vec<OperatorManifestDiagnostic> {
+fn operator_interface_authoring_diagnostics(
+    spec: &OperatorSpec,
+) -> Vec<OperatorManifestDiagnostic> {
     let mut diagnostics = Vec::new();
     let preflight_param_ids: std::collections::HashSet<&str> = spec
         .preflight
@@ -1104,7 +1106,14 @@ fn operator_interface_authoring_diagnostics(spec: &OperatorSpec) -> Vec<Operator
             output_spec.kind,
             OperatorFieldKind::File | OperatorFieldKind::FileArray
         );
-        if is_file_like && output_spec.glob.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        if is_file_like
+            && output_spec
+                .glob
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
             diagnostics.push(OperatorManifestDiagnostic {
                 source_plugin: spec.source.source_plugin.clone(),
                 manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
