@@ -2022,6 +2022,14 @@ function formatOperatorRunTimestamp(updatedAt?: string | null): string | null {
   return date.toLocaleString();
 }
 
+function formatRelativeTime(ms: number): string {
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
 function formatBytes(bytes?: number | null): string {
   if (!Number.isFinite(bytes ?? Number.NaN) || (bytes ?? 0) <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -5025,6 +5033,11 @@ function OperatorCatalogSection({
   const exposedCount = operators.filter((operator) => operator.exposed).length;
   const unavailableCount = operators.filter((operator) => operator.unavailableReason).length;
   const failedRunCount = runs.filter((run) => operatorRunStatusColor(run.status) === "error").length;
+  const succeededRunCount = runs.filter((run) => operatorRunStatusColor(run.status) === "success").length;
+  const latestRunTime = runs.reduce<number>((max, run) => {
+    const ts = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
+    return ts > max ? ts : max;
+  }, 0);
   const cacheHitCount = runs.filter(operatorRunIsCacheHit).length;
   const diagnosticIssueCount = diagnostics.filter((diagnostic) => diagnostic.severity !== "info").length;
 
@@ -5055,6 +5068,12 @@ function OperatorCatalogSection({
           )}
           {runs.length > 0 && (
             <Chip size="small" variant="outlined" label={`${runs.length} runs`} />
+          )}
+          {succeededRunCount > 0 && (
+            <Chip size="small" color="success" variant="outlined" label={`${succeededRunCount} succeeded`} />
+          )}
+          {latestRunTime > 0 && (
+            <Chip size="small" variant="outlined" label={`last: ${formatRelativeTime(latestRunTime)}`} />
           )}
           {cacheHitCount > 0 && (
             <Chip size="small" color="success" variant="outlined" label={`${cacheHitCount} cache hits`} />
@@ -5241,6 +5260,18 @@ function OperatorCatalogSection({
                 const latestFailedRun = operatorRunsForOperator(operator, runs)
                   .find((run) => operatorRunStatusColor(run.status) === "error") ?? null;
                 const latestFailureSummary = latestFailedRun ? operatorRunDiagnosisSummary(latestFailedRun) : null;
+                const cardEnvRef = operatorEnvironmentRef(operator);
+                const cardEnv = cardEnvRef
+                  ? (environments ?? []).find((e) => e.id === cardEnvRef || e.canonicalId === cardEnvRef)
+                  : null;
+                const envBlocked = cardEnv
+                  ? ["missing", "unavailable", "failed", "error", "not_found", "not-found"].includes(
+                      cardEnv.availabilityStatus.trim().toLowerCase(),
+                    )
+                  : false;
+                const envBlockedTooltip = envBlocked
+                  ? (cardEnv?.installHint?.trim() || cardEnv?.availabilityMessage?.trim() || `Environment '${cardEnvRef}' is unavailable`)
+                  : null;
                 return (
                   <Paper
                     key={operatorKey}
