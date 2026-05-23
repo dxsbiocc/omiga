@@ -19,6 +19,7 @@ import {
   useUiStore,
   usePermissionStore,
   useExtensionStore,
+  usePluginStore,
   LAYOUT_LEFT_MIN,
   LAYOUT_LEFT_MAX,
   LAYOUT_RIGHT_MIN,
@@ -238,6 +239,10 @@ export default function App() {
 
   useEffect(() => {
     void useExtensionStore.getState().loadExtensions();
+  }, []);
+
+  useEffect(() => {
+    void usePluginStore.getState().hydrateActiveOperatorTasks();
   }, []);
 
   // Listen for cron job fired events — create an AI session and send the task

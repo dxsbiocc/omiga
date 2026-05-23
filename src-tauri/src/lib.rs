@@ -325,6 +325,7 @@ pub fn run() {
             commands::operators::run_operator_async,
             commands::operators::run_operator_chain,
             commands::operators::cancel_operator_task,
+            commands::operators::list_active_operator_tasks,
             commands::operators::list_operator_runs,
             commands::operators::read_operator_run,
             commands::operators::read_operator_run_log,
