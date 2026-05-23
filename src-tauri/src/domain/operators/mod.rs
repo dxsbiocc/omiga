@@ -5135,7 +5135,15 @@ async fn execute_in_environment(
         .and_then(|v| v.as_u64())
         .unwrap_or(1) as u32;
     let result = if slurm {
-        execute_via_slurm(ctx, run_dir, &command, walltime_secs, cpu_count, &resolved.spec.metadata.id).await?
+        execute_via_slurm(
+            ctx,
+            run_dir,
+            &command,
+            walltime_secs,
+            cpu_count,
+            &resolved.spec.metadata.id,
+        )
+        .await?
     } else {
         execute_env_command(ctx, run_dir, &command, walltime_secs).await?
     };
@@ -5378,7 +5386,10 @@ fn operator_environment_cwd(ctx: &crate::domain::tools::ToolContext) -> String {
     crate::domain::tools::env_store::remote_path(ctx, ".")
 }
 
-fn operator_uses_slurm_scheduler(spec: &OperatorSpec, ctx: &crate::domain::tools::ToolContext) -> bool {
+fn operator_uses_slurm_scheduler(
+    spec: &OperatorSpec,
+    ctx: &crate::domain::tools::ToolContext,
+) -> bool {
     if ctx.execution_environment.trim().to_ascii_lowercase() != "ssh" {
         return false;
     }
@@ -5402,7 +5413,13 @@ async fn execute_via_slurm(
 ) -> Result<crate::execution::ExecResult, OperatorToolError> {
     let safe_id = operator_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>();
     let walltime_hhmmss = {
         let h = walltime_secs / 3600;
@@ -5430,7 +5447,11 @@ async fn execute_via_slurm(
         return Err(OperatorToolError::new(
             "slurm_submission_failed",
             false,
-            format!("sbatch failed with code {}: {}", submit_result.returncode, submit_result.output.trim()),
+            format!(
+                "sbatch failed with code {}: {}",
+                submit_result.returncode,
+                submit_result.output.trim()
+            ),
         )
         .with_run_dir(run_dir)
         .with_suggested_action("Ensure SLURM is available and sbatch is on PATH."));
@@ -5447,12 +5468,19 @@ async fn execute_via_slurm(
             OperatorToolError::new(
                 "slurm_job_id_missing",
                 false,
-                format!("Could not parse job ID from sbatch output: {}", submit_result.output.trim()),
+                format!(
+                    "Could not parse job ID from sbatch output: {}",
+                    submit_result.output.trim()
+                ),
             )
             .with_run_dir(run_dir)
         })?;
     // Write job ID for provenance
-    let record_cmd = format!("echo {} > {}/logs/slurm_job_id.txt", sh_quote(&job_id), sh_quote(run_dir));
+    let record_cmd = format!(
+        "echo {} > {}/logs/slurm_job_id.txt",
+        sh_quote(&job_id),
+        sh_quote(run_dir)
+    );
     let _ = execute_env_command(ctx, run_dir, &record_cmd, 10).await;
     // Poll squeue every 15 seconds
     let poll_interval = std::time::Duration::from_secs(15);
@@ -5460,14 +5488,27 @@ async fn execute_via_slurm(
     loop {
         if std::time::Instant::now() >= deadline {
             // Cancel job on timeout
-            let _ = execute_env_command(ctx, run_dir, &format!("scancel {}", sh_quote(&job_id)), 10).await;
-            return Err(OperatorToolError::new("slurm_timeout", false, "SLURM job exceeded walltime limit.")
-                .with_run_dir(run_dir));
+            let _ =
+                execute_env_command(ctx, run_dir, &format!("scancel {}", sh_quote(&job_id)), 10)
+                    .await;
+            return Err(OperatorToolError::new(
+                "slurm_timeout",
+                false,
+                "SLURM job exceeded walltime limit.",
+            )
+            .with_run_dir(run_dir));
         }
-        let poll_cmd = format!("squeue --noheader -j {} -o '%T' 2>/dev/null || true", sh_quote(&job_id));
+        let poll_cmd = format!(
+            "squeue --noheader -j {} -o '%T' 2>/dev/null || true",
+            sh_quote(&job_id)
+        );
         let poll = execute_env_command(ctx, run_dir, &poll_cmd, 30).await?;
         let state = poll.output.trim().to_ascii_uppercase();
-        if state.contains("FAILED") || state.contains("CANCELLED") || state.contains("TIMEOUT") || state.contains("NODE_FAIL") {
+        if state.contains("FAILED")
+            || state.contains("CANCELLED")
+            || state.contains("TIMEOUT")
+            || state.contains("NODE_FAIL")
+        {
             return Err(OperatorToolError::new(
                 "slurm_job_failed",
                 false,
@@ -5478,7 +5519,10 @@ async fn execute_via_slurm(
         }
         if state.is_empty() {
             // Job finished — read exit code
-            let code_cmd = format!("cat {}/logs/exit_code.txt 2>/dev/null || echo 0", sh_quote(run_dir));
+            let code_cmd = format!(
+                "cat {}/logs/exit_code.txt 2>/dev/null || echo 0",
+                sh_quote(run_dir)
+            );
             let code_result = execute_env_command(ctx, run_dir, &code_cmd, 10).await?;
             let returncode = code_result.output.trim().parse::<i32>().unwrap_or(0);
             return Ok(crate::execution::ExecResult {
