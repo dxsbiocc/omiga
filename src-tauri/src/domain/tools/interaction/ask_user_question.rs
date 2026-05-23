@@ -280,6 +280,8 @@ mod tests {
             question: "Which crate?".to_string(),
             header: "Crate".to_string(),
             multi_select: false,
+            param: None,
+            show_when: None,
             options: vec![
                 QuestionOption {
                     label: "tokio".to_string(),
@@ -370,6 +372,8 @@ mod tests {
                 question: "Pick many?".to_string(),
                 header: "Many".to_string(),
                 multi_select: true,
+                param: None,
+                show_when: None,
                 options: vec![
                     QuestionOption {
                         label: "A".to_string(),

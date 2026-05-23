@@ -82,6 +82,7 @@ fn test_tool_message_roundtrip() {
     let msg = Message::Tool {
         tool_call_id: "call-1".to_string(),
         output: "File contents here".to_string(),
+        is_error: None,
     };
 
     let record = SessionCodec::message_to_record(&msg, "msg-4", "sess-1");
@@ -103,6 +104,7 @@ fn test_record_to_message_user() {
         content: "Hello world".to_string(),
         tool_calls: None,
         tool_call_id: None,
+        tool_is_error: None,
         token_usage_json: None,
         reasoning_content: None,
         follow_up_suggestions_json: None,
@@ -128,6 +130,7 @@ fn test_record_to_message_assistant_with_tool_calls() {
         content: "Running command".to_string(),
         tool_calls: Some(tool_calls_json.to_string()),
         tool_call_id: None,
+        tool_is_error: None,
         token_usage_json: None,
         reasoning_content: None,
         follow_up_suggestions_json: None,
@@ -162,6 +165,7 @@ fn test_record_to_message_tool() {
         content: "total 32\n-rw-r--r-- 1 user user 1234 Jan 1 00:00 file.txt".to_string(),
         tool_calls: None,
         tool_call_id: Some("call-1".to_string()),
+        tool_is_error: None,
         token_usage_json: None,
         reasoning_content: None,
         follow_up_suggestions_json: None,
@@ -174,6 +178,7 @@ fn test_record_to_message_tool() {
         Message::Tool {
             tool_call_id,
             output,
+            ..
         } => {
             assert_eq!(tool_call_id, "call-1");
             assert!(output.contains("total 32"));
@@ -214,6 +219,7 @@ fn test_to_api_messages_conversation() {
         Message::Tool {
             tool_call_id: "call-1".to_string(),
             output: "total 10\ndrwxr-xr-x 5 user user 160 Jan 1 00:00 .".to_string(),
+            is_error: None,
         },
     ];
 

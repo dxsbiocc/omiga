@@ -190,7 +190,7 @@ pub struct OperatorPreflightQuestionSpec {
     pub ask_when: OperatorPreflightAskWhen,
     pub options: Vec<OperatorPreflightOptionSpec>,
     /// When set, the question is only shown if the referenced param currently equals the given value.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_when: Option<OperatorPreflightShowWhen>,
 }
 
@@ -9308,6 +9308,7 @@ execution:
                 empty: true,
                 values: vec![json!("auto")],
             },
+            show_when: None,
             options: vec![
                 OperatorPreflightOptionSpec {
                     label: "Auto".to_string(),
@@ -9400,6 +9401,7 @@ execution:
                     empty: false,
                     values: Vec::new(),
                 },
+                show_when: None,
                 options: vec![
                     OperatorPreflightOptionSpec {
                         label: "Auto".to_string(),
@@ -9466,6 +9468,7 @@ execution:
                     empty: true,
                     values: Vec::new(),
                 },
+                show_when: None,
                 options: vec![
                     OperatorPreflightOptionSpec {
                         label: "Auto".to_string(),
@@ -9641,6 +9644,7 @@ execution:
                 empty: false,
                 values: Vec::new(),
             },
+            show_when: None,
             options: vec![
                 OperatorPreflightOptionSpec {
                     label: "A".to_string(),
@@ -9682,6 +9686,7 @@ execution:
                 empty: false,
                 values: Vec::new(),
             },
+            show_when: None,
             options: vec![
                 OperatorPreflightOptionSpec {
                     label: "FDR 0.05".to_string(),
@@ -11221,6 +11226,7 @@ runtime:
             smoke_test_id: Some("default".to_string()),
             smoke_test_name: Some("Cache bypass smoke".to_string()),
             parent_execution_id: None,
+            bypass_cache: false,
         });
 
         let first = execute_resolved_operator(
