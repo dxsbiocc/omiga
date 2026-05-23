@@ -189,6 +189,16 @@ pub struct OperatorPreflightQuestionSpec {
     #[serde(default)]
     pub ask_when: OperatorPreflightAskWhen,
     pub options: Vec<OperatorPreflightOptionSpec>,
+    /// When set, the question is only shown if the referenced param currently equals the given value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<OperatorPreflightShowWhen>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorPreflightShowWhen {
+    pub param: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -877,6 +887,29 @@ fn discover_user_operator_candidates() -> Vec<OperatorSpec> {
         .collect()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserOperatorInput {
+    pub name: String,
+    pub kind: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserOperatorParam {
+    pub name: String,
+    pub kind: String,
+    pub default: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserOperatorOutput {
+    pub name: String,
+    pub glob: String,
+}
+
 /// Create or replace a user script operator YAML in `~/.omiga/user-operators/`.
 ///
 /// `argv` is the command array, e.g. `["bash", "-c", "echo hello"]`.
@@ -885,6 +918,9 @@ pub fn save_user_script_operator(
     name: &str,
     description: &str,
     argv: &[String],
+    inputs: &[UserOperatorInput],
+    params: &[UserOperatorParam],
+    outputs: &[UserOperatorOutput],
 ) -> Result<PathBuf, String> {
     if id.is_empty() {
         return Err("operator id must not be empty".to_string());
@@ -907,9 +943,12 @@ pub fn save_user_script_operator(
     } else {
         format!("\n  description: {}", serde_yaml_escape(description))
     };
+    let inputs_yaml = user_operator_inputs_yaml(inputs);
+    let params_yaml = user_operator_params_yaml(params);
+    let outputs_yaml = user_operator_outputs_yaml(outputs);
 
     let content = format!(
-        "apiVersion: omiga.ai/operator/v1alpha1\nkind: Operator\nmetadata:\n  id: {id}\n  version: 0.1.0\n  name: {name}{desc_line}\nexecution:\n  argv:\n{argv_yaml}\ninterface:\n  inputs: {{}}\n  params: {{}}\n  outputs: {{}}\n",
+        "apiVersion: omiga.ai/operator/v1alpha1\nkind: Operator\nmetadata:\n  id: {id}\n  version: 0.1.0\n  name: {name}{desc_line}\nexecution:\n  argv:\n{argv_yaml}\ninterface:\n{inputs_yaml}\n{params_yaml}\n{outputs_yaml}\n",
         id = serde_yaml_escape(id),
         name = serde_yaml_escape(name),
     );
@@ -919,6 +958,50 @@ pub fn save_user_script_operator(
     fs::write(&path, content).map_err(|e| format!("write user operator: {e}"))?;
     tracing::info!("user operator saved: {:?}", path);
     Ok(path)
+}
+
+fn user_operator_inputs_yaml(inputs: &[UserOperatorInput]) -> String {
+    if inputs.is_empty() {
+        return "  inputs: {}".to_string();
+    }
+
+    let mut lines = vec!["  inputs:".to_string()];
+    for input in inputs {
+        lines.push(format!("    {}:", serde_yaml_escape(&input.name)));
+        lines.push(format!("      kind: {}", serde_yaml_escape(&input.kind)));
+        lines.push(format!("      required: {}", input.required));
+    }
+    lines.join("\n")
+}
+
+fn user_operator_params_yaml(params: &[UserOperatorParam]) -> String {
+    if params.is_empty() {
+        return "  params: {}".to_string();
+    }
+
+    let mut lines = vec!["  params:".to_string()];
+    for param in params {
+        lines.push(format!("    {}:", serde_yaml_escape(&param.name)));
+        lines.push(format!("      kind: {}", serde_yaml_escape(&param.kind)));
+        let default = param.default.trim();
+        if !default.is_empty() {
+            lines.push(format!("      default: {}", serde_yaml_escape(default)));
+        }
+    }
+    lines.join("\n")
+}
+
+fn user_operator_outputs_yaml(outputs: &[UserOperatorOutput]) -> String {
+    if outputs.is_empty() {
+        return "  outputs: {}".to_string();
+    }
+
+    let mut lines = vec!["  outputs:".to_string()];
+    for output in outputs {
+        lines.push(format!("    {}:", serde_yaml_escape(&output.name)));
+        lines.push(format!("      glob: {}", serde_yaml_escape(&output.glob)));
+    }
+    lines.join("\n")
 }
 
 fn sanitize_id(id: &str) -> String {

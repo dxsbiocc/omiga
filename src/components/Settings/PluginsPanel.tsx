@@ -4724,6 +4724,15 @@ function CreateUserOperatorDialog({
         name: name.trim(),
         description: description.trim(),
         argv,
+        inputs: inputDeclarations
+          .filter((r) => r.name.trim().length > 0)
+          .map((r) => ({ name: r.name.trim(), kind: r.kind, required: r.required })),
+        params: paramDeclarations
+          .filter((r) => r.name.trim().length > 0)
+          .map((r) => ({ name: r.name.trim(), kind: r.kind, default: r.default })),
+        outputs: outputDeclarations
+          .filter((r) => r.name.trim().length > 0)
+          .map((r) => ({ name: r.name.trim(), glob: r.glob.trim() })),
       });
       setId("");
       setName("");

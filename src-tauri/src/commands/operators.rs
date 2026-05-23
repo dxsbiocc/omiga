@@ -102,9 +102,20 @@ pub async fn save_user_script_operator(
     name: String,
     description: String,
     argv: Vec<String>,
+    inputs: Option<Vec<operators::UserOperatorInput>>,
+    params: Option<Vec<operators::UserOperatorParam>>,
+    outputs: Option<Vec<operators::UserOperatorOutput>>,
 ) -> CommandResult<String> {
-    let path = operators::save_user_script_operator(&id, &name, &description, &argv)
-        .map_err(crate::errors::AppError::Config)?;
+    let path = operators::save_user_script_operator(
+        &id,
+        &name,
+        &description,
+        &argv,
+        inputs.as_deref().unwrap_or(&[]),
+        params.as_deref().unwrap_or(&[]),
+        outputs.as_deref().unwrap_or(&[]),
+    )
+    .map_err(crate::errors::AppError::Config)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
