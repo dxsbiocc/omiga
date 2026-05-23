@@ -1881,6 +1881,67 @@ export function operatorRunDiagnosisSummary(run: OperatorRunSummary): string | n
   );
 }
 
+type OperatorSlurmDiagnostic = {
+  category?: string | null;
+  state?: string | null;
+  exitCode?: string | null;
+  suggestedAction?: string | null;
+};
+
+type OperatorRunSummaryWithSlurmDiagnostic = OperatorRunSummary & {
+  slurmDiagnostic?: unknown;
+};
+
+function operatorSlurmDiagnosticFromUnknown(value: unknown): OperatorSlurmDiagnostic | null {
+  const diagnostic = stringRecord(value);
+  if (!diagnostic) return null;
+  const category = stringFieldValue(diagnostic.category);
+  const state = stringFieldValue(diagnostic.state);
+  const exitCode = stringFieldValue(diagnostic.exitCode);
+  const suggestedAction = stringFieldValue(diagnostic.suggestedAction);
+  if (!category && !state && !exitCode && !suggestedAction) return null;
+  return { category, state, exitCode, suggestedAction };
+}
+
+function operatorRunSlurmDiagnostic(
+  run: OperatorRunSummary,
+  detail?: OperatorRunDetail | null,
+): OperatorSlurmDiagnostic | null {
+  const runDiagnostic = operatorSlurmDiagnosticFromUnknown(
+    (run as OperatorRunSummaryWithSlurmDiagnostic).slurmDiagnostic,
+  );
+  if (runDiagnostic) return runDiagnostic;
+
+  const document = stringRecord(detail?.document);
+  const error = stringRecord(document?.error);
+  return operatorSlurmDiagnosticFromUnknown(error?.slurmDiagnostic);
+}
+
+function formatSlurmDiagnosticCategory(category?: string | null): string {
+  switch (category) {
+    case "oom":
+      return "OOM";
+    case "timeout":
+      return "Timeout";
+    case "cancelled":
+      return "Cancelled";
+    case "failedExit":
+      return "Failed exit";
+    case "other":
+      return "Other";
+    default:
+      return category || "SLURM";
+  }
+}
+
+function formatSlurmDiagnosticSummary(diagnostic: OperatorSlurmDiagnostic): string {
+  return [
+    formatSlurmDiagnosticCategory(diagnostic.category),
+    diagnostic.state,
+    diagnostic.exitCode ? `exit ${diagnostic.exitCode}` : null,
+  ].filter(Boolean).join(" - ");
+}
+
 export function operatorRunDiagnosticsPayload(
   run: OperatorRunSummary,
   operator?: OperatorSummary | null,
@@ -1926,6 +1987,7 @@ export function operatorRunDiagnosticsPayload(
         message: run.errorMessage,
         retryable: run.retryable,
         suggestedAction: run.suggestedAction,
+        slurmDiagnostic: operatorRunSlurmDiagnostic(run),
         stdoutTail: run.stdoutTail,
         stderrTail: run.stderrTail,
       },
@@ -3777,6 +3839,7 @@ function OperatorRunDetailsDialog({
     : "";
   const cacheState = operatorRunCacheState(run, detail);
   const exportDir = operatorRunExportDir(run, detail);
+  const slurmDiagnostic = operatorRunSlurmDiagnostic(run, detail);
   return (
     <Dialog open={Boolean(run)} onClose={onClose} fullWidth maxWidth="md" aria-labelledby="operator-run-details-title">
       <DialogTitle id="operator-run-details-title" sx={{ px: 3, py: 2, pr: 7 }}>
@@ -3922,6 +3985,16 @@ function OperatorRunDetailsDialog({
                   <Typography variant="caption" sx={{ wordBreak: "break-word" }}>
                     Suggested action: {run.suggestedAction}
                   </Typography>
+                )}
+                {slurmDiagnostic && (
+                  <Box sx={{ p: 0.75, borderRadius: 1, bgcolor: "background.paper", border: 1, borderColor: "divider" }}>
+                    <Typography variant="caption" fontWeight={850} sx={{ display: "block", wordBreak: "break-word" }}>
+                      SLURM diagnostic: {formatSlurmDiagnosticSummary(slurmDiagnostic)}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", wordBreak: "break-word" }}>
+                      {slurmDiagnostic.suggestedAction ? `Suggested action: ${slurmDiagnostic.suggestedAction}` : "No automatic re-run suggestion."}
+                    </Typography>
+                  </Box>
                 )}
                 {run.stderrTail && (
                   <Box

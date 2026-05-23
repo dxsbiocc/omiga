@@ -2455,6 +2455,29 @@ pub struct OperatorInvocation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SacctDiagnostic {
+    pub state: String,
+    pub exit_code: String,
+    pub max_rss_kb: Option<u64>,
+    pub elapsed: String,
+    pub reason: Option<String>,
+    pub req_mem: Option<String>,
+    pub category: SacctFailureCategory,
+    pub suggested_action: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SacctFailureCategory {
+    Oom,
+    Timeout,
+    Cancelled,
+    FailedExit,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OperatorToolError {
     pub kind: String,
     pub retryable: bool,
@@ -2475,6 +2498,8 @@ pub struct OperatorToolError {
     pub stderr_tail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slurm_diagnostic: Option<SacctDiagnostic>,
 }
 
 impl OperatorToolError {
@@ -2491,6 +2516,7 @@ impl OperatorToolError {
             stdout_tail: None,
             stderr_tail: None,
             suggested_action: None,
+            slurm_diagnostic: None,
         }
     }
 
@@ -2512,6 +2538,11 @@ impl OperatorToolError {
 
     pub fn with_suggested_action(mut self, action: impl Into<String>) -> Self {
         self.suggested_action = Some(action.into());
+        self
+    }
+
+    pub fn with_slurm_diagnostic(mut self, diagnostic: SacctDiagnostic) -> Self {
+        self.slurm_diagnostic = Some(diagnostic);
         self
     }
 
@@ -2731,6 +2762,8 @@ pub struct OperatorRunSummary {
     pub retryable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slurm_diagnostic: Option<SacctDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout_tail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5157,8 +5190,8 @@ async fn execute_in_environment(
         .get("cpu")
         .and_then(|v| v.as_u64())
         .unwrap_or(1) as u32;
-    let result = if slurm {
-        execute_via_slurm(
+    let (result, slurm_diagnostic) = if slurm {
+        let slurm_result = execute_via_slurm(
             ctx,
             run_dir,
             &command,
@@ -5167,23 +5200,38 @@ async fn execute_in_environment(
             &resolved.spec.metadata.id,
             current_operator_queue_status_sender(),
         )
-        .await?
+        .await?;
+        (slurm_result.exec_result, slurm_result.diagnostic)
     } else {
-        execute_env_command(ctx, run_dir, &command, walltime_secs).await?
+        (
+            execute_env_command(ctx, run_dir, &command, walltime_secs).await?,
+            None,
+        )
     };
     let stdout_tail = remote_tail(ctx, run_dir, "logs/stdout.txt").await;
     let stderr_tail = remote_tail(ctx, run_dir, "logs/stderr.txt").await;
     if result.returncode != 0 {
-        let error = OperatorToolError::new(
+        let mut error = OperatorToolError::new(
             "tool_exit_nonzero",
             false,
             format!("Operator process exited with code {}.", result.returncode),
         )
         .with_run_dir(run_dir)
-        .with_logs(stdout_tail, stderr_tail)
-        .with_suggested_action(
-            "Inspect the remote run logs, then adjust inputs or params and retry.",
-        );
+        .with_logs(stdout_tail, stderr_tail);
+        if let Some(diagnostic) = slurm_diagnostic {
+            if let Some(action) = diagnostic.suggested_action.clone() {
+                error = error.with_suggested_action(action);
+            } else {
+                error = error.with_suggested_action(
+                    "Inspect the remote run logs, then adjust inputs or params and retry.",
+                );
+            }
+            error = error.with_slurm_diagnostic(diagnostic);
+        } else {
+            error = error.with_suggested_action(
+                "Inspect the remote run logs, then adjust inputs or params and retry.",
+            );
+        }
         update_environment_status(ctx, run_dir, "failed", Some(&error), Some(&status_metadata))
             .await?;
         return Err(error);
@@ -5425,8 +5473,232 @@ fn operator_uses_slurm_scheduler(
         .any(|s| s.eq_ignore_ascii_case("slurm"))
 }
 
+struct SlurmExecResult {
+    exec_result: crate::execution::ExecResult,
+    diagnostic: Option<SacctDiagnostic>,
+}
+
+async fn fetch_sacct_diagnostics(
+    ctx: &crate::domain::tools::ToolContext,
+    job_id: &str,
+) -> Option<SacctDiagnostic> {
+    let job_id = job_id.trim();
+    if job_id.is_empty() {
+        return None;
+    }
+    let job_step = format!("{job_id}.batch");
+    let command = format!(
+        "sacct -j {} --format=State,ExitCode,MaxRSS,Elapsed,Reason,ReqMem -P --noheader",
+        sh_quote(&job_step)
+    );
+    let result = execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30)
+        .await
+        .ok()?;
+    if result.returncode != 0 {
+        return None;
+    }
+    parse_sacct_diagnostic_output(&result.output)
+}
+
+fn parse_sacct_diagnostic_output(output: &str) -> Option<SacctDiagnostic> {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let fields = line.split('|').collect::<Vec<_>>();
+    if fields.len() < 6 {
+        return None;
+    }
+    let state = fields[0].trim().to_string();
+    let exit_code = fields[1].trim().to_string();
+    let max_rss_kb = parse_sacct_memory_kb(fields[2]);
+    let elapsed = fields[3].trim().to_string();
+    let reason = clean_sacct_optional(fields[4]);
+    let req_mem = clean_sacct_optional(fields[5]);
+    let category = sacct_failure_category(&state, &exit_code, reason.as_deref());
+    let suggested_action = sacct_suggested_action(category, max_rss_kb, &elapsed);
+
+    Some(SacctDiagnostic {
+        state,
+        exit_code,
+        max_rss_kb,
+        elapsed,
+        reason,
+        req_mem,
+        category,
+        suggested_action,
+    })
+}
+
+fn clean_sacct_optional(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value == "-"
+        || value.eq_ignore_ascii_case("none")
+        || value.eq_ignore_ascii_case("unknown")
+    {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn parse_sacct_memory_kb(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty()
+        || value == "-"
+        || value.eq_ignore_ascii_case("none")
+        || value.eq_ignore_ascii_case("unknown")
+    {
+        return None;
+    }
+
+    let split_at = value
+        .char_indices()
+        .find_map(|(idx, ch)| (!(ch.is_ascii_digit() || ch == '.')).then_some(idx))
+        .unwrap_or(value.len());
+    let number = value[..split_at].trim();
+    if number.is_empty() {
+        return None;
+    }
+    let numeric = number.parse::<f64>().ok()?;
+    if !numeric.is_finite() || numeric < 0.0 {
+        return None;
+    }
+
+    let suffix = value[split_at..].trim().to_ascii_uppercase();
+    let multiplier = match suffix.chars().next().unwrap_or('K') {
+        'B' => 1.0 / 1024.0,
+        'K' => 1.0,
+        'M' => 1024.0,
+        'G' => 1024.0 * 1024.0,
+        'T' => 1024.0 * 1024.0 * 1024.0,
+        _ => 1.0,
+    };
+    let kb = (numeric * multiplier).ceil();
+    (kb <= u64::MAX as f64).then_some(kb as u64)
+}
+
+fn sacct_failure_category(
+    state: &str,
+    exit_code: &str,
+    reason: Option<&str>,
+) -> SacctFailureCategory {
+    let state = state.to_ascii_uppercase();
+    let reason = reason.unwrap_or_default().to_ascii_uppercase();
+    if state.contains("OUT_OF_MEMORY") || sacct_exit_signal(exit_code) == Some(9) {
+        SacctFailureCategory::Oom
+    } else if state.contains("TIMEOUT")
+        || state.contains("TIME_LIMIT")
+        || reason.contains("TIME_LIMIT")
+        || reason.contains("TIMELIMIT")
+    {
+        SacctFailureCategory::Timeout
+    } else if state.contains("CANCELLED") {
+        SacctFailureCategory::Cancelled
+    } else if exit_code.trim() != "0:0" {
+        SacctFailureCategory::FailedExit
+    } else {
+        SacctFailureCategory::Other
+    }
+}
+
+fn sacct_exit_signal(exit_code: &str) -> Option<i32> {
+    exit_code
+        .trim()
+        .split_once(':')
+        .and_then(|(_, signal)| signal.trim().parse::<i32>().ok())
+}
+
+fn sacct_returncode_from_diagnostic(diagnostic: &SacctDiagnostic) -> i32 {
+    let (status, signal) = diagnostic
+        .exit_code
+        .trim()
+        .split_once(':')
+        .map(|(status, signal)| {
+            (
+                status.trim().parse::<i32>().unwrap_or(0),
+                signal.trim().parse::<i32>().unwrap_or(0),
+            )
+        })
+        .unwrap_or((0, 0));
+    if status != 0 {
+        status
+    } else if signal != 0 {
+        128 + signal
+    } else if diagnostic.category != SacctFailureCategory::Other {
+        1
+    } else {
+        0
+    }
+}
+
+fn sacct_suggested_action(
+    category: SacctFailureCategory,
+    max_rss_kb: Option<u64>,
+    elapsed: &str,
+) -> Option<String> {
+    match category {
+        SacctFailureCategory::Oom => {
+            let max_rss_kb = max_rss_kb?;
+            let suggested_mb = (((max_rss_kb as u128) * 3) + 2047) / 2048;
+            Some(format!("Re-run with --mem={}MB", suggested_mb.max(1)))
+        }
+        SacctFailureCategory::Timeout => {
+            let elapsed_secs = parse_sacct_elapsed_secs(elapsed)?;
+            Some(format!(
+                "Re-run with --time={}",
+                format_slurm_duration(elapsed_secs.saturating_mul(2))
+            ))
+        }
+        SacctFailureCategory::Cancelled
+        | SacctFailureCategory::FailedExit
+        | SacctFailureCategory::Other => None,
+    }
+}
+
+fn parse_sacct_elapsed_secs(elapsed: &str) -> Option<u64> {
+    let elapsed = elapsed.trim();
+    if elapsed.is_empty() {
+        return None;
+    }
+    let (days, time) = if let Some((days, time)) = elapsed.split_once('-') {
+        (days.trim().parse::<u64>().ok()?, time)
+    } else {
+        (0, elapsed)
+    };
+    let parts = time
+        .split(':')
+        .map(|part| part.trim().parse::<u64>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let seconds = match parts.as_slice() {
+        [hours, minutes, seconds] => hours
+            .saturating_mul(3600)
+            .saturating_add(minutes.saturating_mul(60))
+            .saturating_add(*seconds),
+        [minutes, seconds] => minutes.saturating_mul(60).saturating_add(*seconds),
+        [seconds] => *seconds,
+        _ => return None,
+    };
+    Some(days.saturating_mul(86_400).saturating_add(seconds))
+}
+
+fn format_slurm_duration(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let remainder = seconds % 86_400;
+    let hours = remainder / 3600;
+    let minutes = (remainder % 3600) / 60;
+    let seconds = remainder % 60;
+    if days > 0 {
+        format!("{days}-{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
 /// Submit the operator command via sbatch and poll squeue until completion.
-/// Returns a synthetic ExecResult compatible with the normal execution path.
+/// Returns a synthetic ExecResult plus optional sacct diagnostics.
 async fn execute_via_slurm(
     ctx: &crate::domain::tools::ToolContext,
     run_dir: &str,
@@ -5435,7 +5707,7 @@ async fn execute_via_slurm(
     cpus: u32,
     operator_id: &str,
     queue_status_sender: Option<OperatorQueueStatusSender>,
-) -> Result<crate::execution::ExecResult, OperatorToolError> {
+) -> Result<SlurmExecResult, OperatorToolError> {
     let safe_id = operator_id
         .chars()
         .map(|c| {
@@ -5541,25 +5813,48 @@ async fn execute_via_slurm(
             )
         });
         if failed_state {
-            return Err(OperatorToolError::new(
-                "slurm_job_failed",
-                false,
-                format!("SLURM job {job_id} ended with state: {state}"),
-            )
-            .with_run_dir(run_dir)
-            .with_suggested_action("Check the SLURM logs in the run directory."));
+            let diagnostic = fetch_sacct_diagnostics(ctx, &job_id).await;
+            let returncode = diagnostic
+                .as_ref()
+                .map(sacct_returncode_from_diagnostic)
+                .filter(|code| *code != 0)
+                .unwrap_or(1);
+            return Ok(SlurmExecResult {
+                exec_result: crate::execution::ExecResult {
+                    returncode,
+                    output: format!("SLURM job {job_id} ended with state: {state}"),
+                },
+                diagnostic,
+            });
         }
         if state.is_empty() {
             // Job finished — read exit code
             let code_cmd = format!(
-                "cat {}/logs/exit_code.txt 2>/dev/null || echo 0",
+                "cat {}/logs/exit_code.txt 2>/dev/null || true",
                 sh_quote(run_dir)
             );
             let code_result = execute_env_command(ctx, run_dir, &code_cmd, 10).await?;
-            let returncode = code_result.output.trim().parse::<i32>().unwrap_or(0);
-            return Ok(crate::execution::ExecResult {
-                returncode,
-                output: format!("SLURM job {job_id} completed"),
+            let exit_code_text = code_result.output.trim();
+            let mut returncode = exit_code_text.parse::<i32>().unwrap_or(0);
+            let diagnostic = if returncode != 0 || exit_code_text.is_empty() {
+                fetch_sacct_diagnostics(ctx, &job_id).await
+            } else {
+                None
+            };
+            if returncode == 0 {
+                if let Some(diagnostic) = diagnostic.as_ref() {
+                    let sacct_returncode = sacct_returncode_from_diagnostic(diagnostic);
+                    if sacct_returncode != 0 {
+                        returncode = sacct_returncode;
+                    }
+                }
+            }
+            return Ok(SlurmExecResult {
+                exec_result: crate::execution::ExecResult {
+                    returncode,
+                    output: format!("SLURM job {job_id} completed"),
+                },
+                diagnostic,
             });
         }
         tokio::time::sleep(poll_interval).await;
@@ -8382,6 +8677,15 @@ fn summarize_operator_run_documents(
                 .as_ref()
                 .and_then(|value| json_string_at(value, &["error", "suggestedAction"]))
         });
+    let slurm_diagnostic = status_doc
+        .as_ref()
+        .and_then(|value| json_value_at(value, &["error", "slurmDiagnostic"]).cloned())
+        .or_else(|| {
+            provenance
+                .as_ref()
+                .and_then(|value| json_value_at(value, &["error", "slurmDiagnostic"]).cloned())
+        })
+        .and_then(|value| serde_json::from_value::<SacctDiagnostic>(value).ok());
     let stdout_tail = status_doc
         .as_ref()
         .and_then(|value| json_string_at(value, &["error", "stdoutTail"]))
@@ -8452,6 +8756,7 @@ fn summarize_operator_run_documents(
             error_kind,
             retryable,
             suggested_action,
+            slurm_diagnostic,
             stdout_tail,
             stderr_tail,
             cache_key,
@@ -8641,6 +8946,35 @@ fn parse_duration_secs(raw: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn parses_sacct_diagnostics_for_common_outcomes() {
+        let oom =
+            parse_sacct_diagnostic_output("OUT_OF_MEMORY|0:9|204800K|00:10:00|OutOfMemory|4096M\n")
+                .expect("OOM sacct row");
+        assert_eq!(oom.state, "OUT_OF_MEMORY");
+        assert_eq!(oom.exit_code, "0:9");
+        assert_eq!(oom.max_rss_kb, Some(204800));
+        assert_eq!(oom.category, SacctFailureCategory::Oom);
+        assert_eq!(
+            oom.suggested_action.as_deref(),
+            Some("Re-run with --mem=300MB")
+        );
+
+        let timeout =
+            parse_sacct_diagnostic_output("TIMEOUT|0:0|1024K|01:00:00|TIME_LIMIT|2048M\n")
+                .expect("timeout sacct row");
+        assert_eq!(timeout.category, SacctFailureCategory::Timeout);
+        assert_eq!(
+            timeout.suggested_action.as_deref(),
+            Some("Re-run with --time=02:00:00")
+        );
+
+        let success = parse_sacct_diagnostic_output("COMPLETED|0:0|1024K|00:05:00||1024M\n")
+            .expect("success sacct row");
+        assert_eq!(success.category, SacctFailureCategory::Other);
+        assert_eq!(success.suggested_action, None);
+    }
 
     fn bundled_smoke_operator_paths() -> (PathBuf, PathBuf) {
         bundled_operator_manifest_path("write-text-report")
