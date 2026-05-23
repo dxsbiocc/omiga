@@ -5260,18 +5260,6 @@ function OperatorCatalogSection({
                 const latestFailedRun = operatorRunsForOperator(operator, runs)
                   .find((run) => operatorRunStatusColor(run.status) === "error") ?? null;
                 const latestFailureSummary = latestFailedRun ? operatorRunDiagnosisSummary(latestFailedRun) : null;
-                const cardEnvRef = operatorEnvironmentRef(operator);
-                const cardEnv = cardEnvRef
-                  ? (environments ?? []).find((e) => e.id === cardEnvRef || e.canonicalId === cardEnvRef)
-                  : null;
-                const envBlocked = cardEnv
-                  ? ["missing", "unavailable", "failed", "error", "not_found", "not-found"].includes(
-                      cardEnv.availabilityStatus.trim().toLowerCase(),
-                    )
-                  : false;
-                const envBlockedTooltip = envBlocked
-                  ? (cardEnv?.installHint?.trim() || cardEnv?.availabilityMessage?.trim() || `Environment '${cardEnvRef}' is unavailable`)
-                  : null;
                 return (
                   <Paper
                     key={operatorKey}
