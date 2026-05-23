@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   OMIGA_PROVIDER_CHANGED_EVENT,
@@ -13,19 +13,11 @@ import {
   Menu,
   MenuItem,
   Typography,
-  Chip,
   Tooltip,
-  ListItemIcon,
-  ListItemText,
-  CircularProgress,
   alpha,
   useTheme,
 } from "@mui/material";
-import {
-  RadioButtonChecked,
-  RadioButtonUnchecked,
-  Settings,
-} from "@mui/icons-material";
+import { Settings } from "@mui/icons-material";
 import { NotificationToast } from "../NotificationToast";
 
 interface ProviderConfigEntry {
@@ -48,19 +40,14 @@ interface ProviderSwitcherProps {
   triggerSx?: SxProps<Theme>;
 }
 
-// Provider type to display name mapping
-const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
-  anthropic: "Claude",
-  openai: "GPT",
-  azure: "Azure",
-  google: "Gemini",
-  minimax: "MiniMax",
-  alibaba: "Qwen",
-  deepseek: "DeepSeek",
-  zhipu: "ChatGLM",
-  moonshot: "Kimi",
-  custom: "Custom",
-};
+const CUSTOM_MODEL_MENU_LABEL = "+ 配置自定义模型";
+
+const estimateLabelWidthCh = (value: string) =>
+  Array.from(value).reduce((width, char) => {
+    if (char.charCodeAt(0) > 255) return width + 2;
+    if (char === " ") return width + 0.5;
+    return width + 1;
+  }, 0);
 
 export function ProviderSwitcher({
   onOpenSettings,
@@ -70,7 +57,6 @@ export function ProviderSwitcher({
   const theme = useTheme();
   const isDark = theme.palette.mode === "dark";
   const [providers, setProviders] = useState<ProviderConfigEntry[]>([]);
-  const [loading, _setLoading] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [activeProvider, setActiveProvider] = useState<ProviderConfigEntry | null>(null);
@@ -157,17 +143,21 @@ export function ProviderSwitcher({
   };
 
   const getProviderDisplay = (provider: ProviderConfigEntry) => {
-    const key = provider.providerType.toLowerCase();
-    const typeName = PROVIDER_DISPLAY_NAMES[key] || provider.providerType;
     return {
-      /** 配置名称（菜单主行） */
+      /** Raw configuration entry name, used for switching and notifications. */
       configName: provider.name,
-      /** 供应商 / 品牌（Chip） */
-      supplierLabel: typeName,
-      /** 模型名（Chip 右侧，不重复供应商文案） */
+      /** Model identifier shown as the primary label. */
       modelName: provider.model,
     };
   };
+
+  const switcherWidth = useMemo(() => {
+    const longestLabelWidth = providers.reduce(
+      (width, provider) => Math.max(width, estimateLabelWidthCh(provider.model)),
+      estimateLabelWidthCh(CUSTOM_MODEL_MENU_LABEL),
+    );
+    return `min(calc(${Math.ceil(longestLabelWidth)}ch + 18px), calc(100vw - 32px))`;
+  }, [providers]);
 
   // If no providers configured, show a simple button to open settings
   if (providers.length === 0) {
@@ -195,7 +185,7 @@ export function ProviderSwitcher({
 
   const display = activeProvider ? getProviderDisplay(activeProvider) : null;
   const triggerTooltip = activeProvider
-    ? `${activeProvider.name} · ${activeProvider.model}`
+    ? activeProvider.model
     : "Click to switch model provider";
 
   return (
@@ -205,7 +195,6 @@ export function ProviderSwitcher({
           size="small"
           variant="outlined"
           onClick={handleClick}
-          endIcon={loading ? <CircularProgress size={12} /> : null}
           sx={[
             {
               borderRadius: 2,
@@ -219,27 +208,37 @@ export function ProviderSwitcher({
                 bgcolor: "action.hover",
               },
             },
+            {
+              width: switcherWidth,
+              minWidth: 0,
+              maxWidth: "calc(100vw - 32px)",
+              px: 1,
+            },
             ...(Array.isArray(triggerSx) ? triggerSx : triggerSx ? [triggerSx] : []),
           ]}
         >
           {display ? (
-            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
-              <Chip
-                size="small"
-                color="success"
-                variant="outlined"
-                label={display.supplierLabel}
-                sx={{
-                  height: 20,
-                  fontSize: "0.7rem",
-                  "& .MuiChip-label": { px: 0.5 },
-                }}
-              />
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                minWidth: 0,
+                maxWidth: "100%",
+              }}
+            >
               <Typography
                 variant="caption"
-                color="text.secondary"
-                noWrap
-                sx={{ maxWidth: 180 }}
+                sx={{
+                  flex: 1,
+                  minWidth: 0,
+                  color: "inherit",
+                  textAlign: "left",
+                  fontWeight: 600,
+                  maxWidth: "100%",
+                  overflow: "visible",
+                  textOverflow: "clip",
+                  whiteSpace: "nowrap",
+                }}
               >
                 {display.modelName}
               </Typography>
@@ -255,29 +254,35 @@ export function ProviderSwitcher({
         open={open}
         onClose={handleClose}
         anchorOrigin={{
-          vertical: "bottom",
+          vertical: "top",
           horizontal: "right",
         }}
         transformOrigin={{
-          vertical: "top",
+          vertical: "bottom",
           horizontal: "right",
         }}
         PaperProps={{
           sx: {
-            minWidth: 280,
-            maxHeight: 400,
+            mt: -1,
+            width: switcherWidth,
+            minWidth: 0,
+            maxWidth: "calc(100vw - 32px)",
+            maxHeight: 360,
+            borderRadius: "8px",
+            border: 1,
+            borderColor: "divider",
+            boxShadow: isDark
+              ? "0 18px 48px rgba(0, 0, 0, 0.42)"
+              : "0 18px 48px rgba(15, 23, 42, 0.16)",
+            overflowX: "hidden",
+            overflowY: "auto",
           },
         }}
+        MenuListProps={{
+          dense: true,
+          sx: { py: 0.5 },
+        }}
       >
-        <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
-          <Typography variant="subtitle2" fontWeight={600}>
-            Switch Model Provider
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            Current session only — default in Settings / omiga.yaml unchanged
-          </Typography>
-        </Box>
-
         {providers.map((provider) => {
           const display = getProviderDisplay(provider);
           const isSwitching = switching === provider.name;
@@ -289,85 +294,112 @@ export function ProviderSwitcher({
               disabled={isSwitching}
               selected={provider.isSessionActive}
               sx={{
-                py: 1.5,
-                borderBottom: 1,
-                borderColor: "divider",
-                "&:last-child": { borderBottom: 0 },
+                mx: 0.75,
+                my: 0.25,
+                px: 1.25,
+                py: 0,
+                minHeight: 36,
+                width: "auto",
+                maxWidth: "none",
+                borderRadius: "8px",
                 "&.Mui-selected": {
                   bgcolor: alpha(
-                    theme.palette.primary.main,
-                    isDark ? 0.16 : 0.12,
+                    theme.palette.success.main,
+                    isDark ? 0.14 : 0.08,
                   ),
+                  boxShadow: `inset 0 0 0 1px ${alpha(
+                    theme.palette.success.main,
+                    isDark ? 0.26 : 0.2,
+                  )}`,
                   "&:hover": {
                     bgcolor: alpha(
-                      theme.palette.primary.main,
-                      isDark ? 0.22 : 0.16,
+                      theme.palette.success.main,
+                      isDark ? 0.18 : 0.12,
                     ),
                   },
                 },
+                "&:hover": {
+                  bgcolor: alpha(theme.palette.text.primary, isDark ? 0.08 : 0.04),
+                },
               }}
             >
-              <ListItemIcon>
-                {isSwitching ? (
-                  <CircularProgress size={16} />
-                ) : provider.isSessionActive ? (
-                  <RadioButtonChecked color="success" fontSize="small" />
-                ) : (
-                  <RadioButtonUnchecked fontSize="small" />
-                )}
-              </ListItemIcon>
-              <ListItemText
-                primary={
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
-                    <Typography fontWeight={provider.isSessionActive ? 600 : 400}>
-                      {display.configName}
-                    </Typography>
-                    {provider.isSessionActive && (
-                      <Chip
-                        size="small"
-                        color="success"
-                        label="In use"
-                        sx={{ height: 18, fontSize: "0.65rem" }}
-                      />
-                    )}
-                    {provider.isDefault && (
-                      <Chip
-                        size="small"
-                        variant="outlined"
-                        label="Default"
-                        sx={{ height: 18, fontSize: "0.65rem" }}
-                      />
-                    )}
-                  </Box>
-                }
-                secondary={display.modelName}
-              />
+              <Box
+                sx={{
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "center",
+                  minWidth: 0,
+                  width: "100%",
+                }}
+              >
+                <Typography
+                  sx={{
+                    flex: 1,
+                    minWidth: 0,
+                    fontSize: "0.8125rem",
+                    fontWeight: provider.isSessionActive ? 600 : 500,
+                    lineHeight: 1.25,
+                    color: "text.primary",
+                    maxWidth: "100%",
+                    overflow: "visible",
+                    textOverflow: "clip",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {display.modelName}
+                </Typography>
+                <Typography
+                  sx={{
+                    width: "100%",
+                    minWidth: 0,
+                    fontSize: "0.6875rem",
+                    lineHeight: 1.2,
+                    color: "text.secondary",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {display.configName}
+                </Typography>
+              </Box>
             </MenuItem>
           );
         })}
 
-        <Box
+        <MenuItem
+          onClick={() => {
+            handleClose();
+            onOpenSettings?.();
+          }}
           sx={{
-            px: 2,
-            py: 1,
+            mx: 0,
+            mt: 0.5,
+            px: 1.5,
+            py: 0,
+            minHeight: 38,
+            borderRadius: 0,
             borderTop: 1,
             borderColor: "divider",
-            bgcolor: "background.default",
+            color: "text.secondary",
+            fontWeight: 600,
+            "&:hover": {
+              bgcolor: alpha(theme.palette.success.main, isDark ? 0.14 : 0.08),
+              color: "success.main",
+            },
           }}
         >
-          <Button
-            fullWidth
-            size="small"
-            startIcon={<Settings />}
-            onClick={() => {
-              handleClose();
-              onOpenSettings?.();
+          <Typography
+            sx={{
+              fontSize: "0.8125rem",
+              fontWeight: 600,
+              lineHeight: 1.25,
+              whiteSpace: "nowrap",
             }}
-            sx={{ textTransform: "none" }}
           >
-            Manage Configurations
-          </Button>
-        </Box>
+            {CUSTOM_MODEL_MENU_LABEL}
+          </Typography>
+        </MenuItem>
       </Menu>
 
       <NotificationToast
