@@ -48,6 +48,9 @@ import {
   CheckCircle as CheckCircleIcon,
   Cancel as CancelIcon,
   Refresh as RefreshIcon,
+  AutoFixHigh as AutoFixHighIcon,
+  LockOpen as LockOpenIcon,
+  Block as BlockIcon,
 } from "@mui/icons-material";
 import {
   PERMISSION_PRESETS,
@@ -290,6 +293,10 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
   const [customBlock, setCustomBlock] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Workspace exclusion paths
+  const [exclusions, setExclusions] = useState<string[]>([]);
+  const [exclusionInput, setExclusionInput] = useState("");
+  const [exclusionSaving, setExclusionSaving] = useState(false);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditEvents, setAuditEvents] = useState<PermissionAuditEvent[]>([]);
   const [auditTotalCount, setAuditTotalCount] = useState(0);
@@ -369,12 +376,14 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
     setLoading(true);
     setMessage(null);
     try {
-      const deny = await invoke<string[]>("get_omiga_permission_denies", {
-        projectRoot: projectPath,
-      });
+      const [deny, excl] = await Promise.all([
+        invoke<string[]>("get_omiga_permission_denies", { projectRoot: projectPath }),
+        invoke<string[]>("permission_get_workspace_exclusions"),
+      ]);
       const { presetChecked: pc, customBlock: cb } = parseDenyIntoState(deny);
       setPresetChecked(pc);
       setCustomBlock(cb);
+      setExclusions(excl);
     } catch (e) {
       setMessage({
         type: "error",
@@ -384,6 +393,38 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
       setLoading(false);
     }
   }, [projectPath]);
+
+  const addExclusion = useCallback(async () => {
+    const trimmed = exclusionInput.trim().replace(/^\/+/, "");
+    if (!trimmed || exclusions.includes(trimmed)) {
+      setExclusionInput("");
+      return;
+    }
+    const next = [...exclusions, trimmed];
+    setExclusionSaving(true);
+    try {
+      await invoke("permission_set_workspace_exclusions", { patterns: next });
+      setExclusions(next);
+      setExclusionInput("");
+    } catch (e) {
+      setMessage({ type: "error", text: `保存排除路径失败: ${String(e)}` });
+    } finally {
+      setExclusionSaving(false);
+    }
+  }, [exclusionInput, exclusions]);
+
+  const removeExclusion = useCallback(async (pattern: string) => {
+    const next = exclusions.filter((p) => p !== pattern);
+    setExclusionSaving(true);
+    try {
+      await invoke("permission_set_workspace_exclusions", { patterns: next });
+      setExclusions(next);
+    } catch (e) {
+      setMessage({ type: "error", text: `删除排除路径失败: ${String(e)}` });
+    } finally {
+      setExclusionSaving(false);
+    }
+  }, [exclusions]);
 
   const loadAuditEvents = useCallback(async (page: number) => {
     if (isUnsetWorkspacePath(projectPath)) {
@@ -575,6 +616,129 @@ export function PermissionSettingsTab({ projectPath }: PermissionSettingsTabProp
         <Alert severity="warning" sx={{ mb: 2, borderRadius: 2 }}>
           当前会话未选择工作区目录，无法读写权限文件。请在聊天侧选择项目文件夹。
         </Alert>
+      )}
+
+      {/* 工作区智能放行说明 */}
+      <Box
+        sx={{
+          borderRadius: 2.5,
+          border: `1px solid ${alpha(unset ? theme.palette.warning.main : theme.palette.success.main, isDark ? 0.3 : 0.35)}`,
+          bgcolor: alpha(unset ? theme.palette.warning.main : theme.palette.success.main, isDark ? 0.07 : 0.05),
+          p: 2,
+          mb: 3,
+        }}
+      >
+        <Stack direction="row" alignItems="flex-start" spacing={1.5}>
+          <Box
+            sx={{
+              width: 40,
+              height: 40,
+              borderRadius: 1.5,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+              bgcolor: alpha(unset ? theme.palette.warning.main : theme.palette.success.main, 0.15),
+              color: unset ? theme.palette.warning.main : theme.palette.success.main,
+            }}
+          >
+            <AutoFixHighIcon sx={{ fontSize: 22 }} />
+          </Box>
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="body2" fontWeight={800} sx={{ mb: 0.5 }}>
+              智能工作区放行
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.6, display: "block" }}>
+              {unset ? (
+                "未设置工作区路径 — 所有文件写入都需要手动确认。在聊天侧选择项目文件夹后，工作区内的操作将自动放行。"
+              ) : (
+                <>
+                  工作区路径已配置：
+                  <Box
+                    component="code"
+                    sx={{
+                      mx: 0.5,
+                      px: 0.6,
+                      py: 0.1,
+                      borderRadius: 0.75,
+                      bgcolor: alpha(theme.palette.text.primary, 0.07),
+                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                      fontSize: "0.72rem",
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {projectPath}
+                  </Box>
+                </>
+              )}
+            </Typography>
+            {!unset && (
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1.25 }} flexWrap="wrap" useFlexGap>
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <LockOpenIcon sx={{ fontSize: 14, color: "success.main" }} />
+                  <Typography variant="caption" color="success.main" fontWeight={700}>
+                    自动放行：路径内读写、编辑、安全 Bash 命令
+                  </Typography>
+                </Stack>
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <BlockIcon sx={{ fontSize: 14, color: "error.main" }} />
+                  <Typography variant="caption" color="error.main" fontWeight={700}>
+                    仍需确认：删除、rm -rf、路径外操作
+                  </Typography>
+                </Stack>
+              </Stack>
+            )}
+          </Box>
+        </Stack>
+      </Box>
+
+      {/* 工作区排除路径 */}
+      {!unset && (
+        <Box sx={{ mb: 3 }}>
+          <Typography variant="body2" fontWeight={700} sx={{ mb: 1 }}>
+            排除路径（始终需要确认）
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5, lineHeight: 1.6 }}>
+            填写相对于工作区根目录的路径前缀。匹配路径即使在智能放行模式下也会弹窗确认。
+            例如：<code>.env</code>、<code>secrets/</code>、<code>dist/</code>
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ mb: 1.5 }}>
+            <TextField
+              size="small"
+              placeholder="例如 secrets/ 或 .env"
+              value={exclusionInput}
+              onChange={(e) => setExclusionInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void addExclusion(); }}
+              sx={{ flex: 1, fontFamily: "monospace" }}
+              disabled={exclusionSaving}
+            />
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => void addExclusion()}
+              disabled={!exclusionInput.trim() || exclusionSaving}
+            >
+              添加
+            </Button>
+          </Stack>
+          {exclusions.length > 0 ? (
+            <Stack direction="row" flexWrap="wrap" spacing={0.75} useFlexGap>
+              {exclusions.map((p) => (
+                <Chip
+                  key={p}
+                  label={p}
+                  size="small"
+                  onDelete={() => void removeExclusion(p)}
+                  sx={{ fontFamily: "monospace", fontSize: "0.72rem" }}
+                />
+              ))}
+            </Stack>
+          ) : (
+            <Typography variant="caption" color="text.disabled">
+              暂无排除路径 — 所有工作区内操作均自动放行
+            </Typography>
+          )}
+        </Box>
       )}
 
       {loading ? (

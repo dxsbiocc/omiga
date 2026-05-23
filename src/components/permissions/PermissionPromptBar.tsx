@@ -19,6 +19,7 @@ import {
   type ToolPermissionMode,
   type RiskLevel,
 } from "../../state/permissionStore";
+import { LockOpen as LockOpenIcon } from "@mui/icons-material";
 import {
   inferConnectorPermissionIntent,
   type ConnectorPermissionIntent,
@@ -616,10 +617,10 @@ const permissionActionButtonSx = {
 
 /** 内联在输入框上方，非弹窗 */
 export const PermissionPromptBar: React.FC = () => {
-  const { pendingRequest, approveRequest, denyRequest, error, clearError } =
+  const { pendingRequest, approveRequest, approveWorkspaceForSession, denyRequest, error, clearError } =
     usePermissionStore();
   const [processingAction, setProcessingAction] = useState<
-    ModeChoice | "deny" | null
+    ModeChoice | "deny" | "workspace" | null
   >(null);
   const [installSelections, setInstallSelections] = useState<
     Record<string, string>
@@ -685,6 +686,18 @@ export const PermissionPromptBar: React.FC = () => {
     }
   };
 
+  const handleApproveWorkspaceSession = async () => {
+    setProcessingAction("workspace");
+    clearError();
+    try {
+      await approveWorkspaceForSession();
+    } catch {
+      // store 已记录
+    } finally {
+      setProcessingAction(null);
+    }
+  };
+
   const handleInstallChoiceSubmit = async () => {
     const rawChoice = installSelections[INSTALL_LOCATION_QUESTION] ?? "";
     const denialReason = installChoiceDenialReason(rawChoice);
@@ -727,6 +740,16 @@ export const PermissionPromptBar: React.FC = () => {
     pendingRequest.tool_name,
     connectorIntent,
   );
+
+  // "会话内放行工作区" button: show when workspace is configured, risk is Medium,
+  // and it's not a connector write (those always need explicit confirmation per operation)
+  const showWorkspaceApproveButton =
+    !isConnectorWrite &&
+    !isCritical &&
+    !requiresSingleUseApproval &&
+    pendingRequest.project_root != null &&
+    pendingRequest.project_root !== "" &&
+    (pendingRequest.risk_level === "medium" || pendingRequest.risk_level === "low");
 
   return (
     <Box
@@ -933,7 +956,7 @@ export const PermissionPromptBar: React.FC = () => {
               />
             </Box>
           ) : (
-            <Stack direction="row" justifyContent="flex-end" spacing={1}>
+            <Stack direction="row" justifyContent="flex-end" spacing={1} flexWrap="wrap" useFlexGap>
               <Button
                 size="small"
                 onClick={handleDeny}
@@ -949,6 +972,26 @@ export const PermissionPromptBar: React.FC = () => {
               >
                 拒绝
               </Button>
+              {showWorkspaceApproveButton && (
+                <Button
+                  size="small"
+                  onClick={() => void handleApproveWorkspaceSession()}
+                  color="success"
+                  variant="outlined"
+                  disabled={processing}
+                  title="将本次会话的权限立场切换为 Auto — 工作区内的读写和安全命令自动放行，删除和危险命令仍会确认。"
+                  sx={permissionActionButtonSx}
+                  startIcon={
+                    processingAction === "workspace" ? (
+                      <CircularProgress size={14} color="inherit" />
+                    ) : (
+                      <LockOpenIcon sx={{ fontSize: 14 }} />
+                    )
+                  }
+                >
+                  {processingAction === "workspace" ? "处理中…" : "会话内放行工作区"}
+                </Button>
+              )}
               {!requiresSingleUseApproval && (
                 <Button
                   size="small"

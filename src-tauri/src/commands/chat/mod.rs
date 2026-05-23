@@ -630,12 +630,13 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             }
         }
 
-        let blocked_batch: Vec<(String, String, Option<String>)> = tool_calls
+        let blocked_batch: Vec<(String, String, bool, Option<String>)> = tool_calls
             .iter()
             .map(|(id, _name, _arguments)| {
                 (
                     id.clone(),
                     block.tool_result_message.to_string(),
+                    true,
                     None,
                 )
             })
@@ -654,9 +655,10 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             let mut sessions_guard = sessions.write().await;
             if let Some(runtime) = sessions_guard.get_mut(session_id) {
                 for (tool_use_id, tool_name, arguments) in tool_calls {
-                    runtime.session.add_tool_result(
+                    runtime.session.add_tool_result_with_error(
                         tool_use_id.clone(),
                         block.tool_result_message.to_string(),
+                        Some(true),
                     );
                     let _ = app.emit(
                         &format!("chat-stream-{}", message_id),
@@ -750,7 +752,7 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             if let Err(e) = repo
                 .save_tool_results_batch(
                     session_id,
-                    &[(returned_tool_id.clone(), output.clone(), None)],
+                    &[(returned_tool_id.clone(), output.clone(), is_error, None)],
                 )
                 .await
             {
@@ -759,9 +761,10 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             {
                 let mut sessions_guard = sessions.write().await;
                 if let Some(runtime) = sessions_guard.get_mut(session_id) {
-                    runtime.session.add_tool_result(
+                    runtime.session.add_tool_result_with_error(
                         returned_tool_id,
                         output,
+                        Some(is_error),
                     );
                 }
             }
@@ -1159,23 +1162,50 @@ fn normalize_execution_environment(raw: Option<&String>) -> String {
     }
 }
 
-fn composer_execution_addendum(env: &str, ssh_server: Option<&str>) -> Option<String> {
+fn composer_execution_addendum(
+    env: &str,
+    ssh_server: Option<&str>,
+    venv_type: &str,
+    venv_name: &str,
+) -> Option<String> {
+    // 虚拟环境说明行（非空时追加）
+    let venv_line = {
+        let name = venv_name.trim();
+        if !name.is_empty() && venv_type != "none" && !venv_type.is_empty() {
+            let kind_label = match venv_type {
+                "conda" => "conda env",
+                "venv" => "venv",
+                "pyenv" => "pyenv",
+                other => other,
+            };
+            format!(
+                "\nActive Python environment: **{kind_label} `{name}`** — \
+                 all `bash` tool commands are automatically wrapped with the activation \
+                 preamble before execution. \
+                 **Do NOT** write `conda activate`, `source activate`, or \
+                 `pyenv shell` manually in bash commands — it is already done for you. \
+                 Use `python` / `pip` / `jupyter` directly. \
+                 When creating `.ipynb` notebooks, set kernelspec `name` to `{name}` \
+                 so the notebook uses this environment's kernel.",
+            )
+        } else {
+            String::new()
+        }
+    };
+
     match env {
         "ssh" => {
             let server_info = ssh_server.map(|s| format!(" (server: `{}`)", s)).unwrap_or_default();
             Some(format!(
-                "### Composer execution environment\nThe user chose **SSH**{} for this session turn: assume tools and shell should run on the configured SSH server when available; local-only tools may error until remote is fully wired.",
-                server_info
+                "### Composer execution environment\nThe user chose **SSH**{server_info} for this session turn: assume tools and shell should run on the configured SSH server when available; local-only tools may error until remote is fully wired.{venv_line}",
             ))
         }
-        "sandbox" => Some(
-            "### Composer execution environment\nThe user chose **sandbox** for this session turn: assume tools and shell should run on the configured remote sandbox when available; local-only tools may error until remote is fully wired."
-                .to_string(),
-        ),
-        _ => Some(
-            "### Composer execution environment\nThe user chose **local**: run terminal commands and workspace tools on this machine."
-                .to_string(),
-        ),
+        "sandbox" => Some(format!(
+            "### Composer execution environment\nThe user chose **sandbox** for this session turn: assume tools and shell should run on the configured remote sandbox when available; local-only tools may error until remote is fully wired.{venv_line}",
+        )),
+        _ => Some(format!(
+            "### Composer execution environment\nThe user chose **local**: run terminal commands and workspace tools on this machine.{venv_line}",
+        )),
     }
 }
 
@@ -1618,6 +1648,15 @@ pub async fn send_message(
                                 e
                             )))
                         })?;
+                    // Consume the pre-warmed EnvStore from load_session if available,
+                    // so the SSH connection is already established on first tool use.
+                    let env_store = app_state
+                        .chat
+                        .pending_env_stores
+                        .lock()
+                        .await
+                        .remove(&session.id)
+                        .unwrap_or_else(crate::domain::tools::env_store::EnvStore::new);
                     sessions.insert(
                         session.id.clone(),
                         SessionRuntimeState {
@@ -1631,7 +1670,7 @@ pub async fn send_message(
                             sandbox_backend: sandbox_backend.clone(),
                             local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
                             local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
-                            env_store: crate::domain::tools::env_store::EnvStore::new(),
+                            env_store,
                             artifact_registry:
                                 crate::domain::session::artifacts::ArtifactRegistry::default(),
                         },
@@ -1689,8 +1728,15 @@ pub async fn send_message(
             )))
         })?;
 
-        // Cache in memory
+        // Cache in memory — reuse pre-warmed EnvStore from load_session if present
         let ssh_server = request.ssh_server.clone();
+        let env_store_for_new = app_state
+            .chat
+            .pending_env_stores
+            .lock()
+            .await
+            .remove(&session.id)
+            .unwrap_or_else(crate::domain::tools::env_store::EnvStore::new);
         let runtime_state = SessionRuntimeState {
             session: session.clone(),
             active_round_ids: vec![],
@@ -1702,7 +1748,7 @@ pub async fn send_message(
             sandbox_backend: sandbox_backend.clone(),
             local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
             local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
-            env_store: crate::domain::tools::env_store::EnvStore::new(),
+            env_store: env_store_for_new,
             artifact_registry: crate::domain::session::artifacts::ArtifactRegistry::default(),
         };
         {
@@ -2750,9 +2796,12 @@ pub async fn send_message(
                 ));
             }
         }
-        if let Some(line) =
-            composer_execution_addendum(exec_env.as_str(), request.ssh_server.as_deref())
-        {
+        if let Some(line) = composer_execution_addendum(
+            exec_env.as_str(),
+            request.ssh_server.as_deref(),
+            request.local_venv_type.as_deref().unwrap_or(""),
+            request.local_venv_name.as_deref().unwrap_or(""),
+        ) {
             prompt_parts.push(line);
         }
     }
@@ -3334,8 +3383,7 @@ pub async fn send_message(
             reasoning_content: msg.reasoning_content.clone(),
         })
         .collect();
-    let request_image_attachments =
-        load_request_image_attachments(&project_root, &[]).await;
+    let request_image_attachments = load_request_image_attachments(&project_root, &[]).await;
     append_image_attachments_to_latest_user_message(&mut llm_messages, &request_image_attachments);
 
     // Start streaming in background
@@ -3461,6 +3509,17 @@ pub async fn send_message(
                     .unwrap_or_else(crate::domain::tools::env_store::EnvStore::new),
             )
         };
+
+        // Pre-warm the SSH/sandbox connection so the first tool call doesn't pay the
+        // full SSH handshake cost on top of the 45 s outer tool timeout.
+        // warmup() is fire-and-forget (non-blocking) — the session continues immediately.
+        if execution_environment != "local" {
+            let warmup_ctx = ToolContext::new(project_root.clone())
+                .with_execution_environment(execution_environment.clone())
+                .with_ssh_server(ssh_server_rt.clone())
+                .with_sandbox_backend(sandbox_backend_rt.clone());
+            env_store_rt.warmup(&warmup_ctx).await;
+        }
 
         let agent_runtime = AgentLlmRuntime {
             llm_config: llm_config_for_spawn.clone(),
@@ -4148,9 +4207,9 @@ pub async fn send_message(
             {
                 let repo = &*repo_clone;
                 // Write all tool results in a single transaction (one fsync instead of N).
-                let batch: Vec<(String, String, Option<String>)> = tool_results
+                let batch: Vec<(String, String, bool, Option<String>)> = tool_results
                     .iter()
-                    .map(|(id, out, _is_error)| (id.clone(), out.clone(), None))
+                    .map(|(id, out, is_error)| (id.clone(), out.clone(), *is_error, None))
                     .collect();
                 if let Err(e) = repo
                     .save_tool_results_batch(&session_id_clone, &batch)
@@ -4163,10 +4222,11 @@ pub async fn send_message(
             {
                 let mut sessions = sessions_clone.write().await;
                 if let Some(runtime) = sessions.get_mut(&session_id_clone) {
-                    for (tool_use_id, output, _is_error) in &tool_results {
-                        runtime.session.add_tool_result(
+                    for (tool_use_id, output, is_error) in &tool_results {
+                        runtime.session.add_tool_result_with_error(
                             tool_use_id,
                             output,
+                            Some(*is_error),
                         );
                     }
                 }

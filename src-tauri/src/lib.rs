@@ -78,6 +78,12 @@ pub fn run() {
                 // `permission_*` Tauri commands take `State<Arc<PermissionManager>>`; register the
                 // same Arc as held by `OmigaAppState` so chat/tools and IPC approve/deny share one manager.
                 let permission_manager = app_state.permission_manager.clone();
+                // Load persisted workspace exclusions before managing state
+                crate::commands::permissions::load_workspace_exclusions(
+                    &permission_manager,
+                    &app_state.repo,
+                )
+                .await;
                 app_handle.manage(permission_manager);
                 app_handle.manage(app_state);
 
@@ -205,6 +211,9 @@ pub fn run() {
             commands::permissions::permission_set_default_mode,
             commands::permissions::permission_get_approval_status,
             commands::permissions::permission_clear_session_approvals,
+            commands::permissions::permission_get_workspace_exclusions,
+            commands::permissions::permission_set_workspace_exclusions,
+            commands::permissions::permission_set_session_stance,
             commands::permissions::get_omiga_permission_denies,
             commands::permissions::save_omiga_permission_denies,
             app_state::get_app_state_snapshot,

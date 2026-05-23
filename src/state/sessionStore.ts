@@ -276,6 +276,8 @@ interface RawMessage {
   output?: string;
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   tool_call_id?: string;
+  /** Persisted tool failure marker from `tool_result.is_error`. */
+  is_error?: boolean | null;
   /** Persisted assistant reasoning text used to rebuild ReAct fold Thoughts after reload. */
   reasoning_content?: string;
   token_usage?: {
@@ -443,7 +445,7 @@ function convertRawMessages(
         name: meta?.name ?? "tool",
         arguments: meta?.arguments ?? "",
         output: m.output ?? content,
-        status: "completed" as const,
+        status: m.is_error === true ? "error" : "completed",
         ...(completedAt !== undefined ? { completedAt } : {}),
       };
     }

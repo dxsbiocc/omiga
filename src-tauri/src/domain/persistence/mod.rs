@@ -151,6 +151,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             content TEXT NOT NULL DEFAULT '',
             tool_calls TEXT,
             tool_call_id TEXT,
+            tool_is_error INTEGER,
             created_at TEXT NOT NULL,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         )
@@ -189,6 +190,11 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     // Migration: assistant token usage JSON (reload in UI)
     let _ = sqlx::query("ALTER TABLE messages ADD COLUMN token_usage_json TEXT")
+        .execute(pool)
+        .await;
+
+    // Migration: preserve tool-result failure state across session reloads.
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN tool_is_error INTEGER")
         .execute(pool)
         .await;
 
@@ -1475,7 +1481,7 @@ impl SessionRepository {
     ) -> Result<Vec<MessageRecord>, sqlx::Error> {
         sqlx::query_as::<_, MessageRecord>(
             r#"
-            SELECT id, session_id, role, content, tool_calls, tool_call_id,
+            SELECT id, session_id, role, content, tool_calls, tool_call_id, tool_is_error,
                    token_usage_json,
                    CASE
                        WHEN role = 'assistant'
@@ -1512,7 +1518,7 @@ impl SessionRepository {
     ) -> Result<Vec<MessageRecord>, sqlx::Error> {
         sqlx::query_as::<_, MessageRecord>(
             r#"
-            SELECT id, session_id, role, content, tool_calls, tool_call_id,
+            SELECT id, session_id, role, content, tool_calls, tool_call_id, tool_is_error,
                    token_usage_json,
                    CASE
                        WHEN role = 'assistant'
@@ -1560,7 +1566,7 @@ impl SessionRepository {
         // Get all messages for this session
         let messages = sqlx::query_as::<_, MessageRecord>(
             r#"
-            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, turn_summary, created_at
+            SELECT id, session_id, role, content, tool_calls, tool_call_id, tool_is_error, token_usage_json, reasoning_content, follow_up_suggestions_json, turn_summary, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at ASC, id ASC
@@ -1714,29 +1720,30 @@ impl SessionRepository {
     pub async fn save_tool_results_batch(
         &self,
         session_id: &str,
-        results: &[(String, String, Option<String>)], // (tool_use_id, output, id_override)
+        results: &[(String, String, bool, Option<String>)], // (tool_use_id, output, is_error, id_override)
     ) -> Result<(), sqlx::Error> {
         if results.is_empty() {
             return Ok(());
         }
         let now = chrono::Utc::now().to_rfc3339();
         let mut tx = self.pool.begin().await?;
-        for (tool_use_id, output, id_override) in results {
+        for (tool_use_id, output, is_error, id_override) in results {
             let msg_id = id_override
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             sqlx::query(
                 r#"
                 INSERT INTO messages
-                    (id, session_id, role, content, tool_calls, tool_call_id,
+                    (id, session_id, role, content, tool_calls, tool_call_id, tool_is_error,
                      token_usage_json, reasoning_content, follow_up_suggestions_json, turn_summary, created_at)
-                VALUES (?, ?, 'tool', ?, NULL, ?, NULL, NULL, NULL, NULL, ?)
+                VALUES (?, ?, 'tool', ?, NULL, ?, ?, NULL, NULL, NULL, NULL, ?)
                 "#,
             )
             .bind(&msg_id)
             .bind(session_id)
             .bind(output)
             .bind(tool_use_id)
+            .bind(if *is_error { 1_i64 } else { 0_i64 })
             .bind(&now)
             .execute(&mut *tx)
             .await?;
@@ -2719,6 +2726,7 @@ pub struct MessageRecord {
     pub content: String,
     pub tool_calls: Option<String>,
     pub tool_call_id: Option<String>,
+    pub tool_is_error: Option<i64>,
     pub token_usage_json: Option<String>,
     pub reasoning_content: Option<String>,
     pub follow_up_suggestions_json: Option<String>,
@@ -3259,6 +3267,50 @@ mod tests {
             .find(|msg| msg.id == "assistant-plain")
             .expect("plain assistant row");
         assert!(plain.reasoning_content.is_none());
+    }
+
+    #[tokio::test]
+    async fn save_tool_results_batch_preserves_error_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.create_session("session-1", "Tool results", "/tmp/project")
+            .await
+            .expect("create session");
+
+        repo.save_tool_results_batch(
+            "session-1",
+            &[
+                ("call-ok".to_string(), "ok".to_string(), false, None),
+                (
+                    "call-failed".to_string(),
+                    "timed out".to_string(),
+                    true,
+                    None,
+                ),
+            ],
+        )
+        .await
+        .expect("save tool results");
+
+        let messages = repo
+            .get_session_messages_paged("session-1", 10, 0)
+            .await
+            .expect("load paged messages");
+
+        let failed = messages
+            .iter()
+            .find(|msg| msg.tool_call_id.as_deref() == Some("call-failed"))
+            .expect("failed tool result");
+        assert_eq!(failed.tool_is_error, Some(1));
+
+        let ok = messages
+            .iter()
+            .find(|msg| msg.tool_call_id.as_deref() == Some("call-ok"))
+            .expect("successful tool result");
+        assert_eq!(ok.tool_is_error, Some(0));
     }
 
     #[tokio::test]

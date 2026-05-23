@@ -14,6 +14,7 @@ pub mod local;
 pub mod modal;
 pub mod singularity;
 pub mod ssh;
+pub mod ssh_sync_manifest;
 pub mod types;
 
 pub use base::{generate_session_id, BaseEnvironment};

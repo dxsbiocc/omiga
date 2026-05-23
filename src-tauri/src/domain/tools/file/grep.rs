@@ -77,7 +77,7 @@ impl super::ToolImpl for GrepTool {
 
         // Remote/SSH/sandbox: use shell-based grep through the cached environment
         if ctx.execution_environment != "local" {
-            if let Some(ref store) = ctx.env_store {
+            return if let Some(ref store) = ctx.env_store {
                 let search_root = crate::domain::tools::env_store::remote_path(ctx, ".");
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
                 let raw = {
@@ -116,8 +116,15 @@ impl super::ToolImpl for GrepTool {
                     files_searched: 0,
                     truncated,
                 };
-                return Ok(output.into_stream());
-            }
+                Ok(output.into_stream())
+            } else {
+                Err(ToolError::ExecutionFailed {
+                    message: format!(
+                        "远程执行环境 '{}' 下 env_store 未初始化，无法访问远程文件系统",
+                        ctx.execution_environment
+                    ),
+                })
+            };
         }
 
         let project_root = ctx.project_root.clone();

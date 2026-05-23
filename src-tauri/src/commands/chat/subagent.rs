@@ -96,7 +96,7 @@ pub(super) fn subagent_alias_matches_parent_tier(alias: &str, parent_model: &str
     }
 }
 
-pub(super) fn resolve_agent_cwd(project_root: &Path, cwd: Option<&str>) -> PathBuf {
+pub(super) fn resolve_agent_focus_path(project_root: &Path, cwd: Option<&str>) -> PathBuf {
     let Some(raw) = cwd.map(str::trim).filter(|s| !s.is_empty()) else {
         return project_root.to_path_buf();
     };
@@ -109,6 +109,56 @@ pub(super) fn resolve_agent_cwd(project_root: &Path, cwd: Option<&str>) -> PathB
         return PathBuf::from(raw);
     }
     project_root.join(raw)
+}
+
+fn subagent_focus_path_note(project_root: &Path, focus_path: &Path) -> Option<String> {
+    let canonical_project = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_focus = focus_path
+        .canonicalize()
+        .unwrap_or_else(|_| focus_path.to_path_buf());
+    if canonical_focus == canonical_project {
+        return None;
+    }
+
+    Some(format!(
+        "## Requested Focus Path\n\
+         - Focus/input path from the caller: {}\n\
+         - Primary session working directory remains: {}\n\
+         - Treat the focus path as read-only input/reference by default. Write generated code, \
+         notebooks, scripts, logs, temporary files, figures, and result tables under the primary \
+         session working directory unless the user explicitly asks to modify the focus path.",
+        focus_path.display(),
+        project_root.display()
+    ))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn focus_path_note_keeps_session_workspace_primary() {
+        let project_root = Path::new("/tmp/session-workspace");
+        let focus_path = Path::new("/tmp/session-workspace/data/raw");
+
+        let note = subagent_focus_path_note(project_root, focus_path).expect("focus note");
+
+        assert!(note.contains("Focus/input path"));
+        assert!(note.contains("/tmp/session-workspace/data/raw"));
+        assert!(note.contains("Primary session working directory remains"));
+        assert!(note.contains("/tmp/session-workspace"));
+        assert!(note.contains("read-only input/reference"));
+        assert!(note.contains("under the primary"));
+    }
+
+    #[test]
+    fn focus_path_note_omits_primary_workspace() {
+        let project_root = Path::new("/tmp/session-workspace");
+
+        assert!(subagent_focus_path_note(project_root, project_root).is_none());
+    }
 }
 
 pub(super) async fn build_subagent_tool_schemas(
@@ -333,6 +383,7 @@ pub(super) async fn run_skill_forked(request: ForkedSkillRequest<'_>) -> Result<
                 transcript.push(Message::Tool {
                     tool_call_id: tool_use_id.clone(),
                     output: block.tool_result_message.clone(),
+                    is_error: Some(true),
                 });
             }
             transcript.push(Message::Assistant {
@@ -435,10 +486,11 @@ pub(super) async fn run_skill_forked(request: ForkedSkillRequest<'_>) -> Result<
         })
         .await;
 
-        for (tool_use_id, output, _) in &results {
+        for (tool_use_id, output, is_error) in &results {
             transcript.push(Message::Tool {
                 tool_call_id: tool_use_id.clone(),
                 output: output.clone(),
+                is_error: Some(*is_error),
             });
         }
     }
@@ -454,7 +506,8 @@ pub(super) struct ForegroundSubagentRequest<'a> {
     pub message_id: &'a str,
     pub session_id: &'a str,
     pub tool_results_dir: &'a Path,
-    pub effective_root: &'a Path,
+    pub project_root: &'a Path,
+    pub focus_path: &'a Path,
     pub session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
     pub session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
     pub args: &'a crate::domain::tools::agent::AgentArgs,
@@ -475,7 +528,8 @@ pub(super) async fn run_subagent_session_foreground_inner(
         message_id,
         session_id,
         tool_results_dir,
-        effective_root,
+        project_root,
+        focus_path,
         session_todos,
         session_agent_tasks,
         args,
@@ -526,14 +580,17 @@ pub(super) async fn run_subagent_session_foreground_inner(
     let mut sub_cfg = runtime.llm_config.clone();
     sub_cfg.model = resolved_agent_model;
 
-    let skills_exist = skills::skills_any_exist(effective_root, &skill_cache).await;
+    let skills_exist = skills::skills_any_exist(project_root, &skill_cache).await;
 
     let mut prompt_parts: Vec<String> = Vec::new();
     prompt_parts.push(agent_prompt::build_system_prompt(
-        effective_root,
+        project_root,
         &sub_cfg.model,
     ));
-    if let Some(overlay) = crate::domain::agents::build_runtime_overlay(effective_root).await {
+    if let Some(note) = subagent_focus_path_note(project_root, focus_path) {
+        prompt_parts.push(note);
+    }
+    if let Some(overlay) = crate::domain::agents::build_runtime_overlay(project_root).await {
         prompt_parts.push(overlay);
     }
 
@@ -549,14 +606,14 @@ pub(super) async fn run_subagent_session_foreground_inner(
         .unwrap_or(false);
 
     if is_memory_agent {
-        let mem_cfg = crate::domain::memory::load_resolved_config(effective_root)
+        let mem_cfg = crate::domain::memory::load_resolved_config(project_root)
             .await
             .unwrap_or_default();
         prompt_parts.push(
-            crate::domain::memory::memory_agent_system_prompt_with_config(effective_root, &mem_cfg),
+            crate::domain::memory::memory_agent_system_prompt_with_config(project_root, &mem_cfg),
         );
     } else {
-        let tool_ctx = ToolContext::new(effective_root)
+        let tool_ctx = ToolContext::new(project_root)
             .with_execution_environment(runtime.execution_environment.clone())
             .with_ssh_server(runtime.ssh_server.clone())
             .with_sandbox_backend(runtime.sandbox_backend.clone())
@@ -605,9 +662,9 @@ pub(super) async fn run_subagent_session_foreground_inner(
         }
     }
     if skills_exist && !agent_def.omit_claude_md() {
-        let loaded = skills::load_skills_cached(effective_root, &skill_cache).await;
+        let loaded = skills::load_skills_cached(project_root, &skill_cache).await;
         prompt_parts.push(skills::format_skills_index_system_section(
-            effective_root,
+            project_root,
             &loaded,
         ));
     }
@@ -630,7 +687,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
         parent_in_plan_mode: parent_in_plan,
         allow_nested_agent: runtime.allow_nested_agent,
     };
-    let mut tools = build_subagent_tool_schemas(effective_root, skills_exist, subagent_opts).await;
+    let mut tools = build_subagent_tool_schemas(project_root, skills_exist, subagent_opts).await;
 
     if let Some(ref allowed) = agent_def.allowed_tools() {
         let allowed_set: std::collections::HashSet<_> = allowed.iter().cloned().collect();
@@ -686,7 +743,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
             &constraint_harness,
             &mut constraint_state,
             &subagent_skill_task_context,
-            effective_root,
+            project_root,
             true,
             true,
         );
@@ -747,6 +804,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
                 .map(|(tool_use_id, _name, _arguments)| Message::Tool {
                     tool_call_id: tool_use_id.clone(),
                     output: block.tool_result_message.clone(),
+                    is_error: Some(true),
                 })
                 .collect();
             if let Some(tid) = background_task_id {
@@ -828,7 +886,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
                         &constraint_harness,
                         &mut constraint_state,
                         &subagent_skill_task_context,
-                        effective_root,
+                        project_root,
                         true,
                         true,
                     );
@@ -897,7 +955,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
             message_id,
             session_id,
             tool_results_dir,
-            project_root: effective_root,
+            project_root,
             session_todos: session_todos.clone(),
             session_agent_tasks: session_agent_tasks.clone(),
             agent_runtime: Some(runtime),
@@ -917,9 +975,10 @@ pub(super) async fn run_subagent_session_foreground_inner(
         .await;
         let tool_messages: Vec<Message> = results
             .iter()
-            .map(|(tool_use_id, output, _)| Message::Tool {
+            .map(|(tool_use_id, output, is_error)| Message::Tool {
                 tool_call_id: tool_use_id.clone(),
                 output: output.clone(),
+                is_error: Some(*is_error),
             })
             .collect();
         if let Some(tid) = background_task_id {
@@ -1016,7 +1075,7 @@ pub(super) async fn run_subagent_session(
 
     let agent_def = router.select_agent(Some(&selected_agent_type));
 
-    let effective_root = resolve_agent_cwd(project_root, args.cwd.as_deref());
+    let focus_path = resolve_agent_focus_path(project_root, args.cwd.as_deref());
 
     // 检查是否需要后台执行
     let should_run_in_background = args.run_in_background == Some(true) || agent_def.background();
@@ -1029,7 +1088,8 @@ pub(super) async fn run_subagent_session(
             session_id,
             plan_id: None,
             tool_results_dir,
-            effective_root: &effective_root,
+            project_root,
+            focus_path: &focus_path,
             session_todos,
             session_agent_tasks,
             args,
@@ -1057,7 +1117,8 @@ pub(super) async fn run_subagent_session(
         message_id,
         session_id,
         tool_results_dir,
-        effective_root: &effective_root,
+        project_root,
+        focus_path: &focus_path,
         session_todos,
         session_agent_tasks,
         args,
@@ -1243,7 +1304,8 @@ pub(crate) struct BackgroundAgentRequest<'a> {
     pub session_id: &'a str,
     pub plan_id: Option<&'a str>,
     pub tool_results_dir: &'a std::path::Path,
-    pub effective_root: &'a std::path::Path,
+    pub project_root: &'a std::path::Path,
+    pub focus_path: &'a std::path::Path,
     pub session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
     pub session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
     pub args: &'a crate::domain::tools::agent::AgentArgs,
@@ -1263,7 +1325,8 @@ pub(crate) async fn spawn_background_agent(
         session_id,
         plan_id,
         tool_results_dir,
-        effective_root,
+        project_root,
+        focus_path,
         session_todos,
         session_agent_tasks,
         args,
@@ -1333,7 +1396,8 @@ pub(crate) async fn spawn_background_agent(
     let message_id_clone = message_id.to_string();
     let session_id_clone = session_id.to_string();
     let tool_results_dir_clone = tool_results_dir.to_path_buf();
-    let effective_root_clone = effective_root.to_path_buf();
+    let project_root_clone = project_root.to_path_buf();
+    let focus_path_clone = focus_path.to_path_buf();
     let args_clone = args.clone();
     let runtime_clone = runtime.clone();
     let bg_repo_spawn = bg_repo.clone();
@@ -1376,7 +1440,8 @@ pub(crate) async fn spawn_background_agent(
             message_id: &message_id_clone,
             session_id: &session_id_clone,
             tool_results_dir: &tool_results_dir_clone,
-            effective_root: &effective_root_clone,
+            project_root: &project_root_clone,
+            focus_path: &focus_path_clone,
             session_todos,
             session_agent_tasks,
             args: &args_clone,
@@ -1464,7 +1529,8 @@ struct SubagentInternalRequest<'a> {
     message_id: &'a str,
     session_id: &'a str,
     tool_results_dir: &'a std::path::Path,
-    effective_root: &'a std::path::Path,
+    project_root: &'a std::path::Path,
+    focus_path: &'a std::path::Path,
     session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
     session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
     args: &'a crate::domain::tools::agent::AgentArgs,
@@ -1484,7 +1550,8 @@ async fn run_subagent_session_internal(
         message_id,
         session_id,
         tool_results_dir,
-        effective_root,
+        project_root,
+        focus_path,
         session_todos,
         session_agent_tasks,
         args,
@@ -1502,7 +1569,8 @@ async fn run_subagent_session_internal(
         message_id,
         session_id,
         tool_results_dir,
-        effective_root,
+        project_root,
+        focus_path,
         session_todos,
         session_agent_tasks,
         args,

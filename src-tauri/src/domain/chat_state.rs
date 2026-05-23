@@ -92,6 +92,13 @@ pub struct ChatState {
     /// Populated by `run_agent_schedule`, consumed by `cancel_agent_schedule`.
     pub active_orchestrations:
         Arc<Mutex<HashMap<String, HashMap<String, tokio_util::sync::CancellationToken>>>>,
+    /// Pre-warmed SSH/sandbox env stores keyed by session_id.
+    ///
+    /// `load_session` fires a background SSH warmup and parks the pre-connected
+    /// `EnvStore` here. `send_message` picks it up when creating a new
+    /// `SessionRuntimeState` instead of building a cold `EnvStore::new()`.
+    /// Entries are consumed (removed) on first `send_message` use.
+    pub pending_env_stores: Arc<Mutex<HashMap<String, EnvStore>>>,
 }
 
 /// Runtime state for an active session. Chat transcript is persisted via messages;
@@ -160,6 +167,7 @@ impl Default for ChatState {
             permission_deny_cache: Arc::new(Mutex::new(HashMap::new())),
             cached_config_file: Arc::new(Mutex::new(None)),
             active_orchestrations: Arc::new(Mutex::new(HashMap::new())),
+            pending_env_stores: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

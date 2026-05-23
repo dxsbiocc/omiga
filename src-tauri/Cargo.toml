@@ -67,6 +67,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 regex = "1"
 html2text = "0.14"
 walkdir = "2"
+tar = "0.4"
 sha2 = "0.10"
 hex = "0.4"
 rustls = "0.23"

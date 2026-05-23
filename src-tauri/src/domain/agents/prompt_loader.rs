@@ -226,4 +226,21 @@ mod tests {
         // No valid frontmatter → whole content is the prompt
         assert!(pf.prompt.contains("No closing fence"));
     }
+
+    #[test]
+    fn data_analysis_prompt_keeps_data_inputs_read_only() {
+        let prompt = bundled_prompt("data-analysis");
+        assert!(prompt.contains("Treat user-provided data folders as read-only"));
+        assert!(prompt.contains("Do not `cd` into the data folder"));
+        assert!(prompt.contains("`{cwd}/results/`"));
+        assert!(prompt.contains("`{cwd}/figures/`"));
+    }
+
+    #[test]
+    fn data_visual_prompt_keeps_data_inputs_read_only() {
+        let prompt = bundled_prompt("data-visual");
+        assert!(prompt.contains("Treat user-provided data folders as read-only"));
+        assert!(prompt.contains("Do not `cd` into the data folder"));
+        assert!(prompt.contains("`{cwd}/figures/`"));
+    }
 }

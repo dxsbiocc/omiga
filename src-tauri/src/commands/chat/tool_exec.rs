@@ -585,16 +585,18 @@ pub(super) async fn execute_tool_calls(
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let completed_count = todos.iter().filter(|t| {
-                    t.get("status").and_then(|s| s.as_str()) == Some("completed")
-                }).count();
+                let completed_count = todos
+                    .iter()
+                    .filter(|t| t.get("status").and_then(|s| s.as_str()) == Some("completed"))
+                    .count();
                 let all_completed = completed_count == todos.len() && completed_count >= 3;
 
                 // Check whether a verification agent already ran this turn by looking
                 // for the exact sentinel token, not a broad substring.
-                let verification_ran = ordered_results.iter().flatten().any(|(_, out, _)| {
-                    out.contains(VERIFICATION_SENTINEL)
-                });
+                let verification_ran = ordered_results
+                    .iter()
+                    .flatten()
+                    .any(|(_, out, _)| out.contains(VERIFICATION_SENTINEL));
 
                 if all_completed && !verification_ran {
                     res.1.push_str(

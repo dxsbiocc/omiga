@@ -34,6 +34,8 @@ interface CronJobSummary {
   task: string;
   sessionId: string | null;
   createdAt: string;
+  lastRunAt: string | null;
+  runCount: number;
 }
 
 function formatDate(iso: string): string {
@@ -290,12 +292,15 @@ export function CronJobsPanel() {
                   bgcolor: alpha(theme.palette.action.hover, 0.5),
                 }}
               >
-                <TableCell sx={{ fontWeight: 600, width: "20%" }}>
+                <TableCell sx={{ fontWeight: 600, width: "18%" }}>
                   Schedule
                 </TableCell>
                 <TableCell sx={{ fontWeight: 600 }}>Task</TableCell>
-                <TableCell sx={{ fontWeight: 600, width: "22%" }}>
-                  Created
+                <TableCell sx={{ fontWeight: 600, width: "18%" }}>
+                  上次运行
+                </TableCell>
+                <TableCell sx={{ fontWeight: 600, width: "16%" }}>
+                  创建时间
                 </TableCell>
                 <TableCell sx={{ width: 48 }} />
               </TableRow>
@@ -327,6 +332,19 @@ export function CronJobsPanel() {
                         display="block"
                       >
                         Session: {job.sessionId.slice(0, 8)}…
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {job.lastRunAt ? (
+                      <Tooltip title={`共运行 ${job.runCount} 次`}>
+                        <Typography variant="body2" color="text.secondary">
+                          {formatDate(job.lastRunAt)}
+                        </Typography>
+                      </Tooltip>
+                    ) : (
+                      <Typography variant="body2" color="text.disabled">
+                        未运行
                       </Typography>
                     )}
                   </TableCell>

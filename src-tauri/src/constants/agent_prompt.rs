@@ -61,7 +61,8 @@ Before spawning an `Agent`, match the task to the table. If a row matches, use t
 | Security audit, vulnerability, injection, secrets | `security-reviewer` | frontier |
 | Architecture, system design, tradeoffs | `architect` | frontier |
 | Write tests, TDD, coverage | `test-engineer` | standard |
-| Performance, profiling, N+1, slow query | `performance-reviewer` | standard |
+| Slow, latency, memory leak, N+1, profiling | `performance-reviewer` | standard |
+| Refactor, clean up, dead code, extract function | `refactor-cleaner` | standard |
 | Research, papers, literature, web survey | `deep-research` | frontier |
 | Data analysis, statistics, Python/R scripts | `data-analysis` | standard |
 | Charts, plots, scientific figures | `data-visual` | standard |
@@ -273,6 +274,7 @@ fn section_agent_notes() -> &'static str {
     r#"## Notes
 
 - Prefer absolute file paths in commands and tool arguments so behavior is predictable with the session working directory.
+- Workspace hygiene: treat user-provided data/input directories as read-only unless the user explicitly asks to modify them. Keep generated code, notebooks, scripts, logs, temporary files, figures, and result tables under the primary working directory. When analyzing a data folder, pass the data folder as an input path; do not `cd` into it and create `results/`, `figures/`, scripts, notebooks, logs, or temp files there by default.
 - In your final response, share absolute paths relevant to the task. Include code snippets only when the exact text is load-bearing.
 - For clear communication, avoid using emojis unless the user asks.
 - Do not use a colon immediately before tool calls in prose (use a period instead)."#
@@ -441,6 +443,8 @@ mod tests {
         assert!(s.contains("Markdown image syntax"));
         assert!(s.contains("template_execute"));
         assert!(s.contains("markdownReport"));
+        assert!(s.contains("Workspace hygiene"));
+        assert!(s.contains("treat user-provided data/input directories as read-only"));
     }
 
     #[test]

@@ -31,6 +31,7 @@ import {
   WEB_SEARCH_KEYS_STORAGE,
 } from "./utils/webSearchSettings";
 import { getLocalStorageItem } from "./utils/browserStorage";
+import { showNotification } from "./utils/notifications";
 
 const CodeWorkspace = lazy(() =>
   import("./components/CodeWorkspace").then((mod) => ({
@@ -246,26 +247,36 @@ export default function App() {
       firedAt: string;
     }>("cron-job-fired", async (event) => {
       const { task, id } = event.payload;
+      const shortTask = task.length > 40 ? task.slice(0, 40) + "…" : task;
       try {
-        const sessionTitle = `[定时任务] ${task.slice(0, 40)}${task.length > 40 ? "…" : ""}`;
+        const sessionTitle = `[定时任务] ${shortTask}`;
         await useSessionStore.getState().createSession(sessionTitle, ".");
         const sessionId = useSessionStore.getState().currentSession?.id;
         if (!sessionId) throw new Error("session id unavailable after createSession");
+
+        // 通知用户任务已开始
+        void showNotification({
+          title: "Omiga — 定时任务已触发",
+          body: shortTask,
+        });
+
         await useSessionStore.getState().sendMessage({
           content: `[定时任务触发 ID: ${id}]\n\n${task}`,
           session_id: sessionId,
           use_tools: true,
         });
+
+        // 任务完成后通知用户
+        void showNotification({
+          title: "Omiga — 定时任务完成",
+          body: shortTask,
+        });
       } catch (e) {
         console.warn("[cron] failed to create AI session:", e);
-        try {
-          new Notification("Omiga — 定时任务", {
-            body: task.length > 100 ? task.slice(0, 97) + "…" : task,
-            silent: false,
-          });
-        } catch {
-          console.info("[cron] job fired:", task);
-        }
+        void showNotification({
+          title: "Omiga — 定时任务触发失败",
+          body: shortTask,
+        }).catch(() => console.info("[cron] job fired:", task));
       }
     });
     return () => { void unlistenPromise.then((f) => f()); };

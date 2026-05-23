@@ -11,6 +11,8 @@ pub const DESCRIPTION: &str = r#"Launch a specialized sub-agent to work on a sub
 
 Provide a short `description` (3–5 words), the full `prompt`, and optionally `subagent_type` (e.g. built-in Explore, Plan, general-purpose), `model` override (`sonnet` / `opus` / `haiku` on Anthropic), or `cwd`.
 
+`cwd` is a focus/input path for the sub-agent, not a replacement for the session workspace. The sub-agent must keep generated code, notebooks, scripts, logs, temporary files, figures, and results under the primary session working directory unless the user explicitly asks to modify the focus path.
+
 The sub-agent runs in Omiga with the same tool set as the main session except **nested Agent calls are disabled**. `run_in_background` is not supported yet."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +82,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Optional working directory for the agent"
+                    "description": "Optional focus/input path for the agent. This does not replace the primary session workspace; generated files should stay under the primary session working directory unless explicitly requested."
                 }
             },
             "required": ["description", "prompt"]

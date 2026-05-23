@@ -670,7 +670,7 @@ describe("SelfEvolutionDraftBrowserView", () => {
       />,
     );
 
-    expect(html).toContain("Self-evolution Draft Review");
+    expect(html).toContain("演化草稿审阅");
     expect(html).toContain("只读审阅草稿");
     expect(html).toContain("1 batches");
     expect(html).toContain("1 drafts");

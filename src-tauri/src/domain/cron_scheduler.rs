@@ -40,13 +40,26 @@ async fn tick(pool: &SqlitePool, app: &tauri::AppHandle) -> Result<(), sqlx::Err
 
     for (id, schedule, task) in rows {
         if matches_now(&schedule, &now) {
+            let fired_at = now.to_rfc3339();
             let payload = CronJobFiredPayload {
                 id: id.clone(),
                 task: task.clone(),
-                fired_at: now.to_rfc3339(),
+                fired_at: fired_at.clone(),
             };
             if let Err(e) = app.emit("cron-job-fired", &payload) {
                 tracing::warn!(target: "omiga::cron", "emit failed for {id}: {e}");
+            } else {
+                // 更新最后触发时间和运行计数
+                if let Err(e) = sqlx::query(
+                    "UPDATE cron_jobs SET last_run_at = ?, run_count = run_count + 1 WHERE id = ?",
+                )
+                .bind(&fired_at)
+                .bind(&id)
+                .execute(pool)
+                .await
+                {
+                    tracing::warn!(target: "omiga::cron", "failed to update last_run_at for {id}: {e}");
+                }
             }
             tracing::info!(target: "omiga::cron", "fired job id={id} task={task}");
         }

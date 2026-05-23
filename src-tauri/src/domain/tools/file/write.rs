@@ -29,7 +29,11 @@ Safety features:
 - Content hash conflict detection (prevents overwriting changes)
 - Atomic writes (no partial writes on crash)
 - Diff preview for conflict resolution
-- Creates parent directories automatically"#;
+- Creates parent directories automatically
+
+Workspace hygiene:
+- Write generated code, notebooks, scripts, logs, temporary files, figures, and result tables under the primary session working directory by default.
+- Treat user-provided data/input folders as read-only unless the user explicitly asks you to modify them."#;
 
 /// Arguments for FileWrite tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +69,7 @@ impl super::ToolImpl for FileWriteTool {
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         // Remote/SSH/sandbox: use shell-based file ops through the cached environment
         if ctx.execution_environment != "local" {
-            if let Some(ref store) = ctx.env_store {
+            return if let Some(ref store) = ctx.env_store {
                 let remote_path = crate::domain::tools::env_store::remote_path(ctx, &args.path);
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
                 let bytes_written = {
@@ -81,8 +85,15 @@ impl super::ToolImpl for FileWriteTool {
                     new_hash,
                     created: true, // we can't cheaply know if it existed remotely
                 };
-                return Ok(output.into_stream());
-            }
+                Ok(output.into_stream())
+            } else {
+                Err(ToolError::ExecutionFailed {
+                    message: format!(
+                        "远程执行环境 '{}' 下 env_store 未初始化，无法访问远程文件系统",
+                        ctx.execution_environment
+                    ),
+                })
+            };
         }
 
         let path = resolve_path(&ctx.project_root, &args.path)?;
@@ -134,11 +145,32 @@ impl super::ToolImpl for FileWriteTool {
             }
         }
 
+        // .ipynb kernelspec 修正：若文件是 Jupyter notebook 且 kernelspec 是通用默认值
+        // (python3/python/缺失)，且当前会话选定了 venv，则将 kernelspec 替换为对应环境。
+        // 仅在 kernelspec 为默认值时生效，AI 或用户已显式设置的 kernel 保持不变。
+        let final_content = {
+            let is_ipynb = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("ipynb"))
+                .unwrap_or(false);
+            if is_ipynb {
+                crate::domain::tools::notebook_edit::fix_ipynb_kernelspec_if_default(
+                    &args.content,
+                    &ctx.local_venv_type,
+                    &ctx.local_venv_name,
+                )
+                .unwrap_or_else(|| args.content.clone())
+            } else {
+                args.content.clone()
+            }
+        };
+
         // Atomic write: write to temp file, then rename
         let temp_path = path.with_extension("tmp");
 
         // Write to temp file
-        tokio::fs::write(&temp_path, &args.content)
+        tokio::fs::write(&temp_path, &final_content)
             .await
             .map_err(|e| FsError::IoError {
                 message: format!("Failed to write temp file: {}", e),
@@ -151,12 +183,12 @@ impl super::ToolImpl for FileWriteTool {
                 message: format!("Failed to rename temp file: {}", e),
             })?;
 
-        // Compute new hash
-        let new_hash = compute_hash(&args.content);
+        // Compute new hash (of the final written content, which may differ for .ipynb)
+        let new_hash = compute_hash(&final_content);
 
         let output = FileWriteOutput {
             path: args.path,
-            bytes_written: args.content.len(),
+            bytes_written: final_content.len(),
             new_hash,
             created: current_hash.is_none(),
         };
@@ -288,7 +320,7 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file (relative to project root or absolute)"
+                    "description": "Path to the file (relative to the primary session working directory/project root or absolute). Do not write generated scripts, notebooks, logs, figures, temp files, or result tables inside user-provided data/input folders unless explicitly requested."
                 },
                 "content": {
                     "type": "string",

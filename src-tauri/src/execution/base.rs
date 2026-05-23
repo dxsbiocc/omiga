@@ -14,8 +14,14 @@ use rand::Rng;
 use tokio::fs::read_to_string;
 use tokio::time::{timeout, Duration};
 
-/// CWD 同步间隔（秒）
-const SYNC_INTERVAL_SECONDS: f64 = 5.0;
+/// File-sync interval for SSH/sandbox environments (seconds).
+///
+/// Original hermes-agent value was 5 s — fine for fast Docker volume mounts,
+/// catastrophic for SSH where each rsync round-trip takes 10-90 s.
+/// We set this to 1800 s (30 min): skills are read locally and never executed
+/// remotely, so frequent re-sync buys nothing but latency.
+/// Credentials are synced once at session start; they rarely change mid-session.
+const SYNC_INTERVAL_SECONDS: f64 = 1800.0;
 
 /// 最大 CWD 路径长度
 const MAX_CWD_LEN: usize = 4096;

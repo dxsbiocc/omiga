@@ -71,8 +71,13 @@ impl super::ToolImpl for GlobTool {
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         // Remote/SSH/sandbox: use shell-based glob through the cached environment
         if ctx.execution_environment != "local" {
-            if let Some(ref store) = ctx.env_store {
-                let base = crate::domain::tools::env_store::remote_path(ctx, ".");
+            return if let Some(ref store) = ctx.env_store {
+                // Absolute patterns use "/" as base; relative patterns use remote project root
+                let base = if args.pattern.starts_with('/') {
+                    "/".to_string()
+                } else {
+                    crate::domain::tools::env_store::remote_path(ctx, ".")
+                };
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
                 let paths = {
                     let mut guard = env_arc.lock().await;
@@ -90,13 +95,20 @@ impl super::ToolImpl for GlobTool {
                         size: 0,
                     })
                     .collect();
-                let output = GlobOutput {
+                Ok(GlobOutput {
                     pattern: args.pattern,
                     matches,
                     truncated,
-                };
-                return Ok(output.into_stream());
-            }
+                }
+                .into_stream())
+            } else {
+                Err(ToolError::ExecutionFailed {
+                    message: format!(
+                        "远程执行环境 '{}' 下 env_store 未初始化，无法访问远程文件系统",
+                        ctx.execution_environment
+                    ),
+                })
+            };
         }
 
         // Parse glob pattern

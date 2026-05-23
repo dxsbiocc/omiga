@@ -545,6 +545,7 @@ mod tests {
             Message::Tool {
                 tool_call_id: "t1".into(),
                 output: "out".into(),
+                is_error: None,
             },
             Message::User {
                 content: "u2".into(),

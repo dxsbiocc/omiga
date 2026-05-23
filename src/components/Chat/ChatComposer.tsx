@@ -90,7 +90,6 @@ import {
   usePermissionStore,
   usePluginStore,
   type PermissionMode,
-  type ComputerUseMode,
   type SandboxBackend,
   type LocalVenvType,
 } from "../../state";
@@ -102,6 +101,7 @@ import {
 import {
   parseGoalCommand,
   parseResearchCommand,
+  parseSkillCommand,
   WORKFLOW_SLASH_COMMANDS,
   type SlashCommandId,
   type WorkflowSlashCommandDefinition,
@@ -162,6 +162,9 @@ export const COMPOSER_INPUT_JOINED_Z_INDEX =
   COMPOSER_PROMPT_OVERLAY_Z_INDEX;
 export const COMPOSER_PROMPT_JOINED_BORDER_RADIUS = "24px 24px 0 0";
 export const COMPOSER_INPUT_JOINED_BORDER_RADIUS = "0 0 24px 24px";
+export const COMPOSER_CONTEXT_TRAY_PLACEMENT = "above-input";
+export const COMPOSER_CONTEXT_TRAY_MAX_HEIGHT = "min(28vh, 152px)";
+export const COMPOSER_CONTEXT_ITEM_MAX_WIDTH = "calc((100% - 16px) / 3)";
 
 /** React StrictMode 下 effect 会双跑，避免同页两次 `invoke` + 弹窗 */
 let rsyncAvailabilityCheckStarted = false;
@@ -257,27 +260,6 @@ const PERMISSION_META: Record<PermissionMode, { label: string; hint: string }> =
       hint: "尽量减少权限提示（谨慎使用）。",
     },
   };
-
-const COMPUTER_USE_META: Record<
-  ComputerUseMode,
-  { label: string; menuLabel: string; hint: string }
-> = {
-  off: {
-    label: "Computer Off",
-    menuLabel: "关闭",
-    hint: "不允许 AI 观察或操作本机应用。",
-  },
-  task: {
-    label: "Computer Task",
-    menuLabel: "仅下一条消息",
-    hint: "仅下一条消息可使用本机截图与键鼠操作；发送后自动关闭。",
-  },
-  session: {
-    label: "Computer Session",
-    menuLabel: "当前会话",
-    hint: "当前会话后续消息持续允许 Computer Use，直到手动关闭。",
-  },
-};
 
 /** 解析 hex 相对亮度（0–1），非 hex 时返回 0.5 避免误判 */
 function hexRelativeLuminance(color: string): number {
@@ -604,15 +586,30 @@ export const ChatComposer = memo(function ChatComposer({
   const normalizeCommandValue = useCallback(
     (
       rawValue: string,
-    ): { commandId: SlashCommandId | null; body: string } => {
+      hydrateReferences = false,
+    ): {
+      commandId: SlashCommandId | null;
+      skillName: string | null;
+      body: string;
+    } => {
       const trimmed = rawValue.trim();
       const research = parseResearchCommand(trimmed);
       if (research) {
-        return { commandId: "research", body: research.body };
+        return { commandId: "research", skillName: null, body: research.body };
       }
       const goal = parseGoalCommand(trimmed);
       if (goal) {
-        return { commandId: "goal", body: goal.body };
+        return { commandId: "goal", skillName: null, body: goal.body };
+      }
+      if (hydrateReferences) {
+        const skill = parseSkillCommand(trimmed);
+        if (skill) {
+          return {
+            commandId: null,
+            skillName: skill.skill,
+            body: skill.args,
+          };
+        }
       }
       const workflow = WORKFLOW_SLASH_COMMANDS.find((command) => {
         const label = command.label;
@@ -623,23 +620,30 @@ export const ChatComposer = memo(function ChatComposer({
           trimmed === workflow.label
             ? ""
             : trimmed.slice(workflow.label.length).trimStart();
-        return { commandId: workflow.id, body };
+        return { commandId: workflow.id, skillName: null, body };
       }
-      return { commandId: null, body: rawValue };
+      return { commandId: null, skillName: null, body: rawValue };
     },
     [],
   );
   const setInputValue = useCallback(
-    (v: string) => {
-      const normalized = normalizeCommandValue(v);
+    (v: string, options?: { hydrateReferences?: boolean }) => {
+      const normalized = normalizeCommandValue(
+        v,
+        options?.hydrateReferences ?? false,
+      );
       setSelectedSlashCommandId(normalized.commandId);
-      setSelectedSkillCommandName(null);
+      setSelectedSkillCommandName(normalized.skillName);
       setInput(normalized.body);
       const outgoing = normalized.commandId
         ? normalized.body.trim().length > 0
           ? `/${normalized.commandId} ${normalized.body}`
           : `/${normalized.commandId}`
-        : normalized.body;
+        : normalized.skillName
+          ? normalized.body.trim().length > 0
+            ? `$${normalized.skillName} ${normalized.body}`
+            : `$${normalized.skillName}`
+          : normalized.body;
       onInputChange?.(outgoing);
     },
     [normalizeCommandValue, onInputChange],
@@ -692,14 +696,20 @@ export const ChatComposer = memo(function ChatComposer({
               ? `$${selectedSkillCommandName} ${inputValueRef.current}`
               : `$${selectedSkillCommandName}`
           : inputValueRef.current,
-      setValue: (v: string) => setInputValue(v),
+      setValue: (v: string) => setInputValue(v, { hydrateReferences: true }),
       appendValue: (text: string) => {
         const cur = inputValueRef.current;
-        setInputValue(cur ? `${cur}\n${text}` : text);
+        const nextValue = cur ? `${cur}\n${text}` : text;
+        if (selectedSlashCommandId || selectedSkillCommandName) {
+          commitEditableInput(nextValue);
+          return;
+        }
+        setInputValue(nextValue);
       },
       focus: () => focusEditableEnd(),
     }),
     [
+      commitEditableInput,
       selectedSkillCommandName,
       selectedSlashCommandId,
       setInputValue,
@@ -757,6 +767,15 @@ export const ChatComposer = memo(function ChatComposer({
       marginBottom: 0,
     },
   } as const);
+  const composerContextChipSx = (tone: string, fontWeight = 700) => ({
+    ...semanticChipSurface(tone),
+    flexShrink: 1,
+    minWidth: 0,
+    height: "var(--composer-chip-h)",
+    maxHeight: "var(--composer-chip-h)",
+    maxWidth: COMPOSER_CONTEXT_ITEM_MAX_WIDTH,
+    fontWeight,
+  } as const);
   /** Input card — closer to solid paper so the typing area reads lighter */
   const composerBg = alpha(paper, isDark ? 0.97 : 0.99);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
@@ -768,15 +787,15 @@ export const ChatComposer = memo(function ChatComposer({
   const {
     permissionMode,
     setPermissionMode,
-    computerUseMode,
-    setComputerUseMode,
     composerAgentType,
     setComposerAgentType,
     composerAttachedPaths,
     addComposerAttachedPath,
+    removeComposerAttachedPath,
     popComposerAttachedPath,
     composerSelectedPluginIds,
     addComposerSelectedPluginId,
+    removeComposerSelectedPluginId,
     popComposerSelectedPluginId,
     useWorktree,
     setUseWorktree,
@@ -799,16 +818,11 @@ export const ChatComposer = memo(function ChatComposer({
   );
 
   const permissionAccent = permissionModeAccent(theme, permissionMode);
-  const computerUseAccent =
-    computerUseMode === "off" ? mut : theme.palette.info.main;
 
   const [plusAnchor, setPlusAnchor] = useState<null | HTMLElement>(null);
   const [permissionAnchor, setPermissionAnchor] = useState<null | HTMLElement>(
     null,
   );
-  const [computerUseAnchor, setComputerUseAnchor] =
-    useState<null | HTMLElement>(null);
-  const [computerUseStopPending, setComputerUseStopPending] = useState(false);
   const [envAnchor, setEnvAnchor] = useState<null | HTMLElement>(null);
   const [sandboxMenuAnchor, setSandboxMenuAnchor] =
     useState<null | HTMLElement>(null);
@@ -822,30 +836,6 @@ export const ChatComposer = memo(function ChatComposer({
     { kind: string; label: string; name: string }[]
   >([]);
   const [localVenvsLoading, setLocalVenvsLoading] = useState(false);
-
-  const openComputerUseSettings = useCallback(() => {
-    setComputerUseAnchor(null);
-    setSettingsTabIndex(15);
-    setSettingsOpen(true);
-    setRightPanelMode("settings");
-  }, [setRightPanelMode, setSettingsOpen, setSettingsTabIndex]);
-
-  const stopComputerUseRun = useCallback(async () => {
-    if (!sessionId) return;
-    setComputerUseStopPending(true);
-    try {
-      await invoke("computer_use_stop_active_run", {
-        sessionId,
-        projectRoot: workspacePath || ".",
-      });
-      setComputerUseMode("off");
-      setComputerUseAnchor(null);
-    } catch (error) {
-      console.warn("Failed to stop Computer Use run", error);
-    } finally {
-      setComputerUseStopPending(false);
-    }
-  }, [sessionId, setComputerUseMode, workspacePath]);
 
   // 沙箱 / SSH 二级菜单：与 SessionList「Language」相同（定时器 + 嵌套 Menu + pointerEvents），避免 Popover 与一级 Menu 模态层事件死循环
   const sandboxSubmenuLeaveTimerRef = useRef<ReturnType<
@@ -2442,227 +2432,144 @@ export const ChatComposer = memo(function ChatComposer({
           >
             {hasInlineComposerChips ? (
               <Box
-                component="span"
+                className="composer-reference-tray"
+                data-placement={COMPOSER_CONTEXT_TRAY_PLACEMENT}
+                onMouseDown={(event) => event.stopPropagation()}
                 sx={{
-                  verticalAlign: "middle",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 0.75,
+                  display: "flex",
                   flexWrap: "wrap",
-                  maxWidth: "100%",
-                  mr: 0.9,
-                  rowGap: 0.45,
+                  alignItems: "center",
+                  alignContent: "flex-start",
+                  gap: 0.75,
+                  maxHeight: COMPOSER_CONTEXT_TRAY_MAX_HEIGHT,
+                  overflowX: "hidden",
+                  overflowY: "auto",
+                  overscrollBehavior: "contain",
+                  pb: 0.75,
+                  mb: 0.75,
+                  borderBottom: `1px solid ${edge(0.08)}`,
+                  cursor: "default",
                   pointerEvents: "auto",
                 }}
               >
-            {highlightedSlashCommand ? (
-            <Tooltip
-              placement="top"
-              enterDelay={180}
-              title={highlightedSlashCommand.description}
-            >
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  alignSelf: "center",
-                  flexShrink: 0,
-                  height: "var(--composer-chip-h)",
-                  fontSize: "var(--composer-fs)",
-                  lineHeight: "var(--composer-lh)",
-                }}
-              >
-                <Chip
-                  className="composer-command-chip"
-                  size="small"
-                  variant="outlined"
-                  icon={<RouteIcon sx={{ fontSize: 16 }} />}
-                  label={highlightedSlashCommand.label}
-                  sx={{
-                    ...semanticChipSurface(commandTone),
-                    flexShrink: 0,
-                    height: "var(--composer-chip-h)",
-                    maxHeight: "var(--composer-chip-h)",
-                    fontWeight: 700,
-                    maxWidth: { xs: 160, sm: 220 },
-                  }}
-                />
-              </Box>
-            </Tooltip>
-          ) : null}
-          {highlightedSkillCommand ? (
-            <Tooltip
-              placement="top"
-              enterDelay={180}
-              title={
-                highlightedSkillCommand.description ||
-                "直接使用该 Skill"
-              }
-            >
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  alignSelf: "center",
-                  flexShrink: 0,
-                  height: "var(--composer-chip-h)",
-                  fontSize: "var(--composer-fs)",
-                  lineHeight: "var(--composer-lh)",
-                }}
-              >
-                <Chip
-                  className="composer-skill-chip"
-                  size="small"
-                  variant="outlined"
-                  icon={<AutoAwesome sx={{ fontSize: 16 }} />}
-                  label={`$${highlightedSkillCommand.name}`}
-                  sx={{
-                    ...semanticChipSurface(skillTone),
-                    flexShrink: 0,
-                    height: "var(--composer-chip-h)",
-                    maxHeight: "var(--composer-chip-h)",
-                    fontWeight: 700,
-                    maxWidth: { xs: 170, sm: 240 },
-                  }}
-                />
-              </Box>
-            </Tooltip>
-          ) : null}
-          {showComposerAgentChip ? (
-            <Tooltip
-              placement="top"
-              enterDelay={250}
-              title={
-                selectedAgentDescription ? (
-                  <Box sx={{ maxWidth: 320 }}>
-                    <Typography
-                      variant="caption"
-                      component="div"
-                      fontWeight={700}
-                      display="block"
-                      sx={{ mb: 0.5 }}
-                    >
-                      {normalizeAgentDisplayName(composerAgentType)}
-                    </Typography>
-                    <Typography
-                      variant="caption"
-                      component="div"
-                      sx={{ opacity: 0.92, lineHeight: 1.45 }}
-                    >
-                      {selectedAgentDescription}
-                    </Typography>
-                  </Box>
-                ) : (
-                  normalizeAgentDisplayName(composerAgentType)
-                )
-              }
-            >
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  alignSelf: "center",
-                  flexShrink: 0,
-                  height: "var(--composer-chip-h)",
-                  fontSize: "var(--composer-fs)",
-                  lineHeight: "var(--composer-lh)",
-                }}
-              >
-                <Chip
-                  className="composer-agent-chip"
-                  size="small"
-                  variant="outlined"
-                  icon={<SmartToy sx={{ fontSize: 16 }} />}
-                  label={normalizeAgentDisplayName(composerAgentType)}
-                  sx={{
-                    ...semanticChipSurface(agentTone),
-                    flexShrink: 0,
-                    height: "var(--composer-chip-h)",
-                    maxHeight: "var(--composer-chip-h)",
-                    fontWeight: 700,
-                    maxWidth: { xs: 140, sm: 220 },
-                  }}
-                />
-              </Box>
-            </Tooltip>
-          ) : null}
-          {selectedPluginRows.length > 0 ? (
-            <Box
-              sx={{
-                display: "flex",
-                flexWrap: "wrap",
-                alignItems: "center",
-                alignContent: "center",
-                alignSelf: "center",
-                gap: 0.25,
-                maxWidth: { xs: "100%", sm: 420 },
-                minHeight: "var(--composer-chip-h)",
-              }}
-            >
-              {selectedPluginRows.map((plugin) => (
-                <Tooltip
-                  key={plugin.id}
-                  title={`${plugin.label} · ${plugin.id}`}
-                  placement="top"
-                >
-                  <Chip
-                    className="composer-plugin-chip"
-                    size="small"
-                    variant="outlined"
-                    icon={<Extension sx={{ fontSize: 16 }} />}
-                    label={`#${plugin.label}`}
-                    sx={{
-                      ...semanticChipSurface(pluginTone),
-                      flexShrink: 0,
-                      height: "var(--composer-chip-h)",
-                      maxHeight: "var(--composer-chip-h)",
-                      maxWidth: 220,
-                      fontWeight: 700,
-                    }}
-                  />
-                </Tooltip>
-              ))}
-            </Box>
-          ) : null}
-          {composerAttachedPaths.length > 0 ? (
-            <Box
-              sx={{
-                display: "flex",
-                flexWrap: "wrap",
-                alignItems: "center",
-                alignContent: "center",
-                alignSelf: "center",
-                gap: 0.25,
-                maxWidth: { xs: "100%", sm: 420 },
-                minHeight: "var(--composer-chip-h)",
-              }}
-            >
-              {composerAttachedPaths.map((p) => (
-                <Tooltip key={p} title={p} placement="top">
-                  <Chip
-                    className="composer-file-chip"
-                    size="small"
-                    variant="outlined"
-                    icon={
-                      <InsertDriveFile sx={{ fontSize: 16 }} />
+                {highlightedSlashCommand ? (
+                  <Tooltip
+                    placement="top"
+                    enterDelay={180}
+                    title={highlightedSlashCommand.description}
+                  >
+                    <Chip
+                      className="composer-command-chip"
+                      size="small"
+                      variant="outlined"
+                      icon={<RouteIcon sx={{ fontSize: 16 }} />}
+                      label={highlightedSlashCommand.label}
+                      onDelete={() => {
+                        setSelectedSlashCommandId(null);
+                        onInputChange?.(input);
+                        queueMicrotask(() => focusEditableEnd());
+                      }}
+                      sx={composerContextChipSx(commandTone)}
+                    />
+                  </Tooltip>
+                ) : null}
+                {highlightedSkillCommand ? (
+                  <Tooltip
+                    placement="top"
+                    enterDelay={180}
+                    title={
+                      highlightedSkillCommand.description ||
+                      "直接使用该 Skill"
                     }
-                    label={`@${p}`}
-                    sx={{
-                      ...semanticChipSurface(fileTone),
-                      flexShrink: 0,
-                      height: "var(--composer-chip-h)",
-                      maxHeight: "var(--composer-chip-h)",
-                      maxWidth: 200,
-                      fontWeight: 600,
-                    }}
-                  />
-                </Tooltip>
+                  >
+                    <Chip
+                      className="composer-skill-chip"
+                      size="small"
+                      variant="outlined"
+                      icon={<AutoAwesome sx={{ fontSize: 16 }} />}
+                      label={`$${highlightedSkillCommand.name}`}
+                      onDelete={() => {
+                        setSelectedSkillCommandName(null);
+                        onInputChange?.(input);
+                        queueMicrotask(() => focusEditableEnd());
+                      }}
+                      sx={composerContextChipSx(skillTone)}
+                    />
+                  </Tooltip>
+                ) : null}
+                {showComposerAgentChip ? (
+                  <Tooltip
+                    placement="top"
+                    enterDelay={250}
+                    title={
+                      selectedAgentDescription ? (
+                        <Box sx={{ maxWidth: 320 }}>
+                          <Typography
+                            variant="caption"
+                            component="div"
+                            fontWeight={700}
+                            display="block"
+                            sx={{ mb: 0.5 }}
+                          >
+                            {normalizeAgentDisplayName(composerAgentType)}
+                          </Typography>
+                          <Typography
+                            variant="caption"
+                            component="div"
+                            sx={{ opacity: 0.92, lineHeight: 1.45 }}
+                          >
+                            {selectedAgentDescription}
+                          </Typography>
+                        </Box>
+                      ) : (
+                        normalizeAgentDisplayName(composerAgentType)
+                      )
+                    }
+                  >
+                    <Chip
+                      className="composer-agent-chip"
+                      size="small"
+                      variant="outlined"
+                      icon={<SmartToy sx={{ fontSize: 16 }} />}
+                      label={normalizeAgentDisplayName(composerAgentType)}
+                      onDelete={() => {
+                        setComposerAgentType("auto");
+                        queueMicrotask(() => focusEditableEnd());
+                      }}
+                      sx={composerContextChipSx(agentTone)}
+                    />
+                  </Tooltip>
+                ) : null}
+                {selectedPluginRows.map((plugin) => (
+                  <Tooltip
+                    key={plugin.id}
+                    title={`${plugin.label} · ${plugin.id}`}
+                    placement="top"
+                  >
+                    <Chip
+                      className="composer-plugin-chip"
+                      size="small"
+                      variant="outlined"
+                      icon={<Extension sx={{ fontSize: 16 }} />}
+                      label={`#${plugin.label}`}
+                      onDelete={() => removeComposerSelectedPluginId(plugin.id)}
+                      sx={composerContextChipSx(pluginTone)}
+                    />
+                  </Tooltip>
                 ))}
-              </Box>
-            ) : null}
+                {composerAttachedPaths.map((p) => (
+                  <Tooltip key={p} title={p} placement="top">
+                    <Chip
+                      className="composer-file-chip"
+                      size="small"
+                      variant="outlined"
+                      icon={<InsertDriveFile sx={{ fontSize: 16 }} />}
+                      label={`@${p}`}
+                      onDelete={() => removeComposerAttachedPath(p)}
+                      sx={composerContextChipSx(fileTone, 600)}
+                    />
+                  </Tooltip>
+                ))}
               </Box>
             ) : null}
           <Box
@@ -2680,7 +2587,7 @@ export const ChatComposer = memo(function ChatComposer({
               (showFilePopover &&
                 (fileGlobLoading || filteredMentionRows.length > 0))
             }
-            data-placeholder={!hasInlineComposerChips ? placeholder : ""}
+            data-placeholder={placeholder}
             data-empty={input === "" ? "true" : undefined}
             onMouseDown={(e) => {
               if (
@@ -2755,16 +2662,13 @@ export const ChatComposer = memo(function ChatComposer({
             }}
             onKeyDown={handleComposerKeyDown}
             sx={{
-              display: input === "" ? "inline-block" : "inline",
-              verticalAlign: "middle",
+              display: "block",
+              verticalAlign: "top",
               minWidth:
                 input === ""
-                  ? hasInlineComposerChips
-                    ? "1ch"
-                    : "100%"
-                  : hasInlineComposerChips
-                    ? 2
-                    : "100%",
+                  ? "100%"
+                  : "100%",
+              minHeight: `calc(var(--composer-fs) * var(--composer-lh))`,
               boxSizing: "border-box",
               border: "none",
               outline: "none",
@@ -3526,195 +3430,6 @@ export const ChatComposer = memo(function ChatComposer({
                 </Tooltip>
               );
             })}
-          </Menu>
-
-          <Button
-            size="small"
-            variant="text"
-            color="inherit"
-            onClick={(e) => setComputerUseAnchor(e.currentTarget)}
-            startIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: computerUseAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <Laptop size={17} strokeWidth={2} color={computerUseAccent} />
-              </Box>
-            }
-            endIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: computerUseAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <ChevronDown
-                  size={18}
-                  strokeWidth={2}
-                  color={computerUseAccent}
-                />
-              </Box>
-            }
-            sx={{
-              textTransform: "none",
-              color: computerUseAccent,
-              ...composerLabelText,
-              borderRadius: 2.5,
-              px: 1,
-              minHeight: "var(--composer-toolbar-h)",
-              height: "var(--composer-toolbar-h)",
-              maxWidth: 220,
-              border: "1px solid transparent",
-              bgcolor:
-                computerUseMode === "off"
-                  ? "transparent"
-                  : alpha(computerUseAccent, isDark ? 0.14 : 0.1),
-              boxShadow: "none",
-              transition:
-                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease",
-              "@media (prefers-reduced-motion: reduce)": {
-                transition: "none",
-              },
-              "&:hover": {
-                bgcolor: alpha(computerUseAccent, 0.12),
-                borderColor: alpha(computerUseAccent, 0.28),
-                boxShadow: "none",
-              },
-            }}
-          >
-            <Typography
-              variant="body2"
-              noWrap
-              component="span"
-              sx={{ ...composerLabelText, color: "inherit" }}
-            >
-              {COMPUTER_USE_META[computerUseMode].label}
-            </Typography>
-          </Button>
-          <Menu
-            anchorEl={computerUseAnchor}
-            open={Boolean(computerUseAnchor)}
-            onClose={() => setComputerUseAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 300, borderRadius: 2 } } }}
-          >
-            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
-              <Typography
-                variant="subtitle2"
-                component="span"
-                sx={{
-                  display: "inline-block",
-                  cursor: "default",
-                  ...composerLabelText,
-                  color: ink,
-                }}
-              >
-                Computer Use
-              </Typography>
-              <Typography
-                variant="caption"
-                component="div"
-                sx={{ mt: 0.4, color: mut, lineHeight: 1.4 }}
-              >
-                显式开启后，AI 才能在本机观察界面并通过受控工具操作应用。
-              </Typography>
-            </Box>
-            {(Object.keys(COMPUTER_USE_META) as ComputerUseMode[]).map(
-              (key) => {
-                const rowAccent =
-                  key === "off" ? mut : theme.palette.info.main;
-                return (
-                  <Tooltip
-                    key={key}
-                    title={COMPUTER_USE_META[key].hint}
-                    placement="left"
-                    enterDelay={200}
-                  >
-                    <MenuItem
-                      selected={computerUseMode === key}
-                      onClick={() => {
-                        setComputerUseMode(key);
-                        setComputerUseAnchor(null);
-                      }}
-                      sx={{
-                        "&.Mui-selected": {
-                          bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
-                          "&:hover": {
-                            bgcolor: alpha(rowAccent, isDark ? 0.26 : 0.16),
-                          },
-                        },
-                      }}
-                    >
-                      <ListItemIcon
-                        sx={{
-                          minWidth: 40,
-                          lineHeight: 0,
-                          color: rowAccent,
-                          "& svg": { display: "block" },
-                        }}
-                      >
-                        <Laptop size={20} strokeWidth={2} color={rowAccent} />
-                      </ListItemIcon>
-                      <ListItemText
-                        primary={COMPUTER_USE_META[key].menuLabel}
-                        secondary={COMPUTER_USE_META[key].hint}
-                        primaryTypographyProps={{
-                          sx: { ...composerLabelText, color: rowAccent },
-                        }}
-                        secondaryTypographyProps={{
-                          sx: { color: mut, fontSize: 12 },
-                        }}
-                      />
-                    </MenuItem>
-                  </Tooltip>
-                );
-              },
-            )}
-            <Divider />
-            <MenuItem onClick={openComputerUseSettings}>
-              <ListItemIcon sx={{ minWidth: 40, color: mut }}>
-                <Settings size={20} strokeWidth={2} />
-              </ListItemIcon>
-              <ListItemText
-                primary="设置与运行记录"
-                secondary="配置 allowed apps、审计日志和插件状态。"
-                primaryTypographyProps={{
-                  sx: { ...composerLabelText, color: ink },
-                }}
-                secondaryTypographyProps={{
-                  sx: { color: mut, fontSize: 12 },
-                }}
-              />
-            </MenuItem>
-            <MenuItem
-              disabled={!sessionId || computerUseStopPending}
-              onClick={() => void stopComputerUseRun()}
-            >
-              <ListItemIcon sx={{ minWidth: 40, color: errorMain }}>
-                <Square fontSize="small" />
-              </ListItemIcon>
-              <ListItemText
-                primary={
-                  computerUseStopPending ? "正在停止..." : "停止当前 Computer Use run"
-                }
-                secondary="立即在 Omiga core 标记停止，阻断后续本机动作。"
-                primaryTypographyProps={{
-                  sx: { ...composerLabelText, color: errorMain },
-                }}
-                secondaryTypographyProps={{
-                  sx: { color: mut, fontSize: 12 },
-                }}
-              />
-            </MenuItem>
           </Menu>
 
           <Stack
