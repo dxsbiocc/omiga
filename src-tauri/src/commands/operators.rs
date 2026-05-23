@@ -11,8 +11,19 @@ use crate::domain::tools::{env_store::EnvStore, ToolContext};
 use crate::errors::AppError;
 use serde::Serialize;
 use serde_json::{json, Value as JsonValue};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use tauri::State;
+use std::sync::OnceLock;
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
+
+static OPERATOR_TASK_MAP: OnceLock<TokioMutex<HashMap<String, CancellationToken>>> =
+    OnceLock::new();
+
+fn operator_task_map() -> &'static TokioMutex<HashMap<String, CancellationToken>> {
+    OPERATOR_TASK_MAP.get_or_init(|| TokioMutex::new(HashMap::new()))
+}
 
 fn operator_error(error: String) -> AppError {
     AppError::Config(error)
@@ -223,6 +234,150 @@ pub async fn run_operator(
         ok: !is_error,
         result,
     })
+}
+
+/// Payload emitted on the `operator-task-{task_id}` Tauri event channel.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum OperatorTaskEvent {
+    Started {
+        task_id: String,
+        alias: String,
+    },
+    Completed {
+        task_id: String,
+        ok: bool,
+        result: JsonValue,
+    },
+    Failed {
+        task_id: String,
+        error: String,
+    },
+    Cancelled {
+        task_id: String,
+    },
+}
+
+/// Async variant of `run_operator`.  Returns immediately with `{ taskId }` and
+/// emits `operator-task-{taskId}` events as the run progresses.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_operator_async(
+    app: AppHandle,
+    state: State<'_, OmigaAppState>,
+    alias: String,
+    arguments: JsonValue,
+    project_root: Option<String>,
+    session_id: Option<String>,
+    execution_environment: Option<String>,
+    ssh_server: Option<String>,
+    sandbox_backend: Option<String>,
+    run_kind: Option<String>,
+    smoke_test_id: Option<String>,
+    smoke_test_name: Option<String>,
+    bypass_cache: Option<bool>,
+) -> CommandResult<serde_json::Value> {
+    let alias = alias.trim().to_string();
+    if alias.is_empty() {
+        return Err(AppError::Config(
+            "operator alias must not be empty".to_string(),
+        ));
+    }
+    let task_id = uuid::Uuid::new_v4().simple().to_string();
+    let arguments = if arguments.is_null() {
+        json!({})
+    } else {
+        arguments
+    };
+    let arguments_str = serde_json::to_string(&arguments)
+        .map_err(|err| AppError::Config(format!("serialize operator arguments: {err}")))?;
+
+    let ctx = build_operator_context(
+        &state,
+        project_root,
+        session_id,
+        execution_environment,
+        ssh_server,
+        sandbox_backend,
+        120,
+    )
+    .await;
+
+    let run_context = OperatorRunContext {
+        kind: run_kind,
+        smoke_test_id,
+        smoke_test_name,
+        parent_execution_id: None,
+        bypass_cache: bypass_cache.unwrap_or(false),
+    };
+
+    let cancel_token = CancellationToken::new();
+    operator_task_map()
+        .lock()
+        .await
+        .insert(task_id.clone(), cancel_token.clone());
+
+    let task_id_clone = task_id.clone();
+    let alias_clone = alias.clone();
+    let tool_name = if alias.starts_with(operators::OPERATOR_TOOL_PREFIX) {
+        alias.clone()
+    } else {
+        format!("{}{}", operators::OPERATOR_TOOL_PREFIX, alias)
+    };
+
+    tokio::spawn(async move {
+        let event = format!("operator-task-{}", task_id_clone);
+
+        let _ = app.emit(
+            &event,
+            &OperatorTaskEvent::Started {
+                task_id: task_id_clone.clone(),
+                alias: alias_clone,
+            },
+        );
+
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                let _ = app.emit(
+                    &event,
+                    &OperatorTaskEvent::Cancelled {
+                        task_id: task_id_clone.clone(),
+                    },
+                );
+            }
+            result = operators::execute_operator_tool_call_with_context(
+                &ctx,
+                &tool_name,
+                &arguments_str,
+                Some(run_context),
+            ) => {
+                let (raw, is_error) = result;
+                let parsed =
+                    serde_json::from_str::<JsonValue>(&raw).unwrap_or_else(|_| json!({ "raw": raw }));
+                let _ = app.emit(
+                    &event,
+                    &OperatorTaskEvent::Completed {
+                        task_id: task_id_clone.clone(),
+                        ok: !is_error,
+                        result: parsed,
+                    },
+                );
+            }
+        }
+
+        operator_task_map().lock().await.remove(&task_id_clone);
+    });
+
+    Ok(json!({ "taskId": task_id }))
+}
+
+/// Cancel an in-progress async operator task by its `task_id`.
+#[tauri::command]
+pub async fn cancel_operator_task(task_id: String) -> CommandResult<()> {
+    if let Some(token) = operator_task_map().lock().await.get(&task_id) {
+        token.cancel();
+    }
+    Ok(())
 }
 
 #[tauri::command]

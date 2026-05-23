@@ -5058,8 +5058,11 @@ function OperatorCatalogSection({
   registryPath,
   busy,
   environments,
+  activeTasks,
   onToggle,
   onSmokeRun,
+  onBackgroundRun,
+  onCancelTask,
   onRefreshRuns,
   onCleanupRuns,
   onOpenRun,
@@ -5072,8 +5075,16 @@ function OperatorCatalogSection({
   registryPath: string | null;
   busy: boolean;
   environments?: PluginEnvironmentSummary[];
+  /** Map of operator alias → active background task id. */
+  activeTasks?: Record<string, string>;
   onToggle: (operator: OperatorSummary, enabled: boolean) => void;
   onSmokeRun: (operator: OperatorSummary, smokeTestId?: string | null, bypassCache?: boolean) => void;
+  onBackgroundRun?: (
+    operator: OperatorSummary,
+    smokeTestId?: string | null,
+    bypassCache?: boolean,
+  ) => void;
+  onCancelTask?: (taskId: string) => void;
   onRefreshRuns: () => void;
   onCleanupRuns: (operator?: OperatorSummary) => void;
   onOpenRun: (run: OperatorRunSummary) => void;
@@ -5547,6 +5558,53 @@ function OperatorCatalogSection({
                           >
                             {operator.exposed ? `Run ${smokeLabel}` : "Register to run smoke test"}
                           </Button>
+                          {onBackgroundRun && (() => {
+                            const activeTaskId = activeTasks?.[operatorKey];
+                            if (activeTaskId) {
+                              return (
+                                <Stack direction="row" spacing={0.75} alignItems="center" sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}>
+                                  <Chip
+                                    size="small"
+                                    color="info"
+                                    label="Running…"
+                                    sx={{ height: 24, fontWeight: 600 }}
+                                  />
+                                  {onCancelTask && (
+                                    <Button
+                                      size="small"
+                                      variant="text"
+                                      color="warning"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        onCancelTask(activeTaskId);
+                                      }}
+                                      sx={{ textTransform: "none", minWidth: 0 }}
+                                    >
+                                      Cancel
+                                    </Button>
+                                  )}
+                                </Stack>
+                              );
+                            }
+                            return (
+                              <Tooltip title="Run in background — UI stays responsive while operator executes">
+                                <span>
+                                  <Button
+                                    size="small"
+                                    variant="text"
+                                    disabled={busy || !operator.exposed || envBlocked}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      onBackgroundRun(operator, selectedSmokeTestId, bypassCacheOperators[operatorKey] ?? false);
+                                    }}
+                                    sx={{ alignSelf: { xs: "flex-start", sm: "center" }, textTransform: "none" }}
+                                  >
+                                    Background
+                                  </Button>
+                                </span>
+                              </Tooltip>
+                            );
+                          })()}
                           {envBlockedReason && (
                             <Typography variant="caption" color="warning.main" sx={{ alignSelf: "center", maxWidth: 220 }}>
                               {envBlockedReason}
@@ -5627,6 +5685,9 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     setEnvironmentEnabled,
     checkPluginEnvironment,
     runOperator,
+    runOperatorAsync,
+    cancelOperatorTask,
+    activeOperatorTasks,
   } = usePluginStore();
   const [message, setMessage] = useState<string | null>(null);
   const [detailPluginId, setDetailPluginId] = useState<string | null>(null);
@@ -6141,6 +6202,33 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       } catch {
         /* ignore */
       }
+      // Store exposes the error banner.
+    }
+  };
+
+  const handleOperatorBackgroundRun = async (
+    operator: OperatorSummary,
+    smokeTestId?: string | null,
+    bypassCache?: boolean,
+  ) => {
+    const alias = operatorPrimaryAlias(operator);
+    const smokeTest = operatorSmokeTestForRun(operator, smokeTestId);
+    setMessage(null);
+    try {
+      await runOperatorAsync(
+        alias,
+        operatorSmokeRunArguments(operator, smokeTestId),
+        projectRoot,
+        operatorSurface,
+        {
+          kind: "smoke",
+          smokeTestId: smokeTest?.id ?? smokeTestId ?? null,
+          smokeTestName: smokeTest?.name ?? null,
+          bypassCache: bypassCache ?? false,
+        },
+      );
+      setMessage(`Started background run for ${operatorToolName(alias)} — you can keep working.`);
+    } catch {
       // Store exposes the error banner.
     }
   };
@@ -6700,7 +6788,14 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         busy={isMutating}
         environments={allPluginEnvironments}
         onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
-        onSmokeRun={(operator, smokeTestId) => void handleOperatorSmokeRun(operator, smokeTestId)}
+        onSmokeRun={(operator, smokeTestId, bypassCache) =>
+          void handleOperatorSmokeRun(operator, smokeTestId, bypassCache)
+        }
+        onBackgroundRun={(operator, smokeTestId, bypassCache) =>
+          void handleOperatorBackgroundRun(operator, smokeTestId, bypassCache)
+        }
+        onCancelTask={(taskId) => void cancelOperatorTask(taskId)}
+        activeTasks={activeOperatorTasks}
         onRefreshRuns={() => void handleRefreshOperatorRuns()}
         onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
         onOpenRun={(run) => void handleOpenOperatorRun(run)}
@@ -6750,7 +6845,14 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           busy={isMutating}
           environments={allPluginEnvironments}
           onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
-          onSmokeRun={(operator, smokeTestId) => void handleOperatorSmokeRun(operator, smokeTestId)}
+          onSmokeRun={(operator, smokeTestId, bypassCache) =>
+            void handleOperatorSmokeRun(operator, smokeTestId, bypassCache)
+          }
+          onBackgroundRun={(operator, smokeTestId, bypassCache) =>
+            void handleOperatorBackgroundRun(operator, smokeTestId, bypassCache)
+          }
+          onCancelTask={(taskId) => void cancelOperatorTask(taskId)}
+          activeTasks={activeOperatorTasks}
           onRefreshRuns={() => void handleRefreshOperatorRuns()}
           onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
           onOpenRun={(run) => void handleOpenOperatorRun(run)}
