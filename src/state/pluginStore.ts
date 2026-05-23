@@ -600,6 +600,7 @@ interface PluginState {
     projectRoot?: string,
     surface?: OperatorExecutionSurfaceArgs,
     runContext?: OperatorRunContext,
+    onTerminal?: (event: OperatorTaskEvent) => void | Promise<void>,
   ) => Promise<{ taskId: string }>;
   cancelOperatorTask: (taskId: string) => Promise<void>;
 }
@@ -1587,6 +1588,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     projectRoot?: string,
     surface?: OperatorExecutionSurfaceArgs,
     runContext?: OperatorRunContext,
+    onTerminal?: (event: OperatorTaskEvent) => void | Promise<void>,
   ) => {
     const response = await invoke<{ taskId: string }>("run_operator_async", {
       alias,
@@ -1649,6 +1651,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
             };
           });
           await get().loadOperatorRuns(projectRoot, surface);
+          await onTerminal?.(payload);
           unlisten();
         }
       },
