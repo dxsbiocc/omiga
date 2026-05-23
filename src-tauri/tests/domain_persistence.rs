@@ -94,6 +94,7 @@ async fn background_agent_messages_append_order() {
     let t1 = Message::Tool {
         tool_call_id: "tu1".to_string(),
         output: "out".to_string(),
+        is_error: None,
     };
     repo.append_background_agent_message("bg-task-msg", &session_id, &u1)
         .await
@@ -208,6 +209,7 @@ async fn background_agent_messages_sanitize_opaque_object_text() {
     let tool = Message::Tool {
         tool_call_id: "opaque-call".to_string(),
         output: "[object Object]".to_string(),
+        is_error: None,
     };
 
     repo.append_background_agent_messages_batch(

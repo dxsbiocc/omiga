@@ -318,6 +318,7 @@ export interface OperatorRunContext {
   kind?: string | null;
   smokeTestId?: string | null;
   smokeTestName?: string | null;
+  bypassCache?: boolean;
 }
 
 export interface OperatorRunSummary {
@@ -484,6 +485,7 @@ interface PluginState {
   operatorDiagnostics: OperatorManifestDiagnostic[];
   operatorRegistryPath: string | null;
   operatorRuns: OperatorRunSummary[];
+  envCheckResults: Map<string, PluginEnvironmentCheckResult>;
   retrievalStatuses: PluginRetrievalRouteStatus[];
   processPoolStatuses: PluginProcessPoolRouteStatus[];
   remoteMarketplaceChecks: MarketplaceRemoteCheckResult[];
@@ -491,7 +493,8 @@ interface PluginState {
   isMutating: boolean;
   error: string | null;
   loadPlugins: (projectRoot?: string, surface?: OperatorExecutionSurfaceArgs) => Promise<void>;
-  loadOperators: () => Promise<void>;
+  loadOperators: (projectRoot?: string) => Promise<void>;
+  refreshExposedOperatorEnvs: (projectRoot?: string) => Promise<void>;
   loadOperatorRuns: (projectRoot?: string, surface?: OperatorExecutionSurfaceArgs) => Promise<void>;
   readOperatorRun: (
     runId: string,
@@ -551,7 +554,7 @@ interface PluginState {
     projectRoot?: string,
   ) => Promise<void>;
   checkPluginEnvironment: (
-    plugin: PluginSummary,
+    plugin: PluginSummary | string,
     envRef: string,
     projectRoot?: string,
   ) => Promise<PluginEnvironmentCheckResult>;
@@ -895,6 +898,15 @@ function operatorSurfacePayload(surface?: OperatorExecutionSurfaceArgs) {
   };
 }
 
+function getEnvRef(runtime: Record<string, unknown> | null | undefined): string | null {
+  if (!runtime) return null;
+  for (const key of ["envRef", "environmentRef", "environment"]) {
+    const v = runtime[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
 function stringField(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
@@ -967,6 +979,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   operatorDiagnostics: [],
   operatorRegistryPath: null,
   operatorRuns: [],
+  envCheckResults: new Map(),
   retrievalStatuses: [],
   processPoolStatuses: [],
   remoteMarketplaceChecks: [],
@@ -999,6 +1012,8 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         invoke<OperatorRunSummary[]>("list_operator_runs", {
           projectRoot,
           ...operatorSurfacePayload(surface),
+          statusFilter: undefined,
+          afterMs: undefined,
         }),
       ]);
       set({
@@ -1016,7 +1031,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     }
   },
 
-  loadOperators: async () => {
+  loadOperators: async (projectRoot?: string) => {
     try {
       const operatorCatalog = await invoke<OperatorCatalogResponse>("list_operators");
       set({
@@ -1024,8 +1039,26 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         operatorDiagnostics: operatorCatalog.diagnostics ?? [],
         operatorRegistryPath: operatorCatalog.registryPath,
       });
+      get().refreshExposedOperatorEnvs(projectRoot);
     } catch (e) {
       set({ error: extractErrorMessage(e) });
+    }
+  },
+
+  refreshExposedOperatorEnvs: async (projectRoot?: string) => {
+    const { operators, checkPluginEnvironment } = get();
+    const seen = new Set<string>();
+    for (const op of operators) {
+      if (!op.exposed) continue;
+      const envRef = getEnvRef(op.runtime as Record<string, unknown> | null);
+      if (!envRef || seen.has(envRef)) continue;
+      seen.add(envRef);
+      try {
+        const result = await checkPluginEnvironment(op.sourcePlugin, envRef, projectRoot);
+        set({ envCheckResults: new Map(get().envCheckResults).set(envRef, result) });
+      } catch {
+        // best-effort: ignore individual check failures
+      }
     }
   },
 
@@ -1039,6 +1072,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         {
           projectRoot,
           ...operatorSurfacePayload(surface),
+          afterMs: undefined,
         },
       );
       set({ operatorRuns });
@@ -1391,15 +1425,18 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   },
 
   checkPluginEnvironment: async (
-    plugin: PluginSummary,
+    plugin: PluginSummary | string,
     envRef: string,
     projectRoot?: string,
   ) => {
+    const pluginId = typeof plugin === "string" ? plugin : plugin.id;
+    const marketplacePath = typeof plugin === "string" ? undefined : plugin.marketplacePath;
+    const pluginName = typeof plugin === "string" ? undefined : plugin.name;
     try {
       return await invoke<PluginEnvironmentCheckResult>("check_omiga_plugin_environment", {
-        pluginId: plugin.id,
-        marketplacePath: plugin.marketplacePath,
-        pluginName: plugin.name,
+        pluginId,
+        marketplacePath,
+        pluginName,
         envRef,
         projectRoot,
       });
@@ -1427,6 +1464,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         runKind: runContext?.kind ?? null,
         smokeTestId: runContext?.smokeTestId ?? null,
         smokeTestName: runContext?.smokeTestName ?? null,
+        bypassCache: runContext?.bypassCache ?? false,
       });
       await get().loadOperatorRuns(projectRoot, surface);
       const summary = summarizeOperatorRunResult(response.result);

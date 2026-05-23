@@ -723,6 +723,7 @@ async fn execute_template_via_migration_target(
         smoke_test_id: Some(template.spec.metadata.id.clone()),
         smoke_test_name: template.spec.metadata.name.clone(),
         parent_execution_id: parent_execution_id.map(str::to_string),
+        bypass_cache: false,
     };
     let (raw, is_error) =
         crate::domain::operators::execute_resolved_operator_tool_call_with_context(
@@ -814,6 +815,7 @@ async fn execute_rendered_template(
         smoke_test_id: Some(template.spec.metadata.id.clone()),
         smoke_test_name: template.spec.metadata.name.clone(),
         parent_execution_id: parent_execution_id.map(str::to_string),
+        bypass_cache: false,
     };
     let (raw, is_error) =
         crate::domain::operators::execute_resolved_operator_tool_call_with_context(

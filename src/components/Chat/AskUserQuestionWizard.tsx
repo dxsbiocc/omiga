@@ -31,6 +31,10 @@ export interface AskUserQuestionItem {
   header: string;
   multiSelect?: boolean;
   options: AskUserQuestionOption[];
+  /** Operator param name this question controls. */
+  param?: string | null;
+  /** When set, this question is only shown if the referenced param has the given value. */
+  showWhen?: { param: string; value: string } | null;
 }
 
 function parseMultiLabels(raw: string): string[] {
@@ -88,16 +92,38 @@ export function AskUserQuestionWizard({
     setStep(0);
   }, [resetKey]);
 
-  const total = questions.length;
+  // Build param→current-answer lookup for conditional display
+  const paramToAnswer = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const q of questions) {
+      if (!q.param) continue;
+      const ans = selections[q.question.trim()];
+      if (ans != null) map[q.param] = ans;
+    }
+    return map;
+  }, [questions, selections]);
+
+  // Filter out questions whose showWhen condition is not met
+  const visibleQuestions = useMemo(
+    () =>
+      questions.filter((q) => {
+        if (!q.showWhen) return true;
+        const current = paramToAnswer[q.showWhen.param] ?? "";
+        return current.trim() === q.showWhen.value.trim();
+      }),
+    [questions, paramToAnswer],
+  );
+
+  const total = visibleQuestions.length;
   const safeIndex = Math.min(Math.max(0, step), Math.max(0, total - 1));
-  const q = questions[safeIndex];
+  const q = visibleQuestions[safeIndex];
   const stepNum = safeIndex + 1;
 
   const currentAnswered = q ? isQuestionAnswered(q, selections) : false;
 
   const allAnswered = useMemo(
-    () => questions.every((qq) => isQuestionAnswered(qq, selections)),
-    [questions, selections],
+    () => visibleQuestions.every((qq) => isQuestionAnswered(qq, selections)),
+    [visibleQuestions, selections],
   );
 
   const goPrev = () => setStep((s) => Math.max(0, s - 1));

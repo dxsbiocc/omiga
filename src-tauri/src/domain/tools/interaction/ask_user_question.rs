@@ -46,6 +46,18 @@ pub struct QuestionItem {
     pub options: Vec<QuestionOption>,
     #[serde(default, rename = "multiSelect")]
     pub multi_select: bool,
+    /// Operator param name this question controls (used for conditional display).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
+    /// When set, this question is only shown if `param` equals `value` for the referenced question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<QuestionShowWhen>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionShowWhen {
+    pub param: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +280,8 @@ mod tests {
             question: "Which crate?".to_string(),
             header: "Crate".to_string(),
             multi_select: false,
+            param: None,
+            show_when: None,
             options: vec![
                 QuestionOption {
                     label: "tokio".to_string(),
@@ -358,6 +372,8 @@ mod tests {
                 question: "Pick many?".to_string(),
                 header: "Many".to_string(),
                 multi_select: true,
+                param: None,
+                show_when: None,
                 options: vec![
                     QuestionOption {
                         label: "A".to_string(),

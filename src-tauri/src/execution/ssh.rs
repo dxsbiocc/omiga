@@ -778,23 +778,24 @@ impl SshRsyncWorker {
 
         // ── Fetch remote manifest (one SSH command) ───────────────────────────
         let remote_manifest_json = self
-            .ssh_cat_file(
-                &format!("~/{}", SyncManifest::REMOTE_REL_PATH),
-                5_000,
-            )
+            .ssh_cat_file(&format!("~/{}", SyncManifest::REMOTE_REL_PATH), 5_000)
             .await
             .unwrap_or_else(|| "{}".to_string());
         let remote_manifest = SyncManifest::from_json(&remote_manifest_json);
 
         // ── Compute local manifest and diff ───────────────────────────────────
         let local_manifest = SyncManifest::compute(&entries);
-        let changed_rels: std::collections::HashSet<&str> =
-            local_manifest.changed_vs(&remote_manifest).into_iter().collect();
+        let changed_rels: std::collections::HashSet<&str> = local_manifest
+            .changed_vs(&remote_manifest)
+            .into_iter()
+            .collect();
 
         if changed_rels.is_empty() {
             tracing::debug!(
                 "SSH sync: all {} file(s) up to date for {}@{}",
-                entries.len(), self.user, self.host
+                entries.len(),
+                self.user,
+                self.host
             );
             return;
         }
@@ -806,7 +807,10 @@ impl SshRsyncWorker {
 
         tracing::info!(
             "SSH sync: {}/{} file(s) changed, transferring to {}@{}",
-            changed_entries.len(), entries.len(), self.user, self.host
+            changed_entries.len(),
+            entries.len(),
+            self.user,
+            self.host
         );
 
         // ── Transfer via tar pipe through ControlMaster socket ────────────────
@@ -823,7 +827,11 @@ impl SshRsyncWorker {
             self.write_remote_manifest(&local_manifest).await;
             tracing::debug!("SSH sync: manifest updated for {}@{}", self.user, self.host);
         } else {
-            tracing::warn!("SSH sync: tar transfer failed for {}@{}", self.user, self.host);
+            tracing::warn!(
+                "SSH sync: tar transfer failed for {}@{}",
+                self.user,
+                self.host
+            );
         }
     }
 
@@ -897,7 +905,10 @@ impl SshRsyncWorker {
     /// Fetch a small text file from the remote via SSH.
     async fn ssh_cat_file(&self, remote_path: &str, timeout_ms: u64) -> Option<String> {
         self.ssh_run_cmd(
-            &format!("cat {} 2>/dev/null || echo '{{}}'", sh_single_quote(remote_path)),
+            &format!(
+                "cat {} 2>/dev/null || echo '{{}}'",
+                sh_single_quote(remote_path)
+            ),
             timeout_ms,
         )
         .await

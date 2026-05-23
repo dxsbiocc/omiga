@@ -102,9 +102,20 @@ pub async fn save_user_script_operator(
     name: String,
     description: String,
     argv: Vec<String>,
+    inputs: Option<Vec<operators::UserOperatorInput>>,
+    params: Option<Vec<operators::UserOperatorParam>>,
+    outputs: Option<Vec<operators::UserOperatorOutput>>,
 ) -> CommandResult<String> {
-    let path = operators::save_user_script_operator(&id, &name, &description, &argv)
-        .map_err(crate::errors::AppError::Config)?;
+    let path = operators::save_user_script_operator(
+        &id,
+        &name,
+        &description,
+        &argv,
+        inputs.as_deref().unwrap_or(&[]),
+        params.as_deref().unwrap_or(&[]),
+        outputs.as_deref().unwrap_or(&[]),
+    )
+    .map_err(crate::errors::AppError::Config)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -163,6 +174,7 @@ pub async fn run_operator(
     run_kind: Option<String>,
     smoke_test_id: Option<String>,
     smoke_test_name: Option<String>,
+    bypass_cache: Option<bool>,
 ) -> CommandResult<OperatorRunResponse> {
     let alias = alias.trim();
     if alias.is_empty() {
@@ -197,6 +209,7 @@ pub async fn run_operator(
         smoke_test_id,
         smoke_test_name,
         parent_execution_id: None,
+        bypass_cache: bypass_cache.unwrap_or(false),
     };
     let (raw, is_error) = operators::execute_operator_tool_call_with_context(
         &ctx,
@@ -220,6 +233,8 @@ pub async fn list_operator_runs(
     execution_environment: Option<String>,
     ssh_server: Option<String>,
     sandbox_backend: Option<String>,
+    status_filter: Option<String>,
+    after_ms: Option<u64>,
 ) -> CommandResult<Vec<OperatorRunSummary>> {
     let ctx = build_operator_context(
         &state,
@@ -231,9 +246,26 @@ pub async fn list_operator_runs(
         30,
     )
     .await;
-    operators::list_operator_runs_for_context(&ctx, 25)
+    let mut runs = operators::list_operator_runs_for_context(&ctx, 100)
         .await
-        .map_err(operator_error)
+        .map_err(operator_error)?;
+    if let Some(filter) = status_filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        runs.retain(|run| run.status.trim().eq_ignore_ascii_case(filter));
+    }
+    if let Some(after_ms) = after_ms {
+        runs.retain(|run| {
+            run.updated_at
+                .as_deref()
+                .and_then(|updated_at| chrono::DateTime::parse_from_rfc3339(updated_at).ok())
+                .map(|updated_at| updated_at.timestamp_millis() >= after_ms as i64)
+                .unwrap_or(true)
+        });
+    }
+    Ok(runs)
 }
 
 #[tauri::command]

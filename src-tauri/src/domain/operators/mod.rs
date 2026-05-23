@@ -189,6 +189,16 @@ pub struct OperatorPreflightQuestionSpec {
     #[serde(default)]
     pub ask_when: OperatorPreflightAskWhen,
     pub options: Vec<OperatorPreflightOptionSpec>,
+    /// When set, the question is only shown if the referenced param currently equals the given value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_when: Option<OperatorPreflightShowWhen>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorPreflightShowWhen {
+    pub param: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -877,6 +887,29 @@ fn discover_user_operator_candidates() -> Vec<OperatorSpec> {
         .collect()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserOperatorInput {
+    pub name: String,
+    pub kind: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserOperatorParam {
+    pub name: String,
+    pub kind: String,
+    pub default: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserOperatorOutput {
+    pub name: String,
+    pub glob: String,
+}
+
 /// Create or replace a user script operator YAML in `~/.omiga/user-operators/`.
 ///
 /// `argv` is the command array, e.g. `["bash", "-c", "echo hello"]`.
@@ -885,6 +918,9 @@ pub fn save_user_script_operator(
     name: &str,
     description: &str,
     argv: &[String],
+    inputs: &[UserOperatorInput],
+    params: &[UserOperatorParam],
+    outputs: &[UserOperatorOutput],
 ) -> Result<PathBuf, String> {
     if id.is_empty() {
         return Err("operator id must not be empty".to_string());
@@ -907,9 +943,12 @@ pub fn save_user_script_operator(
     } else {
         format!("\n  description: {}", serde_yaml_escape(description))
     };
+    let inputs_yaml = user_operator_inputs_yaml(inputs);
+    let params_yaml = user_operator_params_yaml(params);
+    let outputs_yaml = user_operator_outputs_yaml(outputs);
 
     let content = format!(
-        "apiVersion: omiga.ai/operator/v1alpha1\nkind: Operator\nmetadata:\n  id: {id}\n  version: 0.1.0\n  name: {name}{desc_line}\nexecution:\n  argv:\n{argv_yaml}\ninterface:\n  inputs: {{}}\n  params: {{}}\n  outputs: {{}}\n",
+        "apiVersion: omiga.ai/operator/v1alpha1\nkind: Operator\nmetadata:\n  id: {id}\n  version: 0.1.0\n  name: {name}{desc_line}\nexecution:\n  argv:\n{argv_yaml}\ninterface:\n{inputs_yaml}\n{params_yaml}\n{outputs_yaml}\n",
         id = serde_yaml_escape(id),
         name = serde_yaml_escape(name),
     );
@@ -919,6 +958,50 @@ pub fn save_user_script_operator(
     fs::write(&path, content).map_err(|e| format!("write user operator: {e}"))?;
     tracing::info!("user operator saved: {:?}", path);
     Ok(path)
+}
+
+fn user_operator_inputs_yaml(inputs: &[UserOperatorInput]) -> String {
+    if inputs.is_empty() {
+        return "  inputs: {}".to_string();
+    }
+
+    let mut lines = vec!["  inputs:".to_string()];
+    for input in inputs {
+        lines.push(format!("    {}:", serde_yaml_escape(&input.name)));
+        lines.push(format!("      kind: {}", serde_yaml_escape(&input.kind)));
+        lines.push(format!("      required: {}", input.required));
+    }
+    lines.join("\n")
+}
+
+fn user_operator_params_yaml(params: &[UserOperatorParam]) -> String {
+    if params.is_empty() {
+        return "  params: {}".to_string();
+    }
+
+    let mut lines = vec!["  params:".to_string()];
+    for param in params {
+        lines.push(format!("    {}:", serde_yaml_escape(&param.name)));
+        lines.push(format!("      kind: {}", serde_yaml_escape(&param.kind)));
+        let default = param.default.trim();
+        if !default.is_empty() {
+            lines.push(format!("      default: {}", serde_yaml_escape(default)));
+        }
+    }
+    lines.join("\n")
+}
+
+fn user_operator_outputs_yaml(outputs: &[UserOperatorOutput]) -> String {
+    if outputs.is_empty() {
+        return "  outputs: {}".to_string();
+    }
+
+    let mut lines = vec!["  outputs:".to_string()];
+    for output in outputs {
+        lines.push(format!("    {}:", serde_yaml_escape(&output.name)));
+        lines.push(format!("      glob: {}", serde_yaml_escape(&output.glob)));
+    }
+    lines.join("\n")
 }
 
 fn sanitize_id(id: &str) -> String {
@@ -982,6 +1065,7 @@ pub fn list_operator_authoring_diagnostics() -> Vec<OperatorManifestDiagnostic> 
             operator_preflight_authoring_diagnostics(spec)
                 .into_iter()
                 .chain(operator_external_network_authoring_diagnostics(spec))
+                .chain(operator_interface_authoring_diagnostics(spec))
         })
         .collect::<Vec<_>>();
     diagnostics.sort_by(|left, right| {
@@ -1076,6 +1160,53 @@ fn operator_external_network_authoring_diagnostics(
         });
     }
 
+    diagnostics
+}
+
+fn operator_interface_authoring_diagnostics(
+    spec: &OperatorSpec,
+) -> Vec<OperatorManifestDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let preflight_param_ids: std::collections::HashSet<&str> = spec
+        .preflight
+        .as_ref()
+        .map(|pf| pf.questions.iter().map(|q| q.param.as_str()).collect())
+        .unwrap_or_default();
+    for (param_name, param_spec) in &spec.interface.params {
+        if param_spec.required && !preflight_param_ids.contains(param_name.as_str()) {
+            diagnostics.push(OperatorManifestDiagnostic {
+                source_plugin: spec.source.source_plugin.clone(),
+                manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+                severity: "warning".to_string(),
+                message: format!(
+                    "param `{param_name}` is required but has no preflight question; non-interactive callers must always supply it",
+                ),
+            });
+        }
+    }
+    for (output_name, output_spec) in &spec.interface.outputs {
+        let is_file_like = matches!(
+            output_spec.kind,
+            OperatorFieldKind::File | OperatorFieldKind::FileArray
+        );
+        if is_file_like
+            && output_spec
+                .glob
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            diagnostics.push(OperatorManifestDiagnostic {
+                source_plugin: spec.source.source_plugin.clone(),
+                manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+                severity: "warning".to_string(),
+                message: format!(
+                    "output `{output_name}` is a file kind but has no glob pattern; the runtime cannot collect it",
+                ),
+            });
+        }
+    }
     diagnostics
 }
 
@@ -1805,6 +1936,13 @@ pub fn operator_preflight_question_for_spec_with_recommended_params(
                 question: question.question.clone(),
                 header: question.header.clone(),
                 multi_select: question.multi_select,
+                param: Some(question.param.clone()),
+                show_when: question.show_when.as_ref().map(|sw| {
+                    crate::domain::tools::ask_user_question::QuestionShowWhen {
+                        param: sw.param.clone(),
+                        value: sw.value.clone(),
+                    }
+                }),
                 options: ask_options_from_specs(
                     question,
                     recommended_params.and_then(|params| params.get(&question.param)),
@@ -2480,6 +2618,9 @@ pub struct OperatorRunContext {
     pub smoke_test_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_execution_id: Option<String>,
+    /// When true, skip cache lookup even if the operator manifest enables caching.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bypass_cache: bool,
 }
 
 impl OperatorRunContext {
@@ -2511,6 +2652,7 @@ impl OperatorRunContext {
             smoke_test_id: normalize_optional_string(self.smoke_test_id),
             smoke_test_name: normalize_optional_string(self.smoke_test_name),
             parent_execution_id: normalize_optional_string(self.parent_execution_id),
+            bypass_cache: self.bypass_cache,
         };
         (!normalized.is_empty()).then_some(normalized)
     }
@@ -3373,6 +3515,9 @@ fn operator_cache_metadata(
 }
 
 fn operator_cache_enabled(spec: &OperatorSpec, run_context: Option<&OperatorRunContext>) -> bool {
+    if run_context.map(|ctx| ctx.bypass_cache).unwrap_or(false) {
+        return false;
+    }
     if run_context
         .and_then(|context| context.kind.as_deref())
         .map(|kind| kind.eq_ignore_ascii_case("smoke"))
@@ -4984,7 +5129,24 @@ async fn execute_in_environment(
         &staged_argv,
         &effective_inputs,
     );
-    let result = execute_env_command(ctx, run_dir, &command, walltime_secs).await?;
+    let slurm = operator_uses_slurm_scheduler(&resolved.spec, ctx);
+    let cpu_count = effective_resources
+        .get("cpu")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as u32;
+    let result = if slurm {
+        execute_via_slurm(
+            ctx,
+            run_dir,
+            &command,
+            walltime_secs,
+            cpu_count,
+            &resolved.spec.metadata.id,
+        )
+        .await?
+    } else {
+        execute_env_command(ctx, run_dir, &command, walltime_secs).await?
+    };
     let stdout_tail = remote_tail(ctx, run_dir, "logs/stdout.txt").await;
     let stderr_tail = remote_tail(ctx, run_dir, "logs/stderr.txt").await;
     if result.returncode != 0 {
@@ -5222,6 +5384,154 @@ async fn execute_env_command(
 
 fn operator_environment_cwd(ctx: &crate::domain::tools::ToolContext) -> String {
     crate::domain::tools::env_store::remote_path(ctx, ".")
+}
+
+fn operator_uses_slurm_scheduler(
+    spec: &OperatorSpec,
+    ctx: &crate::domain::tools::ToolContext,
+) -> bool {
+    if ctx.execution_environment.trim().to_ascii_lowercase() != "ssh" {
+        return false;
+    }
+    let Some(runtime) = spec.runtime.as_ref() else {
+        return false;
+    };
+    runtime_axis_values(runtime, "scheduler")
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("slurm"))
+}
+
+/// Submit the operator command via sbatch and poll squeue until completion.
+/// Returns a synthetic ExecResult compatible with the normal execution path.
+async fn execute_via_slurm(
+    ctx: &crate::domain::tools::ToolContext,
+    run_dir: &str,
+    command: &str,
+    walltime_secs: u64,
+    cpus: u32,
+    operator_id: &str,
+) -> Result<crate::execution::ExecResult, OperatorToolError> {
+    let safe_id = operator_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let walltime_hhmmss = {
+        let h = walltime_secs / 3600;
+        let m = (walltime_secs % 3600) / 60;
+        let s = walltime_secs % 60;
+        format!("{h:02}:{m:02}:{s:02}")
+    };
+    let script = format!(
+        "#!/bin/bash\n#SBATCH --job-name=omiga_{safe_id}\n#SBATCH --output={run_dir}/logs/stdout.txt\n#SBATCH --error={run_dir}/logs/stderr.txt\n#SBATCH --cpus-per-task={cpus}\n#SBATCH --time={walltime_hhmmss}\n\nset +e\ncd {run_dir}\n{command}\necho $? > {run_dir}/logs/exit_code.txt\n",
+        run_dir = sh_quote(run_dir),
+    );
+    // Write sbatch script to remote
+    let script_path = format!("{run_dir}/omiga_slurm.sh");
+    let write_cmd = format!(
+        "cat > {} << 'OMIGA_SBATCH_EOF'\n{}\nOMIGA_SBATCH_EOF\nchmod +x {}",
+        sh_quote(&script_path),
+        script,
+        sh_quote(&script_path)
+    );
+    execute_env_command(ctx, run_dir, &write_cmd, 30).await?;
+    // Submit job
+    let submit_cmd = format!("sbatch {}", sh_quote(&script_path));
+    let submit_result = execute_env_command(ctx, run_dir, &submit_cmd, 30).await?;
+    if submit_result.returncode != 0 {
+        return Err(OperatorToolError::new(
+            "slurm_submission_failed",
+            false,
+            format!(
+                "sbatch failed with code {}: {}",
+                submit_result.returncode,
+                submit_result.output.trim()
+            ),
+        )
+        .with_run_dir(run_dir)
+        .with_suggested_action("Ensure SLURM is available and sbatch is on PATH."));
+    }
+    let job_id = submit_result
+        .output
+        .split('\n')
+        .find_map(|line: &str| {
+            line.trim()
+                .strip_prefix("Submitted batch job ")
+                .map(|s| s.trim().to_string())
+        })
+        .ok_or_else(|| {
+            OperatorToolError::new(
+                "slurm_job_id_missing",
+                false,
+                format!(
+                    "Could not parse job ID from sbatch output: {}",
+                    submit_result.output.trim()
+                ),
+            )
+            .with_run_dir(run_dir)
+        })?;
+    // Write job ID for provenance
+    let record_cmd = format!(
+        "echo {} > {}/logs/slurm_job_id.txt",
+        sh_quote(&job_id),
+        sh_quote(run_dir)
+    );
+    let _ = execute_env_command(ctx, run_dir, &record_cmd, 10).await;
+    // Poll squeue every 15 seconds
+    let poll_interval = std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(walltime_secs + 120);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            // Cancel job on timeout
+            let _ =
+                execute_env_command(ctx, run_dir, &format!("scancel {}", sh_quote(&job_id)), 10)
+                    .await;
+            return Err(OperatorToolError::new(
+                "slurm_timeout",
+                false,
+                "SLURM job exceeded walltime limit.",
+            )
+            .with_run_dir(run_dir));
+        }
+        let poll_cmd = format!(
+            "squeue --noheader -j {} -o '%T' 2>/dev/null || true",
+            sh_quote(&job_id)
+        );
+        let poll = execute_env_command(ctx, run_dir, &poll_cmd, 30).await?;
+        let state = poll.output.trim().to_ascii_uppercase();
+        if state.contains("FAILED")
+            || state.contains("CANCELLED")
+            || state.contains("TIMEOUT")
+            || state.contains("NODE_FAIL")
+        {
+            return Err(OperatorToolError::new(
+                "slurm_job_failed",
+                false,
+                format!("SLURM job {job_id} ended with state: {state}"),
+            )
+            .with_run_dir(run_dir)
+            .with_suggested_action("Check the SLURM logs in the run directory."));
+        }
+        if state.is_empty() {
+            // Job finished — read exit code
+            let code_cmd = format!(
+                "cat {}/logs/exit_code.txt 2>/dev/null || echo 0",
+                sh_quote(run_dir)
+            );
+            let code_result = execute_env_command(ctx, run_dir, &code_cmd, 10).await?;
+            let returncode = code_result.output.trim().parse::<i32>().unwrap_or(0);
+            return Ok(crate::execution::ExecResult {
+                returncode,
+                output: format!("SLURM job {job_id} completed"),
+            });
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 fn command_with_log_capture(argv: &[String]) -> String {
@@ -8998,6 +9308,7 @@ execution:
                 empty: true,
                 values: vec![json!("auto")],
             },
+            show_when: None,
             options: vec![
                 OperatorPreflightOptionSpec {
                     label: "Auto".to_string(),
@@ -9090,6 +9401,7 @@ execution:
                     empty: false,
                     values: Vec::new(),
                 },
+                show_when: None,
                 options: vec![
                     OperatorPreflightOptionSpec {
                         label: "Auto".to_string(),
@@ -9156,6 +9468,7 @@ execution:
                     empty: true,
                     values: Vec::new(),
                 },
+                show_when: None,
                 options: vec![
                     OperatorPreflightOptionSpec {
                         label: "Auto".to_string(),
@@ -9331,6 +9644,7 @@ execution:
                 empty: false,
                 values: Vec::new(),
             },
+            show_when: None,
             options: vec![
                 OperatorPreflightOptionSpec {
                     label: "A".to_string(),
@@ -9372,6 +9686,7 @@ execution:
                 empty: false,
                 values: Vec::new(),
             },
+            show_when: None,
             options: vec![
                 OperatorPreflightOptionSpec {
                     label: "FDR 0.05".to_string(),
@@ -9479,6 +9794,7 @@ execution:
                 smoke_test_id: Some("default".to_string()),
                 smoke_test_name: Some("Active container smoke".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
@@ -10767,6 +11083,7 @@ runtime:
                 smoke_test_id: Some("default".to_string()),
                 smoke_test_name: Some("Write text report smoke".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
@@ -10909,6 +11226,7 @@ runtime:
             smoke_test_id: Some("default".to_string()),
             smoke_test_name: Some("Cache bypass smoke".to_string()),
             parent_execution_id: None,
+            bypass_cache: false,
         });
 
         let first = execute_resolved_operator(
@@ -10985,6 +11303,7 @@ runtime:
                 smoke_test_id: Some("offline-fixture".to_string()),
                 smoke_test_name: Some("PubMed offline fixture".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
@@ -11041,6 +11360,7 @@ runtime:
                 smoke_test_id: Some("offline-fixture".to_string()),
                 smoke_test_name: Some("GEO offline fixture".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
@@ -11099,6 +11419,7 @@ runtime:
                 smoke_test_id: Some("offline-fixture".to_string()),
                 smoke_test_name: Some("UniProt offline fixture".to_string()),
                 parent_execution_id: None,
+                bypass_cache: false,
             }),
         )
         .await
