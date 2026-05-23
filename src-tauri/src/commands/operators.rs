@@ -9,7 +9,7 @@ use crate::domain::operators::{
 };
 use crate::domain::tools::{env_store::EnvStore, ToolContext};
 use crate::errors::AppError;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -80,15 +80,6 @@ pub struct OperatorDescribeResponse {
 pub struct OperatorRunResponse {
     pub ok: bool,
     pub result: JsonValue,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChainStep {
-    pub alias: String,
-    pub arguments: JsonValue,
-    /// Optional input field name that should receive the previous step's outputDir.
-    pub inherit_prev_output_as: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +182,28 @@ pub async fn get_user_operators_dir() -> CommandResult<String> {
     Ok(operators::user_operators_dir()
         .to_string_lossy()
         .into_owned())
+}
+
+#[tauri::command]
+pub async fn list_chain_templates() -> CommandResult<Vec<operators::ChainTemplate>> {
+    Ok(operators::list_user_chain_templates())
+}
+
+#[tauri::command]
+pub async fn save_chain_template(
+    id: String,
+    name: String,
+    description: Option<String>,
+    steps: Vec<operators::ChainStep>,
+) -> CommandResult<String> {
+    let path = operators::save_user_chain_template(&id, &name, description.as_deref(), &steps)
+        .map_err(crate::errors::AppError::Config)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn delete_chain_template(id: String) -> CommandResult<()> {
+    operators::delete_user_chain_template(&id).map_err(crate::errors::AppError::Config)
 }
 
 #[tauri::command]
@@ -538,7 +551,7 @@ fn chain_step_failure(alias: String, error: String) -> ChainStepResult {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_operator_chain(
     state: State<'_, OmigaAppState>,
-    steps: Vec<ChainStep>,
+    steps: Vec<operators::ChainStep>,
     project_root: Option<String>,
     session_id: Option<String>,
     execution_environment: Option<String>,

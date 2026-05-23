@@ -10,6 +10,7 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Divider,
   IconButton,
   MenuItem,
   Paper,
@@ -26,12 +27,16 @@ import {
   ArrowUpwardRounded,
   CloseRounded,
   DeleteOutlineRounded,
+  FolderOpenRounded,
+  SaveRounded,
 } from "@mui/icons-material";
-import type {
-  OperatorChainStep,
-  OperatorFieldSpec,
-  OperatorInvocationArguments,
-  OperatorSummary,
+import {
+  usePluginStore,
+  type ChainTemplate,
+  type OperatorChainStep,
+  type OperatorFieldSpec,
+  type OperatorInvocationArguments,
+  type OperatorSummary,
 } from "../../state/pluginStore";
 
 type OperatorChainEditorDialogProps = {
@@ -70,6 +75,11 @@ const operatorDisplayName = (operator: OperatorSummary): string =>
 
 const operatorPrimaryAlias = (operator: OperatorSummary): string =>
   operator.enabledAliases.find((alias) => alias.trim().length > 0) || operator.id;
+
+const normalizeOperatorAlias = (alias: string): string => {
+  const trimmed = alias.trim();
+  return trimmed.startsWith("operator__") ? trimmed.slice("operator__".length) : trimmed;
+};
 
 const fieldKey = (field: FocusedField): string =>
   `${field.stepId}::${field.group}::${field.name}`;
@@ -171,6 +181,64 @@ const requiredFieldsComplete = (
     return (values[name] ?? "").trim().length > 0;
   });
 
+const stringifyArgumentValue = (value: unknown): string => {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+
+const valuesFromTemplateStep = (
+  operator: OperatorSummary,
+  step: OperatorChainStep,
+): ChainEditorStep["values"] => {
+  const values = createValuesForOperator(operator);
+  const inputs = step.arguments.inputs ?? {};
+  const params = step.arguments.params ?? {};
+  for (const [name] of sortedFieldEntries(operator.interface?.inputs)) {
+    if (Object.prototype.hasOwnProperty.call(inputs, name)) {
+      values.inputs[name] = stringifyArgumentValue(inputs[name]);
+    }
+  }
+  for (const [name] of sortedFieldEntries(operator.interface?.params)) {
+    if (Object.prototype.hasOwnProperty.call(params, name)) {
+      values.params[name] = stringifyArgumentValue(params[name]);
+    }
+  }
+  return values;
+};
+
+const slugifyTemplateName = (name: string): string =>
+  name
+    .trim()
+    .replace(/[^a-z0-9-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase() || "chain-template";
+
+const formatTemplateRelativeTime = (timestampMs: number): string => {
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return "unknown";
+  const diffMs = timestampMs - Date.now();
+  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 1000 * 60 * 60 * 24 * 365],
+    ["month", 1000 * 60 * 60 * 24 * 30],
+    ["week", 1000 * 60 * 60 * 24 * 7],
+    ["day", 1000 * 60 * 60 * 24],
+    ["hour", 1000 * 60 * 60],
+    ["minute", 1000 * 60],
+  ];
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  for (const [unit, unitMs] of units) {
+    if (Math.abs(diffMs) >= unitMs) {
+      return formatter.format(Math.round(diffMs / unitMs), unit);
+    }
+  }
+  return formatter.format(Math.round(diffMs / 1000), "second");
+};
+
 export function OperatorChainEditorDialog({
   open,
   onClose,
@@ -183,6 +251,16 @@ export function OperatorChainEditorDialog({
   const [focusedField, setFocusedField] = useState<FocusedField | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
+  const [loadTemplateOpen, setLoadTemplateOpen] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const [templateDescription, setTemplateDescription] = useState("");
+  const [templateBusy, setTemplateBusy] = useState(false);
+  const [templateError, setTemplateError] = useState<string | null>(null);
+  const chainTemplates = usePluginStore((state) => state.chainTemplates);
+  const loadChainTemplates = usePluginStore((state) => state.loadChainTemplates);
+  const saveChainTemplate = usePluginStore((state) => state.saveChainTemplate);
+  const deleteChainTemplate = usePluginStore((state) => state.deleteChainTemplate);
 
   const exposedOperators = useMemo(
     () =>
@@ -204,12 +282,38 @@ export function OperatorChainEditorDialog({
     return byKey;
   }, [exposedOperators]);
 
+  const operatorsByAlias = useMemo(() => {
+    const byAlias = new Map<string, OperatorSummary>();
+    for (const operator of exposedOperators) {
+      const aliases = [
+        operator.id,
+        operatorPrimaryAlias(operator),
+        ...operator.enabledAliases,
+      ];
+      for (const alias of aliases) {
+        const normalized = normalizeOperatorAlias(alias);
+        if (normalized.length > 0 && !byAlias.has(normalized)) {
+          byAlias.set(normalized, operator);
+        }
+      }
+    }
+    return byAlias;
+  }, [exposedOperators]);
+
   useEffect(() => {
     if (!open) return;
     setSteps([]);
     setFocusedField(null);
     setLocalError(null);
+    setTemplateError(null);
+    setSaveTemplateOpen(false);
+    setLoadTemplateOpen(false);
   }, [open]);
+
+  useEffect(() => {
+    if (!open || chainTemplates.length > 0) return;
+    void loadChainTemplates();
+  }, [chainTemplates.length, loadChainTemplates, open]);
 
   const updateStep = (stepId: string, patch: Partial<ChainEditorStep>) => {
     setSteps((current) =>
@@ -307,6 +411,7 @@ export function OperatorChainEditorDialog({
   };
 
   const canRun = steps.length > 0 && steps.every(stepIsValid) && !submitting;
+  const canSaveTemplate = steps.length > 0 && !submitting && !templateBusy;
 
   const buildSteps = (): OperatorChainStep[] =>
     steps.map((step) => {
@@ -336,6 +441,106 @@ export function OperatorChainEditorDialog({
       setLocalError(error instanceof Error ? error.message : String(error));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleOpenSaveTemplate = () => {
+    if (steps.length === 0) return;
+    setTemplateName("");
+    setTemplateDescription("");
+    setTemplateError(null);
+    setSaveTemplateOpen(true);
+  };
+
+  const handleSaveTemplate = async () => {
+    const name = templateName.trim();
+    if (name.length === 0) {
+      setTemplateError("Template name is required.");
+      return;
+    }
+    if (!steps.every(stepIsValid)) {
+      setTemplateError("Complete all required step fields before saving.");
+      return;
+    }
+
+    let chainSteps: OperatorChainStep[];
+    try {
+      chainSteps = buildSteps();
+    } catch (error) {
+      setTemplateError(error instanceof Error ? error.message : String(error));
+      return;
+    }
+
+    setTemplateBusy(true);
+    setTemplateError(null);
+    try {
+      await saveChainTemplate({
+        id: slugifyTemplateName(name),
+        name,
+        description: templateDescription.trim() || null,
+        steps: chainSteps,
+      });
+      setSaveTemplateOpen(false);
+      setTemplateName("");
+      setTemplateDescription("");
+    } catch (error) {
+      setTemplateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTemplateBusy(false);
+    }
+  };
+
+  const handleOpenLoadTemplate = () => {
+    setTemplateError(null);
+    setLoadTemplateOpen(true);
+    void loadChainTemplates();
+  };
+
+  const templateToEditorSteps = (template: ChainTemplate) => {
+    const missingAliases: string[] = [];
+    const nextSteps = template.steps.map((step) => {
+      const operator = operatorsByAlias.get(normalizeOperatorAlias(step.alias)) ?? null;
+      if (!operator) {
+        missingAliases.push(step.alias);
+      }
+      return {
+        id: createStepId(),
+        operatorKey: operator ? operatorKey(operator) : null,
+        values: operator
+          ? valuesFromTemplateStep(operator, step)
+          : { inputs: {}, params: {} },
+      };
+    });
+    return { nextSteps, missingAliases };
+  };
+
+  const handleLoadTemplate = (template: ChainTemplate) => {
+    if (!window.confirm(`Load "${template.name}" and replace the current chain?`)) {
+      return;
+    }
+    const { nextSteps, missingAliases } = templateToEditorSteps(template);
+    setSteps(nextSteps);
+    setFocusedField(null);
+    setLoadTemplateOpen(false);
+    if (missingAliases.length > 0) {
+      setLocalError(
+        `Loaded template, but ${missingAliases.length} operator alias${missingAliases.length === 1 ? "" : "es"} could not be matched.`,
+      );
+    } else {
+      setLocalError(null);
+    }
+  };
+
+  const handleDeleteTemplate = async (template: ChainTemplate) => {
+    if (!window.confirm(`Delete template "${template.name}"?`)) return;
+    setTemplateBusy(true);
+    setTemplateError(null);
+    try {
+      await deleteChainTemplate(template.id);
+    } catch (error) {
+      setTemplateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTemplateBusy(false);
     }
   };
 
@@ -422,20 +627,42 @@ export function OperatorChainEditorDialog({
   };
 
   return (
-    <Dialog
-      open={open}
-      onClose={submitting ? undefined : onClose}
-      fullWidth
-      maxWidth="lg"
-      aria-labelledby="operator-chain-editor-title"
-    >
-      <DialogTitle id="operator-chain-editor-title" sx={{ px: 3, py: 2, pr: 7 }}>
+    <>
+      <Dialog
+        open={open}
+        onClose={submitting ? undefined : onClose}
+        fullWidth
+        maxWidth="lg"
+        aria-labelledby="operator-chain-editor-title"
+      >
+        <DialogTitle id="operator-chain-editor-title" sx={{ px: 3, py: 2, pr: 7 }}>
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
           <AccountTreeRounded fontSize="small" color="action" />
           <Typography variant="subtitle1" fontWeight={850}>
             Operator chain editor
           </Typography>
           <Chip size="small" variant="outlined" label={`${steps.length} steps`} />
+          <Box sx={{ flexGrow: 1, minWidth: { xs: "100%", sm: 12 } }} />
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<FolderOpenRounded />}
+            disabled={submitting || templateBusy}
+            onClick={handleOpenLoadTemplate}
+            sx={{ textTransform: "none", borderRadius: 1.5 }}
+          >
+            Load template
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<SaveRounded />}
+            disabled={!canSaveTemplate}
+            onClick={handleOpenSaveTemplate}
+            sx={{ textTransform: "none", borderRadius: 1.5 }}
+          >
+            Save as template
+          </Button>
         </Stack>
         <IconButton
           aria-label="Close chain editor"
@@ -445,9 +672,9 @@ export function OperatorChainEditorDialog({
         >
           <CloseRounded />
         </IconButton>
-      </DialogTitle>
+        </DialogTitle>
 
-      <DialogContent sx={{ px: 3, pt: 1, pb: 2 }}>
+        <DialogContent sx={{ px: 3, pt: 1, pb: 2 }}>
         <Stack spacing={1.25} useFlexGap>
           {exposedOperators.length === 0 && (
             <Alert severity="info" sx={{ borderRadius: 2 }}>
@@ -658,9 +885,9 @@ export function OperatorChainEditorDialog({
             </Alert>
           )}
         </Stack>
-      </DialogContent>
+        </DialogContent>
 
-      <DialogActions sx={{ px: 3, py: 2 }}>
+        <DialogActions sx={{ px: 3, py: 2 }}>
         <Button
           onClick={onClose}
           disabled={submitting}
@@ -677,7 +904,173 @@ export function OperatorChainEditorDialog({
         >
           Run chain
         </Button>
-      </DialogActions>
-    </Dialog>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={saveTemplateOpen}
+        onClose={templateBusy ? undefined : () => setSaveTemplateOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Save as template</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5} sx={{ pt: 1 }}>
+            <TextField
+              label="Name"
+              required
+              autoFocus
+              value={templateName}
+              disabled={templateBusy}
+              onChange={(event) => setTemplateName(event.target.value)}
+              fullWidth
+            />
+            <TextField
+              label="Description"
+              value={templateDescription}
+              disabled={templateBusy}
+              onChange={(event) => setTemplateDescription(event.target.value)}
+              multiline
+              minRows={2}
+              fullWidth
+            />
+            {templateError && (
+              <Alert severity="error" sx={{ borderRadius: 2 }}>
+                {templateError}
+              </Alert>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setSaveTemplateOpen(false)}
+            disabled={templateBusy}
+            sx={{ textTransform: "none", borderRadius: 1.5 }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={templateBusy ? <CircularProgress size={18} color="inherit" /> : <SaveRounded />}
+            disabled={templateBusy || templateName.trim().length === 0}
+            onClick={() => void handleSaveTemplate()}
+            sx={{ textTransform: "none", borderRadius: 1.5 }}
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={loadTemplateOpen}
+        onClose={templateBusy ? undefined : () => setLoadTemplateOpen(false)}
+        fullWidth
+        maxWidth="md"
+      >
+        <DialogTitle>Load template</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.25} sx={{ pt: 1 }}>
+            {templateError && (
+              <Alert severity="error" sx={{ borderRadius: 2 }}>
+                {templateError}
+              </Alert>
+            )}
+
+            {chainTemplates.length === 0 ? (
+              <Paper
+                variant="outlined"
+                sx={{ p: 2.5, borderRadius: 2, textAlign: "center" }}
+              >
+                <Typography variant="body2" color="text.secondary">
+                  No templates saved.
+                </Typography>
+              </Paper>
+            ) : (
+              <Box
+                sx={{
+                  border: 1,
+                  borderColor: "divider",
+                  borderRadius: 1.5,
+                  overflow: "hidden",
+                }}
+              >
+                {chainTemplates.map((template, index) => (
+                  <Box key={template.id}>
+                    <Stack
+                      direction={{ xs: "column", sm: "row" }}
+                      spacing={1}
+                      alignItems={{ xs: "stretch", sm: "center" }}
+                      justifyContent="space-between"
+                      sx={{ p: 1.5 }}
+                    >
+                      <Box sx={{ minWidth: 0 }}>
+                        <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap">
+                          <Typography variant="body2" fontWeight={800}>
+                            {template.name}
+                          </Typography>
+                          <Chip
+                            size="small"
+                            variant="outlined"
+                            label={formatTemplateRelativeTime(template.updatedAtMs)}
+                          />
+                          <Chip
+                            size="small"
+                            variant="outlined"
+                            label={`${template.steps.length} steps`}
+                          />
+                        </Stack>
+                        {template.description && (
+                          <Typography
+                            variant="body2"
+                            color="text.secondary"
+                            sx={{ mt: 0.5, wordBreak: "break-word" }}
+                          >
+                            {template.description}
+                          </Typography>
+                        )}
+                      </Box>
+
+                      <Stack direction="row" spacing={0.75} alignItems="center" justifyContent="flex-end">
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          disabled={templateBusy}
+                          onClick={() => handleLoadTemplate(template)}
+                          sx={{ textTransform: "none", borderRadius: 1.5 }}
+                        >
+                          Load
+                        </Button>
+                        <Tooltip title="Delete">
+                          <span>
+                            <IconButton
+                              aria-label={`Delete template ${template.name}`}
+                              color="warning"
+                              disabled={templateBusy}
+                              onClick={() => void handleDeleteTemplate(template)}
+                            >
+                              <DeleteOutlineRounded />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      </Stack>
+                    </Stack>
+                    {index < chainTemplates.length - 1 && <Divider />}
+                  </Box>
+                ))}
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setLoadTemplateOpen(false)}
+            disabled={templateBusy}
+            sx={{ textTransform: "none", borderRadius: 1.5 }}
+          >
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
   );
 }

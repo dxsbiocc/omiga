@@ -334,6 +334,21 @@ export interface OperatorChainResult {
   ok: boolean;
 }
 
+export interface ChainTemplate {
+  id: string;
+  name: string;
+  description?: string | null;
+  steps: OperatorChainStep[];
+  updatedAtMs: number;
+}
+
+export interface SaveChainTemplateInput {
+  id: string;
+  name: string;
+  description?: string | null;
+  steps: OperatorChainStep[];
+}
+
 export interface OperatorRunContext {
   kind?: string | null;
   smokeTestId?: string | null;
@@ -505,6 +520,7 @@ interface PluginState {
   operatorDiagnostics: OperatorManifestDiagnostic[];
   operatorRegistryPath: string | null;
   operatorRuns: OperatorRunSummary[];
+  chainTemplates: ChainTemplate[];
   envCheckResults: Map<string, PluginEnvironmentCheckResult>;
   retrievalStatuses: PluginRetrievalRouteStatus[];
   processPoolStatuses: PluginProcessPoolRouteStatus[];
@@ -516,6 +532,9 @@ interface PluginState {
   loadOperators: (projectRoot?: string) => Promise<void>;
   refreshExposedOperatorEnvs: (projectRoot?: string) => Promise<void>;
   loadOperatorRuns: (projectRoot?: string, surface?: OperatorExecutionSurfaceArgs) => Promise<void>;
+  loadChainTemplates: () => Promise<void>;
+  saveChainTemplate: (input: SaveChainTemplateInput) => Promise<void>;
+  deleteChainTemplate: (id: string) => Promise<void>;
   readOperatorRun: (
     runId: string,
     projectRoot?: string,
@@ -1140,6 +1159,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   operatorDiagnostics: [],
   operatorRegistryPath: null,
   operatorRuns: [],
+  chainTemplates: [],
   activeOperatorTasks: {},
   activeOperatorTaskStartedAt: {},
   activeOperatorTaskStatus: {},
@@ -1206,6 +1226,46 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       get().refreshExposedOperatorEnvs(projectRoot);
     } catch (e) {
       set({ error: extractErrorMessage(e) });
+    }
+  },
+
+  loadChainTemplates: async () => {
+    try {
+      const chainTemplates = await invoke<ChainTemplate[]>("list_chain_templates");
+      set({ chainTemplates });
+    } catch (e) {
+      set({ error: extractErrorMessage(e) });
+    }
+  },
+
+  saveChainTemplate: async (input: SaveChainTemplateInput) => {
+    set({ isMutating: true, error: null });
+    try {
+      await invoke<string>("save_chain_template", {
+        id: input.id,
+        name: input.name,
+        description: input.description ?? null,
+        steps: input.steps,
+      });
+      const chainTemplates = await invoke<ChainTemplate[]>("list_chain_templates");
+      set({ chainTemplates, isMutating: false });
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
+
+  deleteChainTemplate: async (id: string) => {
+    set({ isMutating: true, error: null });
+    try {
+      await invoke<void>("delete_chain_template", { id });
+      const chainTemplates = await invoke<ChainTemplate[]>("list_chain_templates");
+      set({ chainTemplates, isMutating: false });
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
     }
   },
 
