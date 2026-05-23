@@ -4090,6 +4090,7 @@ function OperatorRunDetailsDialog({
 }
 
 type RunStatusFilter = "all" | "succeeded" | "failed" | "running" | "smoke" | "cache";
+type RunTimeFilter = "all" | "today" | "7d" | "30d";
 
 function OperatorDetailsDialog({
   operator,
@@ -4110,13 +4111,24 @@ function OperatorDetailsDialog({
 }) {
   const [showAllRuns, setShowAllRuns] = useState(false);
   const [runStatusFilter, setRunStatusFilter] = useState<RunStatusFilter>("all");
+  const [runTimeFilter, setRunTimeFilter] = useState<RunTimeFilter>("all");
 
   if (!operator) return null;
+  const now = Date.now();
   const title = operatorDisplayName(operator);
   const aliases = operator.enabledAliases.filter((value) => value.trim().length > 0);
   const smokeTests = operator.smokeTests ?? [];
   const allOperatorRuns = operatorRunsForOperator(operator, runs);
-  const operatorRuns = allOperatorRuns.filter((run) => {
+  const timeFilteredRuns = allOperatorRuns.filter((run) => {
+    if (runTimeFilter === "all") return true;
+    const ts = run.updatedAt ? new Date(run.updatedAt).getTime() : Number.NaN;
+    if (Number.isNaN(ts)) return false;
+    const ageDays = (now - ts) / 86_400_000;
+    if (runTimeFilter === "today") return ageDays < 1;
+    if (runTimeFilter === "7d") return ageDays < 7;
+    return ageDays < 30;
+  });
+  const operatorRuns = timeFilteredRuns.filter((run) => {
     if (runStatusFilter === "all") return true;
     if (runStatusFilter === "smoke") return operatorRunIsSmoke(run);
     if (runStatusFilter === "cache") return operatorRunIsCacheHit(run);
@@ -4392,9 +4404,33 @@ function OperatorDetailsDialog({
                   ))}
                 </Stack>
               )}
+              {allOperatorRuns.length > 0 && (
+                <Stack direction="row" gap={0.5} flexWrap="wrap">
+                  {(["all", "today", "7d", "30d"] as RunTimeFilter[]).map((f) => {
+                    const count = allOperatorRuns.filter((run) => {
+                      if (f === "all") return true;
+                      const ts = run.updatedAt ? new Date(run.updatedAt).getTime() : Number.NaN;
+                      if (Number.isNaN(ts)) return false;
+                      const ageDays = (now - ts) / 86_400_000;
+                      return f === "today" ? ageDays < 1 : f === "7d" ? ageDays < 7 : ageDays < 30;
+                    }).length;
+                    const label = f === "all" ? `All (${count})` : f === "today" ? `Today (${count})` : `${f} (${count})`;
+                    return (
+                      <Chip
+                        key={f}
+                        size="small"
+                        variant={runTimeFilter === f ? "filled" : "outlined"}
+                        label={label}
+                        onClick={() => { setRunTimeFilter(f); setShowAllRuns(false); }}
+                        sx={{ cursor: "pointer" }}
+                      />
+                    );
+                  })}
+                </Stack>
+              )}
               {operatorRuns.length === 0 ? (
                 <Typography variant="caption" color="text.secondary">
-                  {runStatusFilter === "all" ? "No matching runs yet." : `No ${runStatusFilter} runs.`}
+                  {runStatusFilter === "all" && runTimeFilter === "all" ? "No matching runs yet." : "No runs match the current filters."}
                 </Typography>
               ) : (
                 <Stack spacing={0.75}>
@@ -4479,6 +4515,17 @@ function OperatorDetailsDialog({
                           >
                             View run detail
                           </Button>
+                          {run.exportDir && (
+                            <Button
+                              size="small"
+                              variant="text"
+                              startIcon={<DescriptionOutlined />}
+                              onClick={() => void revealItemInDir(run.exportDir!)}
+                              sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
+                            >
+                              Open outputs
+                            </Button>
+                          )}
                           {operatorRunStatusColor(run.status) === "error" && (
                             <Button
                               size="small"
@@ -5260,6 +5307,18 @@ function OperatorCatalogSection({
                 const latestFailedRun = operatorRunsForOperator(operator, runs)
                   .find((run) => operatorRunStatusColor(run.status) === "error") ?? null;
                 const latestFailureSummary = latestFailedRun ? operatorRunDiagnosisSummary(latestFailedRun) : null;
+                const cardEnvRef = operatorEnvironmentRef(operator);
+                const cardEnv = cardEnvRef
+                  ? (environments ?? []).find((e) => e.id === cardEnvRef || e.canonicalId === cardEnvRef)
+                  : null;
+                const envBlocked = cardEnv
+                  ? ["missing", "unavailable", "failed", "error", "not_found", "not-found"].includes(
+                      cardEnv.availabilityStatus.trim().toLowerCase(),
+                    )
+                  : false;
+                const envBlockedReason = envBlocked
+                  ? (cardEnv?.installHint?.trim() || cardEnv?.availabilityMessage?.trim() || `Environment '${cardEnvRef}' is unavailable`)
+                  : null;
                 return (
                   <Paper
                     key={operatorKey}
@@ -5465,7 +5524,7 @@ function OperatorCatalogSection({
                             size="small"
                             variant="outlined"
                             startIcon={<PlayArrowRounded />}
-                            disabled={busy || !operator.exposed}
+                            disabled={busy || !operator.exposed || envBlocked}
                             onClick={(event) => {
                               event.stopPropagation();
                               onSmokeRun(operator, selectedSmokeTestId, bypassCacheOperators[operatorKey] ?? false);
@@ -5474,6 +5533,11 @@ function OperatorCatalogSection({
                           >
                             {operator.exposed ? `Run ${smokeLabel}` : "Register to run smoke test"}
                           </Button>
+                          {envBlockedReason && (
+                            <Typography variant="caption" color="warning.main" sx={{ alignSelf: "center", maxWidth: 220 }}>
+                              {envBlockedReason}
+                            </Typography>
+                          )}
                           <Tooltip title="Skip cache lookup and force a fresh execution">
                             <Stack
                               direction="row"
