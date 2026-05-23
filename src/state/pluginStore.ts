@@ -596,6 +596,7 @@ interface PluginState {
   activeOperatorTaskStartedAt: Record<string, number>;
   /** Latest async operator scheduler status keyed by alias. */
   activeOperatorTaskStatus: Record<string, OperatorTaskQueueStatus>;
+  hydrateActiveOperatorTasks: () => Promise<void>;
   runOperatorAsync: (
     alias: string,
     invocation: OperatorInvocationArguments,
@@ -630,6 +631,102 @@ export type OperatorTaskQueueStatus = {
   jobId?: string;
   scheduler: string;
 };
+
+export interface ActiveOperatorTaskSummary {
+  taskId: string;
+  alias: string;
+  startedAtMs: number;
+}
+
+const operatorTaskUnlisteners = new Map<string, () => void>();
+
+interface OperatorTaskListenerOptions {
+  alias: string;
+  taskId: string;
+  projectRoot?: string;
+  surface?: OperatorExecutionSurfaceArgs;
+  onTerminal?: (event: OperatorTaskEvent) => void | Promise<void>;
+}
+
+function detachOperatorTaskListener(taskId: string): void {
+  const unlisten = operatorTaskUnlisteners.get(taskId);
+  if (!unlisten) return;
+  operatorTaskUnlisteners.delete(taskId);
+  unlisten();
+}
+
+async function attachOperatorTaskListener({
+  alias,
+  taskId,
+  projectRoot,
+  surface,
+  onTerminal,
+}: OperatorTaskListenerOptions): Promise<void> {
+  if (operatorTaskUnlisteners.has(taskId)) return;
+
+  const eventName = `operator-task-${taskId}`;
+  const unlisten = await listenTauriEvent<OperatorTaskEvent>(
+    eventName,
+    async (event) => {
+      const payload = event.payload;
+      const isTerminal =
+        payload.type === "completed" ||
+        payload.type === "failed" ||
+        payload.type === "cancelled";
+      if (payload.type === "started") {
+        usePluginStore.setState((state) => {
+          if (state.activeOperatorTasks[alias] !== taskId) return state;
+          return {
+            activeOperatorTaskStartedAt: {
+              ...state.activeOperatorTaskStartedAt,
+              [alias]: Date.now(),
+            },
+          };
+        });
+        return;
+      }
+      if (payload.type === "queueStatus") {
+        usePluginStore.setState((state) => {
+          if (state.activeOperatorTasks[alias] !== taskId) return state;
+          return {
+            activeOperatorTaskStatus: {
+              ...state.activeOperatorTaskStatus,
+              [alias]: {
+                state: payload.state,
+                scheduler: payload.scheduler,
+                ...(payload.jobId ? { jobId: payload.jobId } : {}),
+              },
+            },
+          };
+        });
+        return;
+      }
+      if (isTerminal) {
+        usePluginStore.setState((state) => {
+          if (state.activeOperatorTasks[alias] !== taskId) return state;
+          const next = { ...state.activeOperatorTasks };
+          const nextStartedAt = { ...state.activeOperatorTaskStartedAt };
+          const nextStatus = { ...state.activeOperatorTaskStatus };
+          delete next[alias];
+          delete nextStartedAt[alias];
+          delete nextStatus[alias];
+          return {
+            activeOperatorTasks: next,
+            activeOperatorTaskStartedAt: nextStartedAt,
+            activeOperatorTaskStatus: nextStatus,
+          };
+        });
+        try {
+          await usePluginStore.getState().loadOperatorRuns(projectRoot, surface);
+          await onTerminal?.(payload);
+        } finally {
+          detachOperatorTaskListener(taskId);
+        }
+      }
+    },
+  );
+  operatorTaskUnlisteners.set(taskId, unlisten);
+}
 
 export function flattenMarketplacePlugins(
   marketplaces: PluginMarketplaceEntry[],
@@ -1585,6 +1682,76 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     }
   },
 
+  hydrateActiveOperatorTasks: async () => {
+    try {
+      const tasks = (
+        await invoke<ActiveOperatorTaskSummary[]>("list_active_operator_tasks")
+      )
+        .map((task) => ({
+          ...task,
+          alias: task.alias.trim(),
+          taskId: task.taskId.trim(),
+        }))
+        .filter((task) => task.alias && task.taskId);
+
+      set((state) => {
+        const nextTasks = { ...state.activeOperatorTasks };
+        const nextStartedAt = { ...state.activeOperatorTaskStartedAt };
+        const nextStatus = { ...state.activeOperatorTaskStatus };
+        for (const task of tasks) {
+          nextTasks[task.alias] = task.taskId;
+          nextStartedAt[task.alias] = task.startedAtMs;
+          delete nextStatus[task.alias];
+        }
+        return {
+          activeOperatorTasks: nextTasks,
+          activeOperatorTaskStartedAt: nextStartedAt,
+          activeOperatorTaskStatus: nextStatus,
+        };
+      });
+
+      await Promise.all(
+        tasks.map((task) =>
+          attachOperatorTaskListener({
+            alias: task.alias,
+            taskId: task.taskId,
+          }),
+        ),
+      );
+
+      const stillActive = await invoke<ActiveOperatorTaskSummary[]>(
+        "list_active_operator_tasks",
+      );
+      const stillActiveTaskIds = new Set(stillActive.map((task) => task.taskId));
+      const staleTasks = tasks.filter(
+        (task) => !stillActiveTaskIds.has(task.taskId),
+      );
+      set((state) => {
+        let changed = false;
+        const nextTasks = { ...state.activeOperatorTasks };
+        const nextStartedAt = { ...state.activeOperatorTaskStartedAt };
+        const nextStatus = { ...state.activeOperatorTaskStatus };
+        for (const task of staleTasks) {
+          if (nextTasks[task.alias] !== task.taskId) continue;
+          delete nextTasks[task.alias];
+          delete nextStartedAt[task.alias];
+          delete nextStatus[task.alias];
+          changed = true;
+        }
+        return changed
+          ? {
+              activeOperatorTasks: nextTasks,
+              activeOperatorTaskStartedAt: nextStartedAt,
+              activeOperatorTaskStatus: nextStatus,
+            }
+          : state;
+      });
+      for (const task of staleTasks) detachOperatorTaskListener(task.taskId);
+    } catch (e) {
+      set({ error: extractErrorMessage(e) });
+    }
+  },
+
   runOperatorAsync: async (
     alias: string,
     invocation: OperatorInvocationArguments,
@@ -1619,65 +1786,13 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       };
     });
 
-    const eventName = `operator-task-${taskId}`;
-    const unlisten = await listenTauriEvent<OperatorTaskEvent>(
-      eventName,
-      async (event) => {
-        const payload = event.payload;
-        const isTerminal =
-          payload.type === "completed" ||
-          payload.type === "failed" ||
-          payload.type === "cancelled";
-        if (payload.type === "started") {
-          set((state) => {
-            if (state.activeOperatorTasks[alias] !== taskId) return state;
-            return {
-              activeOperatorTaskStartedAt: {
-                ...state.activeOperatorTaskStartedAt,
-                [alias]: Date.now(),
-              },
-            };
-          });
-          return;
-        }
-        if (payload.type === "queueStatus") {
-          set((state) => {
-            if (state.activeOperatorTasks[alias] !== taskId) return state;
-            return {
-              activeOperatorTaskStatus: {
-                ...state.activeOperatorTaskStatus,
-                [alias]: {
-                  state: payload.state,
-                  scheduler: payload.scheduler,
-                  ...(payload.jobId ? { jobId: payload.jobId } : {}),
-                },
-              },
-            };
-          });
-          return;
-        }
-        if (isTerminal) {
-          // Clear active task entry only if it still matches this taskId
-          set((state) => {
-            if (state.activeOperatorTasks[alias] !== taskId) return state;
-            const next = { ...state.activeOperatorTasks };
-            const nextStartedAt = { ...state.activeOperatorTaskStartedAt };
-            const nextStatus = { ...state.activeOperatorTaskStatus };
-            delete next[alias];
-            delete nextStartedAt[alias];
-            delete nextStatus[alias];
-            return {
-              activeOperatorTasks: next,
-              activeOperatorTaskStartedAt: nextStartedAt,
-              activeOperatorTaskStatus: nextStatus,
-            };
-          });
-          await get().loadOperatorRuns(projectRoot, surface);
-          await onTerminal?.(payload);
-          unlisten();
-        }
-      },
-    );
+    await attachOperatorTaskListener({
+      alias,
+      taskId,
+      projectRoot,
+      surface,
+      onTerminal,
+    });
 
     return response;
   },

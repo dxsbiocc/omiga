@@ -14,19 +14,47 @@ use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tokio_util::sync::CancellationToken;
 
 static OPERATOR_TASK_MAP: OnceLock<TokioMutex<HashMap<String, CancellationToken>>> =
     OnceLock::new();
+static OPERATOR_TASK_META: OnceLock<TokioMutex<HashMap<String, ActiveOperatorTaskInfo>>> =
+    OnceLock::new();
 
 fn operator_task_map() -> &'static TokioMutex<HashMap<String, CancellationToken>> {
     OPERATOR_TASK_MAP.get_or_init(|| TokioMutex::new(HashMap::new()))
 }
 
+fn operator_task_meta() -> &'static TokioMutex<HashMap<String, ActiveOperatorTaskInfo>> {
+    OPERATOR_TASK_META.get_or_init(|| TokioMutex::new(HashMap::new()))
+}
+
+fn epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 fn operator_error(error: String) -> AppError {
     AppError::Config(error)
+}
+
+#[derive(Debug, Clone)]
+struct ActiveOperatorTaskInfo {
+    alias: String,
+    started_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveOperatorTaskSummary {
+    pub task_id: String,
+    pub alias: String,
+    pub started_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,10 +373,18 @@ pub async fn run_operator_async(
     };
 
     let cancel_token = CancellationToken::new();
+    let started_at_ms = epoch_ms();
     operator_task_map()
         .lock()
         .await
         .insert(task_id.clone(), cancel_token.clone());
+    operator_task_meta().lock().await.insert(
+        task_id.clone(),
+        ActiveOperatorTaskInfo {
+            alias: alias.clone(),
+            started_at_ms,
+        },
+    );
 
     let task_id_clone = task_id.clone();
     let alias_clone = alias.clone();
@@ -426,6 +462,7 @@ pub async fn run_operator_async(
         }
 
         operator_task_map().lock().await.remove(&task_id_clone);
+        operator_task_meta().lock().await.remove(&task_id_clone);
     });
 
     Ok(json!({ "taskId": task_id }))
@@ -626,6 +663,22 @@ pub async fn cancel_operator_task(task_id: String) -> CommandResult<()> {
         token.cancel();
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_active_operator_tasks() -> CommandResult<Vec<ActiveOperatorTaskSummary>> {
+    let mut tasks = operator_task_meta()
+        .lock()
+        .await
+        .iter()
+        .map(|(task_id, info)| ActiveOperatorTaskSummary {
+            task_id: task_id.clone(),
+            alias: info.alias.clone(),
+            started_at_ms: info.started_at_ms,
+        })
+        .collect::<Vec<_>>();
+    tasks.sort_by_key(|task| task.started_at_ms);
+    Ok(tasks)
 }
 
 #[tauri::command]
