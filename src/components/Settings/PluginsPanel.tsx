@@ -63,6 +63,7 @@ import {
   type OperatorRunLog,
   type OperatorRunSummary,
   type OperatorSummary,
+  type OperatorTaskQueueStatus,
   type MarketplaceRemoteCheckResult,
   type PluginEnvironmentSummary,
   type PluginProcessPoolRouteStatus,
@@ -5059,6 +5060,7 @@ function OperatorCatalogSection({
   busy,
   environments,
   activeTasks,
+  activeTaskStatus,
   onToggle,
   onSmokeRun,
   onBackgroundRun,
@@ -5077,6 +5079,8 @@ function OperatorCatalogSection({
   environments?: PluginEnvironmentSummary[];
   /** Map of operator alias → active background task id. */
   activeTasks?: Record<string, string>;
+  /** Map of operator alias → latest scheduler status. */
+  activeTaskStatus?: Record<string, OperatorTaskQueueStatus>;
   onToggle: (operator: OperatorSummary, enabled: boolean) => void;
   onSmokeRun: (operator: OperatorSummary, smokeTestId?: string | null, bypassCache?: boolean) => void;
   onBackgroundRun?: (
@@ -5559,14 +5563,19 @@ function OperatorCatalogSection({
                             {operator.exposed ? `Run ${smokeLabel}` : "Register to run smoke test"}
                           </Button>
                           {onBackgroundRun && (() => {
-                            const activeTaskId = activeTasks?.[operatorKey];
+                            const activeTaskId = activeTasks?.[alias];
+                            const schedulerStatus = activeTaskId ? activeTaskStatus?.[alias] : undefined;
+                            const runningLabel = schedulerStatus
+                              ? `${schedulerStatus.state}${schedulerStatus.jobId ? ` · job ${schedulerStatus.jobId}` : ""}`
+                              : "Running…";
                             if (activeTaskId) {
                               return (
                                 <Stack direction="row" spacing={0.75} alignItems="center" sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}>
                                   <Chip
                                     size="small"
                                     color="info"
-                                    label="Running…"
+                                    label={runningLabel}
+                                    title={schedulerStatus ? `${schedulerStatus.scheduler} queue state` : undefined}
                                     sx={{ height: 24, fontWeight: 600 }}
                                   />
                                   {onCancelTask && (
@@ -5688,6 +5697,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     runOperatorAsync,
     cancelOperatorTask,
     activeOperatorTasks,
+    activeOperatorTaskStatus,
   } = usePluginStore();
   const [message, setMessage] = useState<string | null>(null);
   const [detailPluginId, setDetailPluginId] = useState<string | null>(null);
@@ -6796,6 +6806,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         }
         onCancelTask={(taskId) => void cancelOperatorTask(taskId)}
         activeTasks={activeOperatorTasks}
+        activeTaskStatus={activeOperatorTaskStatus}
         onRefreshRuns={() => void handleRefreshOperatorRuns()}
         onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
         onOpenRun={(run) => void handleOpenOperatorRun(run)}
@@ -6853,6 +6864,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           }
           onCancelTask={(taskId) => void cancelOperatorTask(taskId)}
           activeTasks={activeOperatorTasks}
+          activeTaskStatus={activeOperatorTaskStatus}
           onRefreshRuns={() => void handleRefreshOperatorRuns()}
           onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
           onOpenRun={(run) => void handleOpenOperatorRun(run)}
