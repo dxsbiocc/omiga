@@ -84,6 +84,7 @@ import { useSessionStore } from "../../state/sessionStore";
 import { ComputerUseSettingsPanel } from "./ComputerUseSettingsTab";
 import { NotebookViewerSettingsPanel } from "./NotebookSettingsTab";
 import { OperatorChainEditorDialog } from "./OperatorChainEditorDialog";
+import { OperatorRunsTimeline } from "./OperatorRunsTimeline";
 import { extractErrorMessage } from "../../utils/errorMessage";
 
 const SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS = import.meta.env.DEV;
@@ -6779,6 +6780,14 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         onLoadLog={(logName) => void handleLoadOperatorRunLog(logName)}
         onVerify={() => void handleVerifyOperatorRun()}
         onCopy={(text, successMessage) => void copyToClipboard(text, successMessage)}
+      />
+
+      <OperatorRunsTimeline
+        runs={operatorRuns}
+        operators={operators}
+        onOpen={(run) => void handleOpenOperatorRun(run)}
+        onRefresh={() => void handleRefreshOperatorRuns()}
+        busy={isMutating}
       />
 
       {hasRuntimeDiagnosticsIssue && (
