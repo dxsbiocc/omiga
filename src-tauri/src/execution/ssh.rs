@@ -179,8 +179,6 @@ impl SshEnvironment {
                 port: me.port,
                 key_path: me.key_path.clone(),
                 control_socket: me.control_socket.clone(),
-                remote_home: me.remote_home.clone(),
-                ssh_project_root: me.ssh_project_root.clone(),
             };
             tokio::spawn(async move {
                 worker.run().await;
@@ -701,8 +699,6 @@ struct SshRsyncWorker {
     port: u16,
     key_path: Option<String>,
     control_socket: PathBuf,
-    remote_home: String,
-    ssh_project_root: Option<PathBuf>,
 }
 
 impl SshRsyncWorker {
@@ -838,7 +834,6 @@ impl SshRsyncWorker {
     /// Transfer files to the remote using tar piped through the ControlMaster socket.
     /// Single SSH round-trip — much faster than per-file rsync.
     async fn transfer_via_tar(&self, entries: &[&SyncEntry]) -> bool {
-        use std::io::Write;
         use tokio::io::AsyncWriteExt;
 
         // Build tar archive in-process (avoids shelling out to tar locally)
@@ -947,48 +942,6 @@ impl SshRsyncWorker {
         let _ = self.ssh_run_cmd(&cmd, 10_000).await;
     }
 
-    fn rsync_ssh_engine_arg(&self) -> String {
-        let mut s = format!(
-            "ssh -o ControlPath={} -o ControlMaster=auto",
-            shell_escape_for_rsync_engine(&self.control_socket.to_string_lossy())
-        );
-        if self.port != 22 {
-            s.push_str(&format!(" -p {}", self.port));
-        }
-        if let Some(ref key) = self.key_path {
-            s.push_str(&format!(" -i {}", shell_escape_for_rsync_engine(key)));
-        }
-        s
-    }
-
-    async fn ssh_mkdir(&self, remote_dir: &str, timeout_ms: u64) {
-        use tokio::time::{timeout, Duration};
-        let mut args = self.build_ssh_args();
-        args.push(format!("{}@{}", self.user, self.host));
-        args.push(format!("mkdir -p {}", sh_single_quote(remote_dir)));
-        let _ = timeout(
-            Duration::from_millis(timeout_ms),
-            Command::new("ssh").args(&args).output(),
-        )
-        .await;
-    }
-
-    async fn run_rsync(&self, engine: &str, src: &str, dest: &str, timeout_ms: u64) -> bool {
-        use tokio::time::{timeout, Duration};
-        let mut cmd = Command::new("rsync");
-        cmd.arg("-az")
-            .arg("--timeout=30")
-            .arg("--safe-links")
-            .arg("-e")
-            .arg(engine)
-            .arg(src)
-            .arg(dest);
-        matches!(
-            timeout(Duration::from_millis(timeout_ms), cmd.output()).await,
-            Ok(Ok(o)) if o.status.success()
-        )
-    }
-
     fn build_ssh_args(&self) -> Vec<String> {
         let mut args = vec![
             "-o".to_string(),
@@ -1011,13 +964,6 @@ impl SshRsyncWorker {
             args.push(key.clone());
         }
         args
-    }
-
-    async fn ensure_rsync_available() -> Result<(), ()> {
-        match Command::new("rsync").arg("--version").output().await {
-            Ok(o) if o.status.success() => Ok(()),
-            _ => Err(()),
-        }
     }
 }
 

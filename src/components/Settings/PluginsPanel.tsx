@@ -63,6 +63,7 @@ import {
   type OperatorRunLog,
   type OperatorRunSummary,
   type OperatorSummary,
+  type OperatorTaskEvent,
   type MarketplaceRemoteCheckResult,
   type PluginEnvironmentSummary,
   type PluginProcessPoolRouteStatus,
@@ -6206,6 +6207,47 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     }
   };
 
+  const notifyOperatorBackgroundTerminal = async (
+    alias: string,
+    event: OperatorTaskEvent,
+  ) => {
+    const notification = (() => {
+      if (event.type === "completed") {
+        return event.ok
+          ? {
+              title: "Operator run complete",
+              body: `${operatorToolName(alias)} finished successfully`,
+            }
+          : {
+              title: "Operator run failed",
+              body: `${operatorToolName(alias)} failed`,
+            };
+      }
+      if (event.type === "failed") {
+        return {
+          title: "Operator run failed",
+          body: `${operatorToolName(alias)} failed`,
+        };
+      }
+      return null;
+    })();
+
+    if (!notification) return;
+
+    try {
+      let granted = await isPermissionGranted();
+      if (!granted) {
+        const permission = await requestPermission();
+        granted = permission === "granted";
+      }
+      if (granted) {
+        sendNotification(notification);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
   const handleOperatorBackgroundRun = async (
     operator: OperatorSummary,
     smokeTestId?: string | null,
@@ -6226,6 +6268,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           smokeTestName: smokeTest?.name ?? null,
           bypassCache: bypassCache ?? false,
         },
+        (event) => notifyOperatorBackgroundTerminal(alias, event),
       );
       setMessage(`Started background run for ${operatorToolName(alias)} — you can keep working.`);
     } catch {
