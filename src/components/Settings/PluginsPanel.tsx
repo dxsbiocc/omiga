@@ -83,6 +83,7 @@ import { useChatComposerStore } from "../../state/chatComposerStore";
 import { useSessionStore } from "../../state/sessionStore";
 import { ComputerUseSettingsPanel } from "./ComputerUseSettingsTab";
 import { NotebookViewerSettingsPanel } from "./NotebookSettingsTab";
+import { OperatorChainEditorDialog } from "./OperatorChainEditorDialog";
 import { extractErrorMessage } from "../../utils/errorMessage";
 
 const SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS = import.meta.env.DEV;
@@ -1317,16 +1318,6 @@ export function operatorSmokeRunArguments(
     params: {},
     resources: {},
   };
-}
-
-function operatorInputFieldNames(operator: OperatorSummary): string[] {
-  return Object.keys(operator.interface?.inputs ?? {}).sort((left, right) =>
-    left.localeCompare(right),
-  );
-}
-
-function defaultChainInputField(operator: OperatorSummary): string {
-  return operatorInputFieldNames(operator)[0] ?? "";
 }
 
 export function operatorSmokeRunLabel(
@@ -5066,309 +5057,6 @@ function CreateUserOperatorDialog({
   );
 }
 
-type ChainBuilderStepState = {
-  operatorKey: string;
-  smokeTestId: string;
-  inheritPrevOutputAs: string;
-};
-
-function chainStepErrorMessage(step: OperatorChainResult["steps"][number]): string | null {
-  if (typeof step.error === "string" && step.error.trim()) return step.error;
-  const error = step.result.error;
-  if (error && typeof error === "object" && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string" && message.trim()) return message;
-  }
-  return step.ok ? null : "Operator chain step failed.";
-}
-
-function createChainBuilderStep(operator: OperatorSummary, index: number): ChainBuilderStepState {
-  return {
-    operatorKey: operatorCatalogKey(operator),
-    smokeTestId: operator.smokeTests?.[0]?.id ?? "",
-    inheritPrevOutputAs: index === 0 ? "" : defaultChainInputField(operator),
-  };
-}
-
-function ChainBuilderDialog({
-  open,
-  operators,
-  busy,
-  onClose,
-  onRunChain,
-}: {
-  open: boolean;
-  operators: OperatorSummary[];
-  busy: boolean;
-  onClose: () => void;
-  onRunChain: (steps: OperatorChainStep[]) => Promise<OperatorChainResult>;
-}) {
-  const chainableOperators = useMemo(
-    () =>
-      operators
-        .filter((operator) => operator.exposed)
-        .sort((left, right) =>
-          operatorDisplayName(left).localeCompare(operatorDisplayName(right))
-          || left.sourcePlugin.localeCompare(right.sourcePlugin)
-          || left.version.localeCompare(right.version),
-        ),
-    [operators],
-  );
-  const operatorByKey = useMemo(() => {
-    const byKey = new Map<string, OperatorSummary>();
-    for (const operator of chainableOperators) {
-      byKey.set(operatorCatalogKey(operator), operator);
-    }
-    return byKey;
-  }, [chainableOperators]);
-  const [steps, setSteps] = useState<ChainBuilderStepState[]>([]);
-  const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<OperatorChainResult | null>(null);
-  const [localError, setLocalError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    setSteps(chainableOperators.slice(0, 2).map(createChainBuilderStep));
-    setResult(null);
-    setLocalError(null);
-  }, [chainableOperators, open]);
-
-  const canSubmit =
-    steps.length >= 2 &&
-    steps.every((step) => operatorByKey.has(step.operatorKey)) &&
-    chainableOperators.length >= 2 &&
-    !submitting &&
-    !busy;
-
-  const updateStep = (index: number, patch: Partial<ChainBuilderStepState>) => {
-    setSteps((current) =>
-      current.map((step, stepIndex) =>
-        stepIndex === index ? { ...step, ...patch } : step,
-      ),
-    );
-  };
-
-  const handleOperatorChange = (index: number, operatorKey: string) => {
-    const operator = operatorByKey.get(operatorKey);
-    updateStep(index, {
-      operatorKey,
-      smokeTestId: operator?.smokeTests?.[0]?.id ?? "",
-      inheritPrevOutputAs: index === 0 || !operator ? "" : defaultChainInputField(operator),
-    });
-  };
-
-  const handleAddStep = () => {
-    const operator = chainableOperators[0];
-    if (!operator) return;
-    setSteps((current) => [
-      ...current,
-      createChainBuilderStep(operator, current.length),
-    ]);
-  };
-
-  const handleSubmit = async () => {
-    if (!canSubmit) return;
-    setSubmitting(true);
-    setLocalError(null);
-    setResult(null);
-    try {
-      const payload: OperatorChainStep[] = steps.map((step, index) => {
-        const operator = operatorByKey.get(step.operatorKey)!;
-        const inheritField = step.inheritPrevOutputAs.trim();
-        return {
-          alias: operatorPrimaryAlias(operator),
-          arguments: operatorSmokeRunArguments(operator, step.smokeTestId || null),
-          inheritPrevOutputAs: index === 0 || !inheritField ? null : inheritField,
-        };
-      });
-      setResult(await onRunChain(payload));
-    } catch (err) {
-      setLocalError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onClose={submitting ? undefined : onClose} fullWidth maxWidth="md" aria-labelledby="operator-chain-title">
-      <DialogTitle id="operator-chain-title" sx={{ px: 3, py: 2, pr: 7 }}>
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-          <AccountTreeRounded fontSize="small" color="action" />
-          <Typography variant="subtitle1" fontWeight={850}>
-            Chain run
-          </Typography>
-        </Stack>
-        <IconButton
-          aria-label="Close chain run"
-          disabled={submitting}
-          onClick={onClose}
-          sx={{ position: "absolute", right: 12, top: 10 }}
-        >
-          <CloseRounded />
-        </IconButton>
-      </DialogTitle>
-      <DialogContent sx={{ px: 3, pt: 2, pb: 2 }}>
-        <Stack spacing={1.25} useFlexGap>
-          {chainableOperators.length < 2 ? (
-            <Alert severity="info" sx={{ borderRadius: 2 }}>
-              Register at least two operators before starting a chain run.
-            </Alert>
-          ) : (
-            steps.map((step, index) => {
-              const operator = operatorByKey.get(step.operatorKey) ?? chainableOperators[0];
-              const smokeTests = operator?.smokeTests ?? [];
-              const inputFields = operator ? operatorInputFieldNames(operator) : [];
-              return (
-                <Paper key={`${index}:${step.operatorKey}`} variant="outlined" sx={{ p: 1.25, borderRadius: 1.5 }}>
-                  <Stack spacing={1} useFlexGap>
-                    <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-                      <Chip size="small" color="primary" variant="outlined" label={`Step ${index + 1}`} />
-                      {operator && (
-                        <Chip size="small" variant="outlined" label={operatorToolName(operatorPrimaryAlias(operator))} />
-                      )}
-                      {index > 0 && step.inheritPrevOutputAs.trim() && (
-                        <Chip size="small" color="info" variant="outlined" label={`input ${step.inheritPrevOutputAs.trim()}`} />
-                      )}
-                    </Stack>
-                    <Stack direction={{ xs: "column", md: "row" }} gap={1} alignItems={{ xs: "stretch", md: "center" }}>
-                      <TextField
-                        select
-                        size="small"
-                        label="Operator"
-                        value={step.operatorKey}
-                        disabled={submitting || busy}
-                        onChange={(event) => handleOperatorChange(index, event.target.value)}
-                        sx={{ minWidth: { xs: "100%", md: 260 }, flex: 1 }}
-                      >
-                        {chainableOperators.map((candidate) => (
-                          <MenuItem key={operatorCatalogKey(candidate)} value={operatorCatalogKey(candidate)}>
-                            {operatorDisplayName(candidate)}
-                          </MenuItem>
-                        ))}
-                      </TextField>
-                      <TextField
-                        select
-                        size="small"
-                        label="Smoke test"
-                        value={step.smokeTestId}
-                        disabled={submitting || busy || smokeTests.length === 0}
-                        onChange={(event) => updateStep(index, { smokeTestId: event.target.value })}
-                        sx={{ minWidth: { xs: "100%", md: 220 } }}
-                      >
-                        {smokeTests.length === 0 ? (
-                          <MenuItem value="">Default arguments</MenuItem>
-                        ) : (
-                          smokeTests.map((smokeTest) => (
-                            <MenuItem key={smokeTest.id} value={smokeTest.id}>
-                              {smokeTest.name?.trim() || smokeTest.id}
-                            </MenuItem>
-                          ))
-                        )}
-                      </TextField>
-                      {index > 0 && (
-                        <TextField
-                          size="small"
-                          label="Previous output input"
-                          value={step.inheritPrevOutputAs}
-                          placeholder={inputFields[0] ?? "inputDir"}
-                          disabled={submitting || busy}
-                          onChange={(event) => updateStep(index, { inheritPrevOutputAs: event.target.value })}
-                          sx={{ minWidth: { xs: "100%", md: 220 } }}
-                        />
-                      )}
-                      <Button
-                        size="small"
-                        variant="text"
-                        color="warning"
-                        disabled={submitting || busy || steps.length <= 2}
-                        onClick={() => setSteps((current) => current.filter((_, stepIndex) => stepIndex !== index))}
-                        sx={{ textTransform: "none", alignSelf: { xs: "flex-start", md: "center" } }}
-                      >
-                        Remove
-                      </Button>
-                    </Stack>
-                  </Stack>
-                </Paper>
-              );
-            })
-          )}
-
-          {chainableOperators.length >= 2 && (
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<AddRounded />}
-              disabled={submitting || busy}
-              onClick={handleAddStep}
-              sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-            >
-              Add step
-            </Button>
-          )}
-
-          {localError && (
-            <Alert severity="error" sx={{ borderRadius: 2 }}>
-              {localError}
-            </Alert>
-          )}
-
-          {result && (
-            <Alert severity={result.ok ? "success" : "error"} sx={{ borderRadius: 2 }}>
-              <Stack spacing={0.75} useFlexGap>
-                <Typography variant="body2" fontWeight={800}>
-                  {result.ok ? "Operator chain completed." : "Operator chain stopped."}
-                </Typography>
-                {result.steps.map((step, index) => {
-                  const errorMessage = chainStepErrorMessage(step);
-                  return (
-                    <Box key={`${index}:${step.alias}`} sx={{ wordBreak: "break-word" }}>
-                      <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-                        <Chip
-                          size="small"
-                          color={step.ok ? "success" : "error"}
-                          variant={step.ok ? "outlined" : "filled"}
-                          label={`Step ${index + 1}`}
-                        />
-                        <Typography variant="caption" fontWeight={800}>
-                          {operatorToolName(step.alias)}
-                        </Typography>
-                        {step.runDir && (
-                          <Typography variant="caption" color="text.secondary">
-                            {step.runDir}
-                          </Typography>
-                        )}
-                      </Stack>
-                      {errorMessage && (
-                        <Typography variant="caption" color="error" sx={{ display: "block", mt: 0.25 }}>
-                          {errorMessage}
-                        </Typography>
-                      )}
-                    </Box>
-                  );
-                })}
-              </Stack>
-            </Alert>
-          )}
-        </Stack>
-      </DialogContent>
-      <DialogActions sx={{ px: 3, py: 2 }}>
-        <Button onClick={onClose} disabled={submitting} sx={{ textTransform: "none", borderRadius: 1.5 }}>
-          Close
-        </Button>
-        <Button
-          variant="contained"
-          startIcon={submitting ? <CircularProgress size={18} color="inherit" /> : <AccountTreeRounded />}
-          disabled={!canSubmit}
-          onClick={() => void handleSubmit()}
-          sx={{ textTransform: "none", borderRadius: 1.5 }}
-        >
-          Run chain
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
-
 function OperatorCatalogSection({
   operators,
   diagnostics,
@@ -5427,7 +5115,6 @@ function OperatorCatalogSection({
       || left.version.localeCompare(right.version),
   );
   const exposedCount = operators.filter((operator) => operator.exposed).length;
-  const chainableCount = operators.filter((operator) => operator.exposed).length;
   const unavailableCount = operators.filter((operator) => operator.unavailableReason).length;
   const failedRunCount = runs.filter((run) => operatorRunStatusColor(run.status) === "error").length;
   const succeededRunCount = runs.filter((run) => operatorRunStatusColor(run.status) === "success").length;
@@ -5454,12 +5141,13 @@ function OperatorCatalogSection({
         onClose={() => setCreateDialogOpen(false)}
         onCreated={onCreateUserOperator}
       />
-      <ChainBuilderDialog
+      <OperatorChainEditorDialog
         open={chainDialogOpen}
         operators={operators}
-        busy={busy}
         onClose={() => setChainDialogOpen(false)}
-        onRunChain={onRunChain}
+        onRun={async (steps) => {
+          await onRunChain(steps);
+        }}
       />
       <Accordion disableGutters elevation={0} sx={accordionSx}>
       <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={accordionSummarySx}>
@@ -5494,14 +5182,14 @@ function OperatorCatalogSection({
             size="small"
             variant="outlined"
             startIcon={<AccountTreeRounded />}
-            disabled={busy || chainableCount < 2}
+            disabled={busy}
             onClick={(event) => {
               event.stopPropagation();
               setChainDialogOpen(true);
             }}
             sx={{ textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap", flexShrink: 0 }}
           >
-            Chain run
+            Open chain editor
           </Button>
         </Stack>
       </AccordionSummary>
