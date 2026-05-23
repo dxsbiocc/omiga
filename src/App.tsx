@@ -9,6 +9,7 @@ import { OPEN_SETTINGS_TAB_DETAIL } from "./components/Settings/openSettingsTabM
 import { TaskStatus } from "./components/TaskStatus";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ResizeHandle } from "./components/ResizeHandle";
+import { GlobalAsyncTasksDrawer } from "./components/GlobalAsyncTasksDrawer";
 import { OnboardingWizard } from "./components/Onboarding";
 import { ConfirmationDialog } from "./components/AgentSchedule/AgentScheduleLauncher";
 import { useAgentStore } from "./state/agentStore";
@@ -687,6 +688,7 @@ export default function App() {
           )}
         </Stack>
       </Layout>
+      <GlobalAsyncTasksDrawer />
     </>
   );
 }

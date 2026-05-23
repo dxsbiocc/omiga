@@ -592,6 +592,8 @@ interface PluginState {
   ) => Promise<OperatorChainResult>;
   /** Active async operator tasks keyed by alias. */
   activeOperatorTasks: Record<string, string>;
+  /** Async operator task start timestamps keyed by alias. */
+  activeOperatorTaskStartedAt: Record<string, number>;
   /** Latest async operator scheduler status keyed by alias. */
   activeOperatorTaskStatus: Record<string, OperatorTaskQueueStatus>;
   runOperatorAsync: (
@@ -1042,6 +1044,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   operatorRegistryPath: null,
   operatorRuns: [],
   activeOperatorTasks: {},
+  activeOperatorTaskStartedAt: {},
   activeOperatorTaskStatus: {},
   envCheckResults: new Map(),
   retrievalStatuses: [],
@@ -1608,6 +1611,10 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       delete nextStatus[alias];
       return {
         activeOperatorTasks: { ...state.activeOperatorTasks, [alias]: taskId },
+        activeOperatorTaskStartedAt: {
+          ...state.activeOperatorTaskStartedAt,
+          [alias]: Date.now(),
+        },
         activeOperatorTaskStatus: nextStatus,
       };
     });
@@ -1621,6 +1628,18 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           payload.type === "completed" ||
           payload.type === "failed" ||
           payload.type === "cancelled";
+        if (payload.type === "started") {
+          set((state) => {
+            if (state.activeOperatorTasks[alias] !== taskId) return state;
+            return {
+              activeOperatorTaskStartedAt: {
+                ...state.activeOperatorTaskStartedAt,
+                [alias]: Date.now(),
+              },
+            };
+          });
+          return;
+        }
         if (payload.type === "queueStatus") {
           set((state) => {
             if (state.activeOperatorTasks[alias] !== taskId) return state;
@@ -1642,11 +1661,14 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           set((state) => {
             if (state.activeOperatorTasks[alias] !== taskId) return state;
             const next = { ...state.activeOperatorTasks };
+            const nextStartedAt = { ...state.activeOperatorTaskStartedAt };
             const nextStatus = { ...state.activeOperatorTaskStatus };
             delete next[alias];
+            delete nextStartedAt[alias];
             delete nextStatus[alias];
             return {
               activeOperatorTasks: next,
+              activeOperatorTaskStartedAt: nextStartedAt,
               activeOperatorTaskStatus: nextStatus,
             };
           });
