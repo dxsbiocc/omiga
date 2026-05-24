@@ -18,18 +18,11 @@ const hookRuntimeRef = vi.hoisted(() => ({
   current: null as HookRuntimeApi | null,
 }));
 
-const pluginStoreRef = vi.hoisted(() => ({
-  current: {
-    chainTemplates: [],
-    loadChainTemplates: () => Promise.resolve(),
-    saveChainTemplate: () => Promise.resolve(),
-    deleteChainTemplate: () => Promise.resolve(),
-  },
-}));
-
-vi.mock("../../state/pluginStore", () => ({
-  usePluginStore: (selector: (state: typeof pluginStoreRef.current) => unknown) =>
-    selector(pluginStoreRef.current),
+const pluginStoreMock = vi.hoisted(() => ({
+  chainTemplates: [],
+  loadChainTemplates: vi.fn().mockResolvedValue(undefined),
+  saveChainTemplate: vi.fn().mockResolvedValue(undefined),
+  deleteChainTemplate: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -43,6 +36,20 @@ vi.mock("react", async (importOriginal) => {
     useRef: <T,>(initial: T) => hookRuntimeRef.current?.useRef(initial),
     useState: <T,>(initial: T | (() => T)) =>
       hookRuntimeRef.current?.useState(initial),
+  };
+});
+
+vi.mock("../../state/pluginStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../state/pluginStore")>();
+  const state = {
+    chainTemplates: pluginStoreMock.chainTemplates,
+    loadChainTemplates: pluginStoreMock.loadChainTemplates,
+    saveChainTemplate: pluginStoreMock.saveChainTemplate,
+    deleteChainTemplate: pluginStoreMock.deleteChainTemplate,
+  };
+  return {
+    ...actual,
+    usePluginStore: (selector: (value: typeof state) => unknown) => selector(state),
   };
 });
 
@@ -201,7 +208,7 @@ const dependencyPickers = (harness: ComponentHarness): RenderedNode[] =>
 let consoleErrorSpy: ReturnType<typeof vi.spyOn> | null = null;
 
 beforeEach(() => {
-  pluginStoreRef.current.chainTemplates = [];
+  pluginStoreMock.chainTemplates = [];
   const originalError = console.error;
   consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((message, ...args) => {
     if (
@@ -217,6 +224,10 @@ beforeEach(() => {
 afterEach(() => {
   hookRuntimeRef.current?.cleanup();
   hookRuntimeRef.current = null;
+  pluginStoreMock.chainTemplates = [];
+  pluginStoreMock.loadChainTemplates.mockClear();
+  pluginStoreMock.saveChainTemplate.mockClear();
+  pluginStoreMock.deleteChainTemplate.mockClear();
   consoleErrorSpy?.mockRestore();
   consoleErrorSpy = null;
   vi.clearAllMocks();

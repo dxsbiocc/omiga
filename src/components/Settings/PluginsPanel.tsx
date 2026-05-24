@@ -46,6 +46,8 @@ import {
   RefreshRounded,
   SearchRounded,
   SettingsRounded,
+  StarBorderRounded,
+  StarRounded,
   SyncRounded,
   TroubleshootRounded,
   AccountTreeRounded,
@@ -5136,11 +5138,13 @@ function OperatorCatalogSection({
   diagnostics,
   runs,
   registryPath,
+  favoriteOperators,
   busy,
   environments,
   activeTasks,
   activeTaskStatus,
   onToggle,
+  onToggleFavorite,
   onSmokeRun,
   onRunChain,
   onBackgroundRun,
@@ -5155,6 +5159,7 @@ function OperatorCatalogSection({
   diagnostics: OperatorManifestDiagnostic[];
   runs: OperatorRunSummary[];
   registryPath: string | null;
+  favoriteOperators: string[];
   busy: boolean;
   environments?: PluginEnvironmentSummary[];
   /** Map of operator alias → active background task id. */
@@ -5162,6 +5167,7 @@ function OperatorCatalogSection({
   /** Map of operator alias → latest scheduler status. */
   activeTaskStatus?: Record<string, OperatorTaskQueueStatus>;
   onToggle: (operator: OperatorSummary, enabled: boolean) => void;
+  onToggleFavorite: (alias: string, pinned: boolean) => void;
   onSmokeRun: (operator: OperatorSummary, smokeTestId?: string | null, bypassCache?: boolean) => void;
   onRunChain: (steps: OperatorChainStep[]) => Promise<OperatorChainResult>;
   onBackgroundRun?: (
@@ -5182,12 +5188,31 @@ function OperatorCatalogSection({
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [chainDialogOpen, setChainDialogOpen] = useState(false);
   const [bypassCacheOperators, setBypassCacheOperators] = useState<Record<string, boolean>>({});
-  const sortedOperators = [...operators].sort((left, right) =>
-    left.id
-      .localeCompare(right.id)
-      || left.sourcePlugin.localeCompare(right.sourcePlugin)
-      || left.version.localeCompare(right.version),
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const favoriteOperatorSet = useMemo(
+    () => new Set(favoriteOperators.map((alias) => alias.trim()).filter(Boolean)),
+    [favoriteOperators],
   );
+  const sortedOperators = useMemo(
+    () => [...operators].sort((left, right) => {
+      const leftFavorite = favoriteOperatorSet.has(operatorPrimaryAlias(left));
+      const rightFavorite = favoriteOperatorSet.has(operatorPrimaryAlias(right));
+      return (
+        Number(rightFavorite) - Number(leftFavorite)
+        || operatorDisplayName(left).localeCompare(operatorDisplayName(right))
+        || left.id.localeCompare(right.id)
+        || left.sourcePlugin.localeCompare(right.sourcePlugin)
+        || left.version.localeCompare(right.version)
+      );
+    }),
+    [favoriteOperatorSet, operators],
+  );
+  const visibleOperators = favoritesOnly
+    ? sortedOperators.filter((operator) => favoriteOperatorSet.has(operatorPrimaryAlias(operator)))
+    : sortedOperators;
+  const favoriteOperatorCount = operators.filter((operator) =>
+    favoriteOperatorSet.has(operatorPrimaryAlias(operator)),
+  ).length;
   const exposedCount = operators.filter((operator) => operator.exposed).length;
   const unavailableCount = operators.filter((operator) => operator.unavailableReason).length;
   const failedRunCount = runs.filter((run) => operatorRunStatusColor(run.status) === "error").length;
@@ -5230,6 +5255,21 @@ function OperatorCatalogSection({
             <Typography variant="subtitle2" fontWeight={700}>Agent tools</Typography>
             <Chip size="small" variant="outlined" label={`${exposedCount} registered`} />
             <Chip size="small" variant="outlined" label={`${operators.length} available`} />
+            {favoriteOperatorCount > 0 && (
+              <Chip size="small" color="warning" variant="outlined" label={`${favoriteOperatorCount} pinned`} />
+            )}
+            <Chip
+              size="small"
+              clickable
+              color={favoritesOnly ? "primary" : "default"}
+              variant={favoritesOnly ? "filled" : "outlined"}
+              icon={favoritesOnly ? <StarRounded /> : <StarBorderRounded />}
+              label="Favorites only"
+              onClick={(event) => {
+                event.stopPropagation();
+                setFavoritesOnly((value) => !value);
+              }}
+            />
             {diagnosticIssueCount > 0 && (
               <Chip size="small" color="warning" variant="filled" label={`${diagnosticIssueCount} manifest issues`} />
             )}
@@ -5359,7 +5399,7 @@ function OperatorCatalogSection({
               </AccordionSummary>
               <AccordionDetails sx={{ px: 1.25, pt: 0, pb: 1.25 }}>
                 <Stack spacing={0.75} useFlexGap>
-                  {sortedOperators
+                  {visibleOperators
                     .map((operator) => ({
                       operator,
                       operatorRuns: operatorRunsForOperator(operator, runs),
@@ -5424,10 +5464,18 @@ function OperatorCatalogSection({
                 No agent tools discovered from enabled plugins yet.
               </Typography>
             </Paper>
+          ) : visibleOperators.length === 0 ? (
+            <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
+              <StarBorderRounded sx={{ color: "text.secondary", mb: 1 }} />
+              <Typography variant="body2" color="text.secondary">
+                No favorite agent tools pinned yet.
+              </Typography>
+            </Paper>
           ) : (
             <Box sx={pluginCardGridSx} role="region" aria-label="Plugin tool list">
-              {sortedOperators.map((operator) => {
+              {visibleOperators.map((operator) => {
                 const alias = operatorPrimaryAlias(operator);
+                const isPinned = favoriteOperatorSet.has(alias);
                 const aliases = operator.enabledAliases.filter((value) => value.trim().length > 0);
                 const title = operatorDisplayName(operator);
                 const tone = operator.exposed ? theme.palette.success.main : theme.palette.text.secondary;
@@ -5507,14 +5555,37 @@ function OperatorCatalogSection({
                             {operator.id} · v{operator.version}
                           </Typography>
                         </Box>
-                        <Switch
-                          size="small"
-                          checked={operator.exposed}
-                          disabled={busy}
-                          onClick={(event) => event.stopPropagation()}
-                          onChange={(event) => onToggle(operator, event.target.checked)}
-                          inputProps={{ "aria-label": `${operator.exposed ? "Unregister" : "Register"} tool ${operator.id}` }}
-                        />
+                        <Stack direction="row" spacing={0.25} alignItems="center" flexShrink={0}>
+                          <Tooltip title={isPinned ? "Remove from favorites" : "Add to favorites"}>
+                            <span>
+                              <IconButton
+                                size="small"
+                                color={isPinned ? "warning" : "default"}
+                                disabled={busy}
+                                aria-label={`${isPinned ? "Unpin" : "Pin"} operator ${alias}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onToggleFavorite(alias, !isPinned);
+                                }}
+                                onKeyDown={(event) => event.stopPropagation()}
+                              >
+                                {isPinned ? (
+                                  <StarRounded fontSize="small" />
+                                ) : (
+                                  <StarBorderRounded fontSize="small" />
+                                )}
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                          <Switch
+                            size="small"
+                            checked={operator.exposed}
+                            disabled={busy}
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={(event) => onToggle(operator, event.target.checked)}
+                            inputProps={{ "aria-label": `${operator.exposed ? "Unregister" : "Register"} tool ${operator.id}` }}
+                          />
+                        </Stack>
                       </Stack>
 
                       <Typography
@@ -5773,6 +5844,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     operators,
     operatorDiagnostics,
     operatorRegistryPath,
+    favoriteOperators,
     operatorRuns,
     retrievalStatuses,
     processPoolStatuses,
@@ -5782,6 +5854,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     error,
     loadPlugins,
     loadOperators,
+    loadFavoriteOperators,
     loadOperatorRuns,
     readOperatorRun,
     readOperatorRunLog,
@@ -5794,6 +5867,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     uninstallPlugin,
     setPluginEnabled,
     setOperatorEnabled,
+    toggleFavoriteOperator,
     setTemplateEnabled,
     setRetrievalResourceEnabled,
     setEnvironmentEnabled,
@@ -5839,7 +5913,8 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
 
   useEffect(() => {
     void loadPlugins(projectRoot, operatorSurface);
-  }, [loadPlugins, operatorSurface, projectRoot]);
+    void loadFavoriteOperators();
+  }, [loadFavoriteOperators, loadPlugins, operatorSurface, projectRoot]);
 
   const allPlugins = useMemo(() => flattenMarketplacePlugins(marketplaces), [marketplaces]);
   const allPluginEnvironments = useMemo(
@@ -6126,6 +6201,16 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           ? `Registered ${operatorDisplayName(operator)} as ${toolName}`
           : `Unregistered ${toolName}`,
       );
+    } catch {
+      // Store exposes the error banner.
+    }
+  };
+
+  const handleOperatorFavoriteToggle = async (alias: string, pinned: boolean) => {
+    setMessage(null);
+    try {
+      await toggleFavoriteOperator(alias, pinned);
+      setMessage(`${pinned ? "Pinned" : "Unpinned"} ${operatorToolName(alias)}`);
     } catch {
       // Store exposes the error banner.
     }
@@ -6964,9 +7049,11 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         diagnostics={operatorDiagnostics}
         runs={operatorRuns}
         registryPath={operatorRegistryPath}
+        favoriteOperators={favoriteOperators}
         busy={isMutating}
         environments={allPluginEnvironments}
         onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
+        onToggleFavorite={(alias, pinned) => void handleOperatorFavoriteToggle(alias, pinned)}
         onSmokeRun={(operator, smokeTestId, bypassCache) =>
           void handleOperatorSmokeRun(operator, smokeTestId, bypassCache)
         }
@@ -7023,9 +7110,11 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           diagnostics={operatorDiagnostics}
           runs={operatorRuns}
           registryPath={operatorRegistryPath}
+          favoriteOperators={favoriteOperators}
           busy={isMutating}
           environments={allPluginEnvironments}
           onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
+          onToggleFavorite={(alias, pinned) => void handleOperatorFavoriteToggle(alias, pinned)}
           onSmokeRun={(operator, smokeTestId, bypassCache) =>
             void handleOperatorSmokeRun(operator, smokeTestId, bypassCache)
           }
