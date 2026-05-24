@@ -1,0 +1,47 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: seqtk_fqchk
+  version: 0.1.0
+  name: seqtk Fqchk
+  description: Use seqtk fqchk to compute per-position quality and base composition stats.
+  tags: [seqtk, fastq, quality, sequencing]
+interface:
+  inputs:
+    reads:
+      kind: file
+      required: true
+      description: FASTQ input readable by seqtk fqchk.
+  params:
+    qual_threshold:
+      kind: integer
+      default: 0
+      minimum: 0
+      description: Optional minimum quality threshold (-q N); use 0 for seqtk default.
+  outputs:
+    raw_stats:
+      kind: file
+      glob: seqtk-fqchk.txt
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 300s
+    exposed: true
+execution:
+  argv:
+    - /bin/sh
+    - ./scripts/seqtk_fqchk.sh
+    - ${inputs.reads}
+    - ${outdir}
+    - ${params.qual_threshold}

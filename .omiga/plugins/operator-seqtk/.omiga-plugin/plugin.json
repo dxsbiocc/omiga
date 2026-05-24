@@ -1,12 +1,12 @@
 {
   "name": "operator-seqtk",
   "version": "0.1.0",
-  "description": "Built-in atomic operator plugin: Single seqtk sample operator.",
+  "description": "Atomic operator wrappers for common seqtk subcommands: sample, fqchk, size, comp, subseq, seq.",
   "operators": "./operators",
   "interface": {
     "displayName": "seqtk",
-    "shortDescription": "FASTQ/FASTA subsampling with seqtk",
-    "longDescription": "Provides one atomic seqtk sample wrapper for FASTQ/FASTA subsampling on the active local or SSH environment. The selected environment must provide seqtk on PATH.",
+    "shortDescription": "Common FASTQ/FASTA utilities with seqtk",
+    "longDescription": "Wraps six seqtk operators on local or SSH environments with typed inputs and cached structured outputs: seqtk_sample_reads subsamples reads; seqtk_fqchk reports per-position quality and base composition; seqtk_size counts reads and bases; seqtk_comp writes per-read base composition; seqtk_subseq extracts reads by ID list; seqtk_seq converts formats, reverse-complements, and masks low-quality bases. The selected environment must provide seqtk on PATH.",
     "developerName": "Omiga",
     "category": "Operator",
     "capabilities": [
@@ -19,7 +19,9 @@
     ],
     "brandColor": "#0F766E",
     "defaultPrompt": [
-      "Expose seqtk and subsample my FASTQ file."
+      "Expose seqtk and subsample my FASTQ file.",
+      "Compute reads count and per-base quality of my FASTQ files using seqtk.",
+      "Extract reads by id list from my FASTQ using seqtk."
     ]
   }
 }
