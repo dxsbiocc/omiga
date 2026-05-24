@@ -216,6 +216,16 @@ pub async fn list_operators() -> CommandResult<OperatorCatalogResponse> {
 }
 
 #[tauri::command]
+pub async fn list_operator_favorites() -> Vec<String> {
+    operators::operator_favorites::list_favorites()
+}
+
+#[tauri::command]
+pub async fn toggle_operator_favorite(alias: String, pinned: bool) -> CommandResult<Vec<String>> {
+    operators::operator_favorites::set_favorite(&alias, pinned).map_err(operator_error)
+}
+
+#[tauri::command]
 pub async fn describe_operator(id: String) -> CommandResult<OperatorDescribeResponse> {
     let (alias, spec) = operators::describe_operator(&id).map_err(|error| {
         AppError::Config(
