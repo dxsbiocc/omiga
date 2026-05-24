@@ -124,6 +124,14 @@ pub struct SessionRuntimeState {
     pub local_venv_type: String,
     /// Conda env name, venv directory path, or pyenv version string.
     pub local_venv_name: String,
+    /// Canonical repository/project root before any session worktree redirection.
+    pub canonical_project_root: Option<std::path::PathBuf>,
+    /// Effective root used by local tools for this session/turn.
+    pub effective_project_root: Option<std::path::PathBuf>,
+    /// Whether this session is currently configured to execute local tools in a worktree.
+    pub use_worktree: bool,
+    /// Resolved branch name for the active session worktree, when enabled.
+    pub worktree_branch: Option<String>,
     /// Session-scoped environment cache — shared across all tool calls in this session.
     /// Created once per session; shutdown on session teardown.
     pub env_store: EnvStore,

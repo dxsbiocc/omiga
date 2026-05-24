@@ -17,3 +17,5 @@ mod query;
 mod search;
 #[path = "domain_tools/todo_write.rs"]
 mod todo_write;
+#[path = "domain_tools/worktree_execution_root.rs"]
+mod worktree_execution_root;

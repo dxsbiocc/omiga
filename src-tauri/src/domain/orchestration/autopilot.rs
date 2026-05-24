@@ -189,6 +189,10 @@ mod tests {
             sandbox_backend: "docker".to_string(),
             local_venv_type: "".to_string(),
             local_venv_name: "".to_string(),
+            canonical_project_root: None,
+            effective_project_root: None,
+            use_worktree: false,
+            worktree_branch: None,
             env_store: EnvStore::new(),
             artifact_registry: crate::domain::session::artifacts::ArtifactRegistry::default(),
         };

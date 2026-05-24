@@ -26,6 +26,7 @@ export interface SessionConfigResponse {
   local_venv_type: string;
   local_venv_name: string;
   use_worktree: boolean;
+  worktree_branch: string;
   runtime_constraints?: unknown;
 }
 
@@ -39,6 +40,7 @@ export const DEFAULT_SESSION_CONFIG: SessionConfigResponse = {
   local_venv_type: "none",
   local_venv_name: "",
   use_worktree: false,
+  worktree_branch: "",
 };
 
 function asString(v: unknown, fallback: string): string {
@@ -87,6 +89,10 @@ export function normalizeSessionConfig(
       cfg?.use_worktree,
       DEFAULT_SESSION_CONFIG.use_worktree,
     ),
+    worktree_branch: asString(
+      cfg?.worktree_branch,
+      DEFAULT_SESSION_CONFIG.worktree_branch,
+    ),
     runtime_constraints: cfg?.runtime_constraints,
   };
 }
@@ -101,6 +107,8 @@ interface ChatComposerState {
   /** `@` 选择器选中的 Omiga 插件 ID（仅本轮内存态，不持久化） */
   composerSelectedPluginIds: string[];
   useWorktree: boolean;
+  /** Persisted branch used when `useWorktree` is enabled for this session. */
+  worktreeBranch: string;
   /** 执行环境：本地、SSH、沙箱 */
   environment: ExecutionEnvironment;
   /** SSH 服务器名称；仅在 `environment === "ssh"` 时生效。 */
@@ -150,6 +158,7 @@ function defaults() {
     composerAttachedPaths: [] as string[],
     composerSelectedPluginIds: [] as string[],
     useWorktree: false,
+    worktreeBranch: "",
     environment: "local" as ExecutionEnvironment,
     sshServer: null as string | null,
     sandboxBackend: "docker" as SandboxBackend,
@@ -200,6 +209,7 @@ async function saveSessionConfig(
         local_venv_type: state.localVenvType,
         local_venv_name: state.localVenvName,
         use_worktree: state.useWorktree,
+        worktree_branch: state.worktreeBranch,
       },
     });
   } catch (e) {
@@ -292,9 +302,14 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
     if (activeSessionId) saveSessionConfig(activeSessionId, get());
   },
   setBranchForRoot: (root, branch) =>
-    set((s) => ({
-      selectedBranchByRoot: { ...s.selectedBranchByRoot, [root]: branch },
-    })),
+    {
+      set((s) => ({
+        selectedBranchByRoot: { ...s.selectedBranchByRoot, [root]: branch },
+        worktreeBranch: branch,
+      }));
+      const { activeSessionId } = get();
+      if (activeSessionId) saveSessionConfig(activeSessionId, get());
+    },
 
   initForSession: (sessionId, cfg) => {
     const normalized = normalizeSessionConfig(cfg);
@@ -309,6 +324,7 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       localVenvType: normalized.local_venv_type as LocalVenvType,
       localVenvName: normalized.local_venv_name,
       useWorktree: normalized.use_worktree,
+      worktreeBranch: normalized.worktree_branch,
       // Keep one-turn picker selections empty on switch
       composerAttachedPaths: [],
       composerSelectedPluginIds: [],

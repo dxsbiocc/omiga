@@ -332,6 +332,10 @@ interface SendMessageRequest {
   permissionMode?: string;
   /** `off` | `task` | `session` — explicit Computer Use gate for this turn */
   computerUseMode?: "off" | "task" | "session";
+  /** Run local tools in a session-owned Git worktree instead of the canonical repo root. */
+  useWorktree?: boolean;
+  /** Existing local branch to check out in the session-owned worktree. */
+  worktreeBranch?: string;
   /** DB user row id — truncate after this row and reuse instead of inserting a duplicate user message */
   retryFromUserMessageId?: string;
   /** Session's stored provider entry name — passed through for lazy LLM config restoration. */

@@ -16,6 +16,76 @@ pub struct EnterWorktreeArgs {
 
 pub struct EnterWorktreeTool;
 
+#[derive(Debug, Clone)]
+pub struct PreparedWorktree {
+    pub path: PathBuf,
+    pub branch: String,
+    pub reused: bool,
+    pub name: String,
+}
+
+/// Create or reuse the deterministic worktree owned by one chat session.
+///
+/// This helper is intentionally stricter than the public `EnterWorktree` tool:
+/// it only accepts an existing local branch and validates that a reused worktree
+/// is still checked out on the requested branch.
+pub fn prepare_session_worktree(
+    repo_root: &Path,
+    session_id: &str,
+    requested_branch: Option<&str>,
+) -> Result<PreparedWorktree, ToolError> {
+    let repo = Repository::discover(repo_root).map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Git repository not found: {}", e),
+    })?;
+    let root = repo_root_path(&repo);
+    let branch = requested_branch
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| current_branch_name(&repo))
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: "Cannot determine current branch for worktree".to_string(),
+        })?;
+    let branch_ref = repo
+        .find_branch(&branch, BranchType::Local)
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Local branch '{}' not found: {}", branch, e),
+        })?
+        .into_reference();
+    let name = session_worktree_name(session_id, &branch);
+    let path = root.join(".claude").join("worktrees").join(&name);
+
+    if let Some(existing_path) = existing_worktree_path(&repo, &name)? {
+        validate_existing_worktree_branch(&existing_path, &branch)?;
+        return Ok(PreparedWorktree {
+            path: existing_path,
+            branch,
+            reused: true,
+            name,
+        });
+    }
+
+    std::fs::create_dir_all(path.parent().unwrap_or(&root)).map_err(|e| {
+        ToolError::ExecutionFailed {
+            message: format!("create worktree parent: {}", e),
+        }
+    })?;
+
+    let mut opts = WorktreeAddOptions::new();
+    opts.reference(Some(&branch_ref));
+    repo.worktree(&name, &path, Some(&opts))
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("create worktree: {}", e),
+        })?;
+
+    Ok(PreparedWorktree {
+        path,
+        branch,
+        reused: false,
+        name,
+    })
+}
+
 #[async_trait]
 impl super::ToolImpl for EnterWorktreeTool {
     type Args = EnterWorktreeArgs;
@@ -110,6 +180,63 @@ fn sanitize_worktree_name(value: &str) -> String {
     }
 }
 
+fn current_branch_name(repo: &Repository) -> Option<String> {
+    repo.head()
+        .ok()
+        .and_then(|head| head.shorthand().map(str::to_string))
+}
+
+fn session_worktree_name(session_id: &str, branch: &str) -> String {
+    let session_short: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    let mut branch_part = sanitize_worktree_name(branch);
+    if branch_part.len() > 40 {
+        branch_part.truncate(40);
+    }
+    format!(
+        "omiga-{}-{}-{:08x}",
+        if session_short.is_empty() {
+            "session"
+        } else {
+            session_short.as_str()
+        },
+        branch_part,
+        stable_hash32(branch.as_bytes())
+    )
+}
+
+fn stable_hash32(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c9dc5u32, |hash, byte| {
+        (hash ^ u32::from(*byte)).wrapping_mul(0x01000193)
+    })
+}
+
+fn validate_existing_worktree_branch(path: &Path, branch: &str) -> Result<(), ToolError> {
+    let repo = Repository::open(path).map_err(|e| ToolError::ExecutionFailed {
+        message: format!("open existing worktree: {}", e),
+    })?;
+    let actual = current_branch_name(&repo).ok_or_else(|| ToolError::ExecutionFailed {
+        message: format!(
+            "Existing worktree at '{}' is not on a named branch",
+            path.display()
+        ),
+    })?;
+    if actual != branch {
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "Existing worktree at '{}' is on branch '{}' instead of '{}'",
+                path.display(),
+                actual,
+                branch
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn existing_worktree_path(repo: &Repository, name: &str) -> Result<Option<PathBuf>, ToolError> {
     let worktrees = repo.worktrees().map_err(|e| ToolError::ExecutionFailed {
         message: format!("list worktrees: {}", e),
@@ -183,4 +310,51 @@ pub fn schema() -> ToolSchema {
             "required": ["branch"]
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::{Repository, Signature};
+
+    fn init_repo_with_branch() -> (tempfile::TempDir, Repository) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init repo");
+        let sig = Signature::now("Omiga", "omiga@example.com").expect("signature");
+        std::fs::write(dir.path().join("README.md"), "hello\n").expect("write readme");
+        let mut index = repo.index().expect("index");
+        index.add_path(Path::new("README.md")).expect("add readme");
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        let commit_id = repo
+            .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .expect("commit");
+        let commit = repo.find_commit(commit_id).expect("find commit");
+        repo.branch("feature/worktree", &commit, false)
+            .expect("create branch");
+        drop(commit);
+        drop(tree);
+        (dir, repo)
+    }
+
+    #[test]
+    fn prepare_session_worktree_creates_and_reuses_branch_worktree() {
+        let (dir, repo) = init_repo_with_branch();
+        drop(repo);
+
+        let first =
+            prepare_session_worktree(dir.path(), "session-abcdef123456", Some("feature/worktree"))
+                .expect("prepare first worktree");
+        assert!(!first.reused);
+        assert_eq!(first.branch, "feature/worktree");
+        assert!(first.path.exists());
+        assert!(first.name.starts_with("omiga-sessiona-"));
+
+        let second =
+            prepare_session_worktree(dir.path(), "session-abcdef123456", Some("feature/worktree"))
+                .expect("prepare second worktree");
+        assert!(second.reused);
+        assert_eq!(second.path, first.path);
+        assert_eq!(second.branch, first.branch);
+    }
 }

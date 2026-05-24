@@ -37,6 +37,9 @@ pub struct SessionConfig {
     /// Whether to use a worktree for git operations in this session.
     #[serde(default)]
     pub use_worktree: bool,
+    /// Existing local branch selected for the session-owned worktree.
+    #[serde(default)]
+    pub worktree_branch: String,
     /// Runtime constraint overrides for this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_constraints: Option<crate::domain::runtime_constraints::RuntimeConstraintConfig>,
@@ -55,6 +58,7 @@ impl SessionConfig {
             local_venv_type: "none".to_string(),
             local_venv_name: String::new(),
             use_worktree: false,
+            worktree_branch: String::new(),
             runtime_constraints: None,
         }
     }

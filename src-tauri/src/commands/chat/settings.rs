@@ -932,6 +932,12 @@ pub struct SendMessageRequest {
     /// Conda env name, venv directory path, or pyenv version string.
     #[serde(default, rename = "localVenvName")]
     pub local_venv_name: Option<String>,
+    /// Use a session-owned Git worktree as the local tool execution root.
+    #[serde(default, rename = "useWorktree")]
+    pub use_worktree: Option<bool>,
+    /// Existing local branch selected for the session-owned worktree.
+    #[serde(default, rename = "worktreeBranch")]
+    pub worktree_branch: Option<String>,
     /// When set, truncate SQLite transcript after this user row and reuse it instead of inserting a new user message.
     #[serde(default, rename = "retryFromUserMessageId")]
     pub retry_from_user_message_id: Option<String>,

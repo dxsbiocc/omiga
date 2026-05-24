@@ -43,9 +43,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{Mutex, RwLock};
+
+static WORKTREE_PREPARE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Arguments for the `skill` tool (JSON) — aligned with `SkillTool` input (`skill` + `args`).
 #[derive(Debug, Deserialize)]
@@ -297,6 +299,44 @@ pub(super) fn resolve_session_project_root(project_path: &str) -> std::path::Pat
     } else {
         std::path::PathBuf::from(p)
     }
+}
+
+async fn resolve_execution_project_root(
+    canonical_project_root: &Path,
+    session_id: &str,
+    execution_environment: &str,
+    use_worktree: bool,
+    worktree_branch: Option<&str>,
+) -> Result<(PathBuf, Option<String>, bool), OmigaError> {
+    if !use_worktree {
+        return Ok((canonical_project_root.to_path_buf(), None, false));
+    }
+    if execution_environment != "local" {
+        return Err(OmigaError::Chat(ChatError::StreamError(
+            "worktree is only supported for local Git workspaces".to_string(),
+        )));
+    }
+
+    let _guard = WORKTREE_PREPARE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .await;
+    let prepared = crate::domain::tools::enter_worktree::prepare_session_worktree(
+        canonical_project_root,
+        session_id,
+        worktree_branch,
+    )
+    .map_err(|e| OmigaError::Chat(ChatError::StreamError(e.to_string())))?;
+    tracing::info!(
+        target: "omiga::worktree",
+        session_id = session_id,
+        branch = %prepared.branch,
+        path = %prepared.path.display(),
+        reused = prepared.reused,
+        name = %prepared.name,
+        "resolved session worktree"
+    );
+    Ok((prepared.path, Some(prepared.branch), prepared.reused))
 }
 
 fn completed_to_tool_calls(calls: &[(String, String, String)]) -> Option<Vec<ToolCall>> {
@@ -1670,6 +1710,10 @@ pub async fn send_message(
                             sandbox_backend: sandbox_backend.clone(),
                             local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
                             local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
+                            canonical_project_root: None,
+                            effective_project_root: None,
+                            use_worktree: false,
+                            worktree_branch: None,
                             env_store,
                             artifact_registry:
                                 crate::domain::session::artifacts::ArtifactRegistry::default(),
@@ -1748,6 +1792,10 @@ pub async fn send_message(
             sandbox_backend: sandbox_backend.clone(),
             local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
             local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
+            canonical_project_root: None,
+            effective_project_root: None,
+            use_worktree: false,
+            worktree_branch: None,
             env_store: env_store_for_new,
             artifact_registry: crate::domain::session::artifacts::ArtifactRegistry::default(),
         };
@@ -1762,6 +1810,58 @@ pub async fn send_message(
     };
 
     let project_root = resolve_session_project_root(&project_path);
+    let session_runtime_cfg = crate::domain::session::load_session_config(&session_id);
+    let requested_worktree_branch = request
+        .worktree_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let branch = session_runtime_cfg.worktree_branch.trim();
+            if branch.is_empty() {
+                None
+            } else {
+                Some(branch.to_string())
+            }
+        });
+    let use_worktree = request
+        .use_worktree
+        .unwrap_or(session_runtime_cfg.use_worktree);
+    let (execution_project_root, resolved_worktree_branch, worktree_reused) =
+        resolve_execution_project_root(
+            &project_root,
+            &session_id,
+            exec_env.as_str(),
+            use_worktree,
+            requested_worktree_branch.as_deref(),
+        )
+        .await?;
+    {
+        let mut sessions = app_state.chat.sessions.write().await;
+        if let Some(runtime) = sessions.get_mut(&session_id) {
+            runtime.canonical_project_root = Some(project_root.clone());
+            runtime.effective_project_root = Some(execution_project_root.clone());
+            runtime.use_worktree = use_worktree;
+            runtime.worktree_branch = resolved_worktree_branch.clone();
+        }
+    }
+    if use_worktree {
+        append_preflight_stage_event(
+            repo,
+            &session_id,
+            &user_message_id,
+            trace_mode.as_deref(),
+            "worktree",
+            0,
+            serde_json::json!({
+                "branch": resolved_worktree_branch,
+                "path": execution_project_root.display().to_string(),
+                "reused": worktree_reused,
+            }),
+        )
+        .await;
+    }
     let has_existing_ralph_state =
         crate::domain::ralph_state::read_state(&project_root, &session_id)
             .await
@@ -2410,7 +2510,6 @@ pub async fn send_message(
         serde_json::json!({ "provider": format!("{:?}", llm_config.provider), "model": llm_config.model }),
     )
     .await;
-    let session_runtime_cfg = crate::domain::session::load_session_config(&session_id);
     let resolved_runtime_constraints =
         crate::domain::runtime_constraints::resolve_runtime_constraint_config(
             &project_root,
@@ -4143,7 +4242,12 @@ pub async fn send_message(
                 let sessions = sessions_clone.read().await;
                 let project_root = sessions
                     .get(&session_id_clone)
-                    .map(|r| resolve_session_project_root(&r.session.project_path))
+                    .and_then(|r| r.effective_project_root.clone())
+                    .or_else(|| {
+                        sessions
+                            .get(&session_id_clone)
+                            .map(|r| resolve_session_project_root(&r.session.project_path))
+                    })
                     .unwrap_or_else(|| {
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
                     });
