@@ -522,6 +522,7 @@ interface PluginState {
   operators: OperatorSummary[];
   operatorDiagnostics: OperatorManifestDiagnostic[];
   operatorRegistryPath: string | null;
+  favoriteOperators: string[];
   operatorRuns: OperatorRunSummary[];
   chainTemplates: ChainTemplate[];
   envCheckResults: Map<string, PluginEnvironmentCheckResult>;
@@ -533,6 +534,8 @@ interface PluginState {
   error: string | null;
   loadPlugins: (projectRoot?: string, surface?: OperatorExecutionSurfaceArgs) => Promise<void>;
   loadOperators: (projectRoot?: string) => Promise<void>;
+  loadFavoriteOperators: () => Promise<void>;
+  toggleFavoriteOperator: (alias: string, pinned: boolean) => Promise<void>;
   refreshExposedOperatorEnvs: (projectRoot?: string) => Promise<void>;
   loadOperatorRuns: (projectRoot?: string, surface?: OperatorExecutionSurfaceArgs) => Promise<void>;
   loadChainTemplates: () => Promise<void>;
@@ -763,6 +766,28 @@ export function flattenMarketplacePlugins(
     }
   }
   return plugins;
+}
+
+function normalizeFavoriteOperators(aliases: string[]): string[] {
+  return Array.from(new Set(
+    aliases
+      .map((alias) => alias.trim())
+      .filter(Boolean),
+  )).sort((left, right) => left.localeCompare(right));
+}
+
+function updateFavoriteOperators(
+  aliases: string[],
+  alias: string,
+  pinned: boolean,
+): string[] {
+  const normalizedAlias = alias.trim();
+  if (!normalizedAlias) return normalizeFavoriteOperators(aliases);
+  return normalizeFavoriteOperators(
+    pinned
+      ? [...aliases, normalizedAlias]
+      : aliases.filter((value) => value.trim() !== normalizedAlias),
+  );
 }
 
 export function updatePluginEnabledInMarketplaces(
@@ -1164,6 +1189,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   operators: [],
   operatorDiagnostics: [],
   operatorRegistryPath: null,
+  favoriteOperators: [],
   operatorRuns: [],
   chainTemplates: [],
   activeOperatorTasks: {},
@@ -1232,6 +1258,36 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       get().refreshExposedOperatorEnvs(projectRoot);
     } catch (e) {
       set({ error: extractErrorMessage(e) });
+    }
+  },
+
+  loadFavoriteOperators: async () => {
+    try {
+      const favoriteOperators = await invoke<string[]>("list_operator_favorites");
+      set({ favoriteOperators: normalizeFavoriteOperators(favoriteOperators) });
+    } catch (e) {
+      set({ error: extractErrorMessage(e) });
+    }
+  },
+
+  toggleFavoriteOperator: async (alias: string, pinned: boolean) => {
+    const previousFavoriteOperators = get().favoriteOperators;
+    const nextFavoriteOperators = updateFavoriteOperators(
+      previousFavoriteOperators,
+      alias,
+      pinned,
+    );
+    set({ favoriteOperators: nextFavoriteOperators, error: null });
+    try {
+      const favoriteOperators = await invoke<string[]>("toggle_operator_favorite", {
+        alias,
+        pinned,
+      });
+      set({ favoriteOperators: normalizeFavoriteOperators(favoriteOperators) });
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ favoriteOperators: previousFavoriteOperators, error });
+      throw new Error(error);
     }
   },
 

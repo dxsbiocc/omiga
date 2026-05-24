@@ -27,9 +27,9 @@ const pluginStoreMock = vi.hoisted(() => ({
       steps: unknown[];
       updatedAtMs: number;
     }>,
-    loadChainTemplates: vi.fn(),
-    saveChainTemplate: vi.fn(),
-    deleteChainTemplate: vi.fn(),
+    loadChainTemplates: vi.fn().mockResolvedValue(undefined),
+    saveChainTemplate: vi.fn().mockResolvedValue(undefined),
+    deleteChainTemplate: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -44,6 +44,15 @@ vi.mock("react", async (importOriginal) => {
     useRef: <T,>(initial: T) => hookRuntimeRef.current?.useRef(initial),
     useState: <T,>(initial: T | (() => T)) =>
       hookRuntimeRef.current?.useState(initial),
+  };
+});
+
+vi.mock("../../state/pluginStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../state/pluginStore")>();
+  return {
+    ...actual,
+    usePluginStore: <T,>(selector: (state: typeof pluginStoreMock.state) => T): T =>
+      selector(pluginStoreMock.state),
   };
 });
 
@@ -70,12 +79,6 @@ vi.mock("@mui/icons-material", async () => {
     "SaveRounded",
   ]);
 });
-
-vi.mock("../../state/pluginStore", () => ({
-  __esModule: true,
-  usePluginStore: <T,>(selector: (state: typeof pluginStoreMock.state) => T): T =>
-    selector(pluginStoreMock.state),
-}));
 
 const operators: OperatorSummary[] = [
   {
