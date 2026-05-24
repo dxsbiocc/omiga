@@ -37,8 +37,6 @@ import {
   Collapse,
   Select,
   FormControl,
-  FormControlLabel,
-  Checkbox,
   Paper,
   Chip,
   Popover,
@@ -178,6 +176,8 @@ export const COMPOSER_INPUT_JOINED_BORDER_RADIUS = "0 0 24px 24px";
 export const COMPOSER_CONTEXT_TRAY_PLACEMENT = "above-input";
 export const COMPOSER_CONTEXT_TRAY_MAX_HEIGHT = "min(28vh, 152px)";
 export const COMPOSER_CONTEXT_ITEM_MAX_WIDTH = "calc((100% - 16px) / 3)";
+export const COMPOSER_PERMISSION_MENU_PLACEMENT = "above-button";
+export const COMPOSER_PERMISSION_MENU_MIN_WIDTH = 188;
 
 /** React StrictMode 下 effect 会双跑，避免同页两次 `invoke` + 弹窗 */
 let rsyncAvailabilityCheckStarted = false;
@@ -845,6 +845,7 @@ export const ChatComposer = memo(function ChatComposer({
     popComposerSelectedPluginId,
     useWorktree,
     setUseWorktree,
+    worktreeBranch,
     environment,
     setEnvironment,
     sshServer,
@@ -1258,8 +1259,16 @@ export const ChatComposer = memo(function ChatComposer({
   const branchValue = useMemo(() => {
     if (!gitInfo?.isGit) return "";
     const saved = selectedBranchByRoot[rootKey];
-    return saved ?? gitInfo.currentBranch;
-  }, [gitInfo, rootKey, selectedBranchByRoot]);
+    return saved ?? (worktreeBranch || gitInfo.currentBranch);
+  }, [gitInfo, rootKey, selectedBranchByRoot, worktreeBranch]);
+  const worktreeUnavailableReason = needsWorkspacePath
+    ? "请先选择本地工作区"
+    : environment !== "local"
+      ? "worktree 仅支持本地 Git 工作区"
+      : !gitInfo?.isGit
+        ? "当前工作区不是 Git 仓库"
+        : "";
+  const worktreeDisabled = Boolean(worktreeUnavailableReason);
 
   const selectedAgentDescription = useMemo(() => {
     const row = availableAgents.find((a) => a.agentType === composerAgentType);
@@ -3445,6 +3454,37 @@ export const ChatComposer = memo(function ChatComposer({
             </MenuItem>
           </Menu>
 
+          <ProviderSwitcher
+            onOpenSettings={() => {
+              setSettingsTabIndex(0);
+              setSettingsOpen(true);
+              setRightPanelMode("settings");
+            }}
+            triggerSx={{
+              minHeight: "var(--composer-toolbar-h)",
+              height: "var(--composer-toolbar-h)",
+              px: 1,
+              py: 0,
+              borderRadius: 2.5,
+              borderColor: edge(0.14),
+              color: ink,
+              ...composerLabelText,
+              bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
+              boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
+              transition:
+                "border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease",
+              "@media (prefers-reduced-motion: reduce)": {
+                transition: "none",
+              },
+              "&:hover": {
+                borderColor: alpha(accent, 0.42),
+                bgcolor: isDark ? alpha(paper, 0.4) : alpha(accent, 0.3),
+                boxShadow: `0 2px 12px ${alpha(accent, 0.14)}, 0 0 0 1px ${alpha(accent, 0.16)}`,
+                transform: "translateY(-1px)",
+              },
+            }}
+          />
+
           <Box sx={{ flex: 1, minWidth: 8 }} />
 
           <Button
@@ -3525,74 +3565,60 @@ export const ChatComposer = memo(function ChatComposer({
             anchorEl={permissionAnchor}
             open={Boolean(permissionAnchor)}
             onClose={() => setPermissionAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 260, borderRadius: 2 } } }}
+            anchorOrigin={{ vertical: "top", horizontal: "right" }}
+            transformOrigin={{ vertical: "bottom", horizontal: "right" }}
+            MenuListProps={{ dense: true }}
+            slotProps={{
+              paper: {
+                sx: {
+                  minWidth: COMPOSER_PERMISSION_MENU_MIN_WIDTH,
+                  borderRadius: 2,
+                  mt: -1,
+                },
+              },
+            }}
           >
-            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
-              <Tooltip
-                title="工具与编辑的确认策略"
-                placement="top"
-                enterDelay={200}
-              >
-                <Typography
-                  variant="subtitle2"
-                  component="span"
-                  sx={{
-                    display: "inline-block",
-                    cursor: "default",
-                    ...composerLabelText,
-                    color: ink,
-                  }}
-                >
-                  权限模式
-                </Typography>
-              </Tooltip>
-            </Box>
             {(Object.keys(PERMISSION_META) as PermissionMode[]).map((key) => {
               const rowAccent = permissionModeAccent(theme, key);
               return (
-                <Tooltip
+                <MenuItem
                   key={key}
-                  title={PERMISSION_META[key].hint}
-                  placement="left"
-                  enterDelay={200}
-                >
-                  <MenuItem
-                    selected={permissionMode === key}
-                    onClick={() => {
-                      setPermissionMode(key);
-                      setPermissionAnchor(null);
-                    }}
-                    sx={{
-                      "&.Mui-selected": {
-                        bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
-                        "&:hover": {
-                          bgcolor: alpha(rowAccent, isDark ? 0.26 : 0.16),
-                        },
+                  selected={permissionMode === key}
+                  onClick={() => {
+                    setPermissionMode(key);
+                    setPermissionAnchor(null);
+                  }}
+                  sx={{
+                    minHeight: 42,
+                    "&.Mui-selected": {
+                      bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
+                      "&:hover": {
+                        bgcolor: alpha(rowAccent, isDark ? 0.26 : 0.16),
                       },
+                    },
+                  }}
+                >
+                  <ListItemIcon
+                    sx={{
+                      minWidth: 36,
+                      lineHeight: 0,
+                      color: rowAccent,
+                      "& svg": { display: "block" },
                     }}
                   >
-                    <ListItemIcon
-                      sx={{
-                        minWidth: 40,
-                        lineHeight: 0,
-                        color: rowAccent,
-                        "& svg": { display: "block" },
-                      }}
-                    >
-                      {createElement(PERMISSION_ICON[key], {
-                        size: 20,
-                        strokeWidth: 2,
-                        color: rowAccent,
-                      })}
-                    </ListItemIcon>
-                    <ListItemText
-                      primary={PERMISSION_META[key].label}
-                      primaryTypographyProps={{
-                        sx: { ...composerLabelText, color: rowAccent },
-                      }}
-                    />
-                  </MenuItem>
-                </Tooltip>
+                    {createElement(PERMISSION_ICON[key], {
+                      size: 20,
+                      strokeWidth: 2,
+                      color: rowAccent,
+                    })}
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={PERMISSION_META[key].label}
+                    primaryTypographyProps={{
+                      sx: { ...composerLabelText, color: rowAccent },
+                    }}
+                  />
+                </MenuItem>
               );
             })}
           </Menu>
@@ -3841,40 +3867,6 @@ export const ChatComposer = memo(function ChatComposer({
             spacing={0.75}
             sx={{ flexShrink: 0 }}
           >
-            <ProviderSwitcher
-              onOpenSettings={() => {
-                setSettingsTabIndex(0);
-                setSettingsOpen(true);
-                setRightPanelMode("settings");
-              }}
-              triggerSx={{
-                minHeight: "var(--composer-toolbar-h)",
-                height: "var(--composer-toolbar-h)",
-                maxWidth: { xs: 200, sm: 260 },
-                px: 1,
-                py: 0,
-                borderRadius: 2.5,
-                borderColor: edge(0.14),
-                color: ink,
-                ...composerLabelText,
-                bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
-                boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
-                transition:
-                  "border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease",
-                "@media (prefers-reduced-motion: reduce)": {
-                  transition: "none",
-                },
-                "&:hover": {
-                  borderColor: alpha(accent, 0.42),
-                  bgcolor: isDark ? alpha(paper, 0.4) : alpha(accent, 0.3),
-                  boxShadow: `0 2px 12px ${alpha(accent, 0.14)}, 0 0 0 1px ${alpha(accent, 0.16)}`,
-                  transform: "translateY(-1px)",
-                },
-                "& .MuiChip-root": {
-                  maxWidth: 100,
-                },
-              }}
-            />
             {agentTurnActive && onCancel ? (
               <Tooltip title="取消任务">
                 <IconButton
@@ -3942,10 +3934,9 @@ export const ChatComposer = memo(function ChatComposer({
       <Stack
         direction="row"
         alignItems="center"
-        justifyContent="space-between"
         flexWrap="wrap"
         rowGap={0.75}
-        columnGap={1.5}
+        columnGap={1}
         sx={{
           px: 1.25,
           py: 0.65,
@@ -3969,9 +3960,9 @@ export const ChatComposer = memo(function ChatComposer({
         <Stack
           direction="row"
           alignItems="center"
-          spacing={1}
+          spacing={0.75}
           flexWrap="wrap"
-          sx={{ flex: 1, minWidth: 0, justifyContent: "flex-start" }}
+          sx={{ flex: "0 1 auto", minWidth: 0, justifyContent: "flex-start" }}
         >
           {/* 执行环境选择器 */}
           <Button
@@ -4155,7 +4146,7 @@ export const ChatComposer = memo(function ChatComposer({
               >
                 <GitBranch size={18} strokeWidth={2} />
               </Box>
-              <FormControl size="small" sx={{ minWidth: 148 }}>
+              <FormControl size="small" sx={{ minWidth: 132, maxWidth: 220 }}>
                 <Select
                   value={branchValue || gitInfo.currentBranch}
                   displayEmpty
@@ -4179,6 +4170,9 @@ export const ChatComposer = memo(function ChatComposer({
                       py: 0,
                       minHeight: "var(--composer-footer-h)",
                       boxSizing: "border-box",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
                     },
                     "& .MuiOutlinedInput-notchedOutline": {
                       borderColor: edge(0.14),
@@ -4224,51 +4218,75 @@ export const ChatComposer = memo(function ChatComposer({
           sx={{
             flexShrink: 0,
             justifyContent: "flex-end",
-            ml: { xs: 0, sm: "auto" },
+            ml: 0,
           }}
         >
-          <FormControlLabel
-            control={
-              <Checkbox
-                size="small"
-                checked={useWorktree}
-                onChange={(_, v) => setUseWorktree(v)}
-                sx={{
-                  py: 0,
-                  color: mut,
-                  "&.Mui-checked": { color: accent },
-                  "& .MuiSvgIcon-root": { fontSize: 20 },
-                }}
-              />
+          <Tooltip
+            title={
+              worktreeUnavailableReason ||
+              "在当前分支的会话 worktree 中运行本地工具"
             }
-            label={
-              <Typography
-                variant="body2"
-                sx={{ ...composerLabelText, color: ink }}
+          >
+            <span>
+              <Button
+                size="small"
+                variant="text"
+                color="inherit"
+                disabled={worktreeDisabled}
+                onClick={() => {
+                  if (!worktreeDisabled) setUseWorktree(!useWorktree);
+                }}
+                startIcon={
+                  <GitBranch
+                    size={15}
+                    strokeWidth={2}
+                    color={
+                      worktreeDisabled
+                        ? theme.palette.action.disabled
+                        : useWorktree
+                          ? accent
+                          : mut
+                    }
+                  />
+                }
+                sx={{
+                  textTransform: "none",
+                  color: worktreeDisabled
+                    ? theme.palette.action.disabled
+                    : useWorktree
+                      ? accent
+                      : ink,
+                  ...composerLabelText,
+                  borderRadius: 2.5,
+                  px: 0.85,
+                  py: 0,
+                  minHeight: "var(--composer-footer-h)",
+                  height: "var(--composer-footer-h)",
+                  border: `1px solid ${
+                    useWorktree && !worktreeDisabled
+                      ? alpha(accent, 0.32)
+                      : "transparent"
+                  }`,
+                  bgcolor:
+                    useWorktree && !worktreeDisabled
+                      ? alpha(accent, isDark ? 0.16 : 0.1)
+                      : "transparent",
+                  boxShadow: "none",
+                  gap: 0.35,
+                  "& .MuiButton-startIcon": { marginRight: 0, marginLeft: 0 },
+                  "&:hover": {
+                    bgcolor:
+                      useWorktree && !worktreeDisabled
+                        ? alpha(accent, isDark ? 0.22 : 0.14)
+                        : alpha(accent, 0.12),
+                    borderColor: alpha(accent, 0.28),
+                  },
+                }}
               >
                 worktree
-              </Typography>
-            }
-            sx={{
-              mr: 0,
-              px: 0.5,
-              py: 0,
-              minHeight: "var(--composer-footer-h)",
-              height: "var(--composer-footer-h)",
-              borderRadius: 2,
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              transition: "background-color 0.2s ease, border-color 0.2s ease",
-              "& .MuiFormControlLabel-label": {
-                ...composerLabelText,
-                color: ink,
-              },
-              "&:hover": {
-                bgcolor: alpha(accent, 0.3),
-                borderColor: alpha(accent, 0.24),
-              },
-            }}
-          />
+              </Button>
+            </span>
+          </Tooltip>
 
           <Menu
             anchorEl={envAnchor}

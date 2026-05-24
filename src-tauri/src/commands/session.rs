@@ -659,6 +659,7 @@ pub struct SessionConfigResponse {
     pub local_venv_type: String,
     pub local_venv_name: String,
     pub use_worktree: bool,
+    pub worktree_branch: String,
     pub runtime_constraints: Option<crate::domain::runtime_constraints::RuntimeConstraintConfig>,
 }
 
@@ -674,6 +675,7 @@ impl From<SessionConfig> for SessionConfigResponse {
             local_venv_type: cfg.local_venv_type,
             local_venv_name: cfg.local_venv_name,
             use_worktree: cfg.use_worktree,
+            worktree_branch: cfg.worktree_branch,
             runtime_constraints: cfg.runtime_constraints,
         }
     }
@@ -703,6 +705,7 @@ pub async fn save_session_config_command(
         local_venv_type: config.local_venv_type,
         local_venv_name: config.local_venv_name,
         use_worktree: config.use_worktree,
+        worktree_branch: config.worktree_branch,
         runtime_constraints: config.runtime_constraints.or(existing.runtime_constraints),
     };
     save_session_config(&session_id, &cfg)
