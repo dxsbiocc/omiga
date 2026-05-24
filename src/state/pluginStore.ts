@@ -625,6 +625,7 @@ interface PluginState {
   /** Latest async operator scheduler status keyed by alias. */
   activeOperatorTaskStatus: Record<string, OperatorTaskQueueStatus>;
   hydrateActiveOperatorTasks: () => Promise<void>;
+  cleanupOperatorTaskListeners: () => void;
   runOperatorAsync: (
     alias: string,
     invocation: OperatorInvocationArguments,
@@ -681,6 +682,12 @@ function detachOperatorTaskListener(taskId: string): void {
   if (!unlisten) return;
   operatorTaskUnlisteners.delete(taskId);
   unlisten();
+}
+
+function detachAllOperatorTaskListeners(): void {
+  for (const taskId of Array.from(operatorTaskUnlisteners.keys())) {
+    detachOperatorTaskListener(taskId);
+  }
 }
 
 async function attachOperatorTaskListener({
@@ -1875,6 +1882,10 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     } catch (e) {
       set({ error: extractErrorMessage(e) });
     }
+  },
+
+  cleanupOperatorTaskListeners: () => {
+    detachAllOperatorTaskListeners();
   },
 
   runOperatorAsync: async (

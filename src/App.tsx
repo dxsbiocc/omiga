@@ -242,7 +242,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void usePluginStore.getState().hydrateActiveOperatorTasks();
+    let disposed = false;
+    const hydratePromise = usePluginStore.getState().hydrateActiveOperatorTasks();
+    void hydratePromise.finally(() => {
+      if (disposed) {
+        usePluginStore.getState().cleanupOperatorTaskListeners();
+      }
+    });
+    return () => {
+      disposed = true;
+      usePluginStore.getState().cleanupOperatorTaskListeners();
+    };
   }, []);
 
   // Listen for cron job fired events — create an AI session and send the task

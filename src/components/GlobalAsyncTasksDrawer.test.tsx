@@ -121,6 +121,19 @@ afterEach(() => {
 });
 
 describe("GlobalAsyncTasksDrawer", () => {
+  it("does not start an elapsed timer when there are no active tasks", () => {
+    setStoreTasks({
+      activeOperatorTasks: {},
+      activeOperatorTaskStartedAt: {},
+      activeOperatorTaskStatus: {},
+    });
+
+    const harness = createDrawerHarness();
+
+    expect(textContent(harness.tree)).toBe("");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("shows the active task count on the floating toggle and opens the drawer", () => {
     setStoreTasks({
       activeOperatorTasks: {

@@ -1,9 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const listenTauriEventMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+}));
+
+vi.mock("../utils/tauriEvents", () => ({
+  listenTauriEvent: listenTauriEventMock,
 }));
 
 import {
@@ -348,13 +353,19 @@ describe("summarizeOperatorRunResult", () => {
 
 describe("usePluginStore operator actions", () => {
   beforeEach(() => {
+    usePluginStore.getState().cleanupOperatorTaskListeners();
     invokeMock.mockReset();
+    listenTauriEventMock.mockReset();
+    listenTauriEventMock.mockResolvedValue(vi.fn());
     usePluginStore.setState({
       marketplaces: [],
       operators: [],
       operatorDiagnostics: [],
       operatorRegistryPath: null,
       operatorRuns: [],
+      activeOperatorTasks: {},
+      activeOperatorTaskStartedAt: {},
+      activeOperatorTaskStatus: {},
       retrievalStatuses: [],
       processPoolStatuses: [],
       remoteMarketplaceChecks: [],
@@ -727,6 +738,32 @@ describe("usePluginStore operator actions", () => {
       stdoutTail: "partial stdout\n",
       stderrTail: "bad flag\n",
     });
+  });
+
+  it("detaches async operator task listeners during cleanup", async () => {
+    const unlisten = vi.fn();
+    listenTauriEventMock.mockResolvedValueOnce(unlisten);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "run_operator_async") {
+        return { taskId: "task-async-1" };
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().runOperatorAsync(
+      "write_text_report",
+      { inputs: {}, params: {}, resources: {} },
+    );
+
+    expect(listenTauriEventMock).toHaveBeenCalledWith(
+      "operator-task-task-async-1",
+      expect.any(Function),
+    );
+
+    usePluginStore.getState().cleanupOperatorTaskListeners();
+    usePluginStore.getState().cleanupOperatorTaskListeners();
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
   });
 
   it("invokes operator run cleanup with the active execution surface", async () => {

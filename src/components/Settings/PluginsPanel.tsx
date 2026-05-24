@@ -5258,18 +5258,6 @@ function OperatorCatalogSection({
             {favoriteOperatorCount > 0 && (
               <Chip size="small" color="warning" variant="outlined" label={`${favoriteOperatorCount} pinned`} />
             )}
-            <Chip
-              size="small"
-              clickable
-              color={favoritesOnly ? "primary" : "default"}
-              variant={favoritesOnly ? "filled" : "outlined"}
-              icon={favoritesOnly ? <StarRounded /> : <StarBorderRounded />}
-              label="Favorites only"
-              onClick={(event) => {
-                event.stopPropagation();
-                setFavoritesOnly((value) => !value);
-              }}
-            />
             {diagnosticIssueCount > 0 && (
               <Chip size="small" color="warning" variant="filled" label={`${diagnosticIssueCount} manifest issues`} />
             )}
@@ -5292,19 +5280,6 @@ function OperatorCatalogSection({
               <Chip size="small" color="error" variant="filled" label={`${failedRunCount} failed runs`} />
             )}
           </Stack>
-          <Button
-            size="small"
-            variant="outlined"
-            startIcon={<AccountTreeRounded />}
-            disabled={busy}
-            onClick={(event) => {
-              event.stopPropagation();
-              setChainDialogOpen(true);
-            }}
-            sx={{ textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap", flexShrink: 0 }}
-          >
-            Open chain editor
-          </Button>
         </Stack>
       </AccordionSummary>
       <AccordionDetails sx={{ px: 2, pt: 0.75, pb: 2 }}>
@@ -5313,15 +5288,37 @@ function OperatorCatalogSection({
             <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
               Advanced controls for plugin-defined tools agents can call directly after registration. Runtime follows the current session environment; the registry stays local.
             </Typography>
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<AddRounded />}
-              onClick={(e) => { e.stopPropagation(); setCreateDialogOpen(true); }}
-              sx={{ textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap", flexShrink: 0 }}
-            >
-              New Script Operator
-            </Button>
+            {/* Keep actions out of AccordionSummary so its button only expands the operator list. */}
+            <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
+              <Chip
+                size="small"
+                clickable
+                color={favoritesOnly ? "primary" : "default"}
+                variant={favoritesOnly ? "filled" : "outlined"}
+                icon={favoritesOnly ? <StarRounded /> : <StarBorderRounded />}
+                label="Favorites only"
+                onClick={() => setFavoritesOnly((value) => !value)}
+              />
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<AccountTreeRounded />}
+                disabled={busy}
+                onClick={() => setChainDialogOpen(true)}
+                sx={{ textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap", flexShrink: 0 }}
+              >
+                Open chain editor
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<AddRounded />}
+                onClick={() => setCreateDialogOpen(true)}
+                sx={{ textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap", flexShrink: 0 }}
+              >
+                New Script Operator
+              </Button>
+            </Stack>
           </Stack>
           {registryPath && (
             <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
