@@ -18,6 +18,21 @@ const hookRuntimeRef = vi.hoisted(() => ({
   current: null as HookRuntimeApi | null,
 }));
 
+const pluginStoreMock = vi.hoisted(() => ({
+  state: {
+    chainTemplates: [] as Array<{
+      id: string;
+      name: string;
+      description?: string | null;
+      steps: unknown[];
+      updatedAtMs: number;
+    }>,
+    loadChainTemplates: vi.fn(),
+    saveChainTemplate: vi.fn(),
+    deleteChainTemplate: vi.fn(),
+  },
+}));
+
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
@@ -51,8 +66,16 @@ vi.mock("@mui/icons-material", async () => {
     "ArrowUpwardRounded",
     "CloseRounded",
     "DeleteOutlineRounded",
+    "FolderOpenRounded",
+    "SaveRounded",
   ]);
 });
+
+vi.mock("../../state/pluginStore", () => ({
+  __esModule: true,
+  usePluginStore: <T,>(selector: (state: typeof pluginStoreMock.state) => T): T =>
+    selector(pluginStoreMock.state),
+}));
 
 const operators: OperatorSummary[] = [
   {
@@ -175,7 +198,15 @@ const stepChips = (harness: ComponentHarness): RenderedNode[] =>
 
 let consoleErrorSpy: ReturnType<typeof vi.spyOn> | null = null;
 
+const resetPluginStoreMock = () => {
+  pluginStoreMock.state.chainTemplates = [];
+  pluginStoreMock.state.loadChainTemplates = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.saveChainTemplate = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.deleteChainTemplate = vi.fn().mockResolvedValue(undefined);
+};
+
 beforeEach(() => {
+  resetPluginStoreMock();
   const originalError = console.error;
   consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((message, ...args) => {
     if (
