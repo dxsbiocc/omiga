@@ -19,10 +19,18 @@ const hookRuntimeRef = vi.hoisted(() => ({
 }));
 
 const pluginStoreMock = vi.hoisted(() => ({
-  chainTemplates: [],
-  loadChainTemplates: vi.fn().mockResolvedValue(undefined),
-  saveChainTemplate: vi.fn().mockResolvedValue(undefined),
-  deleteChainTemplate: vi.fn().mockResolvedValue(undefined),
+  state: {
+    chainTemplates: [] as Array<{
+      id: string;
+      name: string;
+      description?: string | null;
+      steps: unknown[];
+      updatedAtMs: number;
+    }>,
+    loadChainTemplates: vi.fn().mockResolvedValue(undefined),
+    saveChainTemplate: vi.fn().mockResolvedValue(undefined),
+    deleteChainTemplate: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -41,15 +49,10 @@ vi.mock("react", async (importOriginal) => {
 
 vi.mock("../../state/pluginStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../state/pluginStore")>();
-  const state = {
-    chainTemplates: pluginStoreMock.chainTemplates,
-    loadChainTemplates: pluginStoreMock.loadChainTemplates,
-    saveChainTemplate: pluginStoreMock.saveChainTemplate,
-    deleteChainTemplate: pluginStoreMock.deleteChainTemplate,
-  };
   return {
     ...actual,
-    usePluginStore: (selector: (value: typeof state) => unknown) => selector(state),
+    usePluginStore: <T,>(selector: (state: typeof pluginStoreMock.state) => T): T =>
+      selector(pluginStoreMock.state),
   };
 });
 
@@ -207,8 +210,15 @@ const dependencyPickers = (harness: ComponentHarness): RenderedNode[] =>
 
 let consoleErrorSpy: ReturnType<typeof vi.spyOn> | null = null;
 
+const resetPluginStoreMock = () => {
+  pluginStoreMock.state.chainTemplates = [];
+  pluginStoreMock.state.loadChainTemplates = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.saveChainTemplate = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.deleteChainTemplate = vi.fn().mockResolvedValue(undefined);
+};
+
 beforeEach(() => {
-  pluginStoreMock.chainTemplates = [];
+  resetPluginStoreMock();
   const originalError = console.error;
   consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((message, ...args) => {
     if (
@@ -224,10 +234,6 @@ beforeEach(() => {
 afterEach(() => {
   hookRuntimeRef.current?.cleanup();
   hookRuntimeRef.current = null;
-  pluginStoreMock.chainTemplates = [];
-  pluginStoreMock.loadChainTemplates.mockClear();
-  pluginStoreMock.saveChainTemplate.mockClear();
-  pluginStoreMock.deleteChainTemplate.mockClear();
   consoleErrorSpy?.mockRestore();
   consoleErrorSpy = null;
   vi.clearAllMocks();

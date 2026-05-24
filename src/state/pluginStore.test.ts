@@ -309,6 +309,7 @@ describe("summarizeOperatorRunResult", () => {
     ).toMatchObject({
       runId: "oprun_20260506_smoke",
       runKind: "smoke",
+      kind: "smoke",
       smokeTestId: "default",
       smokeTestName: "Write text report smoke",
       errorKind: "tool_exit_nonzero",
@@ -322,6 +323,25 @@ describe("summarizeOperatorRunResult", () => {
       cacheHit: true,
       cacheSourceRunId: "oprun_20260506_source",
       cacheSourceRunDir: "/project/.omiga/runs/oprun_20260506_source",
+    });
+  });
+
+  it("preserves chain parent execution ids for timeline grouping", () => {
+    expect(
+      summarizeOperatorRunResult({
+        status: "succeeded",
+        runId: "oprun_20260506_chain_step",
+        runDir: "/project/.omiga/runs/oprun_20260506_chain_step",
+        runContext: {
+          kind: "chain",
+          parentExecutionId: "execrec_chain_parent",
+        },
+      }),
+    ).toMatchObject({
+      runId: "oprun_20260506_chain_step",
+      runKind: "chain",
+      kind: "chain",
+      parentExecutionId: "execrec_chain_parent",
     });
   });
 });
