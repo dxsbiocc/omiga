@@ -56,6 +56,8 @@ type FocusedField = {
 
 type ChainEditorStep = {
   id: string;
+  label: string;
+  dependsOn: string[];
   operatorKey: string | null;
   values: {
     inputs: Record<string, string>;
@@ -66,6 +68,8 @@ type ChainEditorStep = {
 let nextStepId = 1;
 
 const createStepId = () => `operator-chain-step-${nextStepId++}`;
+
+const defaultStepLabel = (index: number): string => `step_${index + 1}`;
 
 const operatorKey = (operator: OperatorSummary): string =>
   `${operator.id}:${operator.version}:${operator.sourcePlugin}:${operator.manifestPath}`;
@@ -117,11 +121,36 @@ const createValuesForOperator = (operator: OperatorSummary) => ({
   ),
 });
 
-const createStep = (operator: OperatorSummary | null): ChainEditorStep => ({
+const createStep = (
+  operator: OperatorSummary | null,
+  label: string,
+  dependsOn: string[] = [],
+): ChainEditorStep => ({
   id: createStepId(),
+  label,
+  dependsOn,
   operatorKey: operator ? operatorKey(operator) : null,
   values: operator ? createValuesForOperator(operator) : { inputs: {}, params: {} },
 });
+
+const normalizedStepLabel = (step: ChainEditorStep, index: number): string =>
+  step.label.trim() || defaultStepLabel(index);
+
+const normalizedTemplateStepLabel = (
+  step: OperatorChainStep,
+  index: number,
+): string => step.label?.trim() || defaultStepLabel(index);
+
+const nextDefaultStepLabel = (steps: ChainEditorStep[]): string => {
+  const existing = new Set(steps.map((step, index) => normalizedStepLabel(step, index)));
+  let index = steps.length;
+  let label = defaultStepLabel(index);
+  while (existing.has(label)) {
+    index += 1;
+    label = defaultStepLabel(index);
+  }
+  return label;
+};
 
 const fieldKind = (field: OperatorFieldSpec): string =>
   field.kind?.trim().toLowerCase() ?? "";
@@ -180,6 +209,52 @@ const requiredFieldsComplete = (
     if (!field.required && !field.nonEmpty) return true;
     return (values[name] ?? "").trim().length > 0;
   });
+
+const validateChainGraph = (steps: ChainEditorStep[]): string | null => {
+  const labels = steps.map((step, index) => normalizedStepLabel(step, index));
+  const labelToIndex = new Map<string, number>();
+  for (const [index, label] of labels.entries()) {
+    const previousIndex = labelToIndex.get(label);
+    if (previousIndex !== undefined) {
+      return `Step labels must be unique. "${label}" is used by steps ${previousIndex + 1} and ${index + 1}.`;
+    }
+    labelToIndex.set(label, index);
+  }
+
+  const inDegree = Array.from({ length: steps.length }, () => 0);
+  const dependents = Array.from({ length: steps.length }, () => [] as number[]);
+  for (const [index, step] of steps.entries()) {
+    const ownLabel = labels[index];
+    const dependencies = new Set(step.dependsOn.map((label) => label.trim()).filter(Boolean));
+    for (const dependency of dependencies) {
+      if (dependency === ownLabel) {
+        return `Step "${ownLabel}" cannot depend on itself.`;
+      }
+      const dependencyIndex = labelToIndex.get(dependency);
+      if (dependencyIndex === undefined) {
+        return `Step "${ownLabel}" depends on unknown label "${dependency}".`;
+      }
+      inDegree[index] += 1;
+      dependents[dependencyIndex].push(index);
+    }
+  }
+
+  const ready = inDegree
+    .map((degree, index) => (degree === 0 ? index : -1))
+    .filter((index) => index >= 0);
+  let visited = 0;
+  while (ready.length > 0) {
+    const index = ready.pop();
+    if (index === undefined) break;
+    visited += 1;
+    for (const dependent of dependents[index]) {
+      inDegree[dependent] -= 1;
+      if (inDegree[dependent] === 0) ready.push(dependent);
+    }
+  }
+
+  return visited === steps.length ? null : "Dependency graph has a cycle.";
+};
 
 const stringifyArgumentValue = (value: unknown): string => {
   if (value === undefined || value === null) return "";
@@ -300,6 +375,13 @@ export function OperatorChainEditorDialog({
     return byAlias;
   }, [exposedOperators]);
 
+  const stepLabels = useMemo(
+    () => steps.map((step, index) => normalizedStepLabel(step, index)),
+    [steps],
+  );
+
+  const chainGraphError = useMemo(() => validateChainGraph(steps), [steps]);
+
   useEffect(() => {
     if (!open) return;
     setSteps([]);
@@ -354,7 +436,47 @@ export function OperatorChainEditorDialog({
   };
 
   const handleAddStep = () => {
-    setSteps((current) => [...current, createStep(exposedOperators[0] ?? null)]);
+    setSteps((current) => {
+      const label = nextDefaultStepLabel(current);
+      const dependencies =
+        current.length > 0
+          ? [normalizedStepLabel(current[current.length - 1], current.length - 1)]
+          : [];
+      return [...current, createStep(exposedOperators[0] ?? null, label, dependencies)];
+    });
+  };
+
+  const handleStepLabelChange = (stepId: string, value: string) => {
+    setSteps((current) => {
+      const stepIndex = current.findIndex((step) => step.id === stepId);
+      if (stepIndex < 0) return current;
+      const oldLabel = normalizedStepLabel(current[stepIndex], stepIndex);
+      const newLabel = value.trim() || defaultStepLabel(stepIndex);
+      return current.map((step) => {
+        if (step.id === stepId) {
+          return { ...step, label: value };
+        }
+        return {
+          ...step,
+          dependsOn: step.dependsOn.map((dependency) =>
+            dependency === oldLabel ? newLabel : dependency,
+          ),
+        };
+      });
+    });
+  };
+
+  const handleDependsOnChange = (stepId: string, value: readonly string[]) => {
+    setSteps((current) =>
+      current.map((step, index) => {
+        if (step.id !== stepId) return step;
+        const ownLabel = normalizedStepLabel(step, index);
+        return {
+          ...step,
+          dependsOn: Array.from(new Set(value.filter((label) => label !== ownLabel))),
+        };
+      }),
+    );
   };
 
   const handleMoveStep = (index: number, direction: -1 | 1) => {
@@ -368,11 +490,25 @@ export function OperatorChainEditorDialog({
   };
 
   const handleRemoveStep = (stepId: string) => {
-    setSteps((current) => current.filter((step) => step.id !== stepId));
+    setSteps((current) => {
+      const removedIndex = current.findIndex((step) => step.id === stepId);
+      const removedLabel =
+        removedIndex >= 0 ? normalizedStepLabel(current[removedIndex], removedIndex) : null;
+      return current
+        .filter((step) => step.id !== stepId)
+        .map((step) =>
+          removedLabel
+            ? {
+                ...step,
+                dependsOn: step.dependsOn.filter((dependency) => dependency !== removedLabel),
+              }
+            : step,
+        );
+    });
     setFocusedField((current) => (current?.stepId === stepId ? null : current));
   };
 
-  const insertOutputReference = (targetStepId: string, sourceIndex: number) => {
+  const insertOutputReference = (targetStepId: string, sourceLabel: string) => {
     const targetField =
       focusedField?.stepId === targetStepId ? focusedField : null;
     if (!targetField) return;
@@ -381,7 +517,7 @@ export function OperatorChainEditorDialog({
     if (!step) return;
 
     const input = fieldRefs.current.get(fieldKey(targetField));
-    const placeholder = `{{step${sourceIndex + 1}.outputDir}}`;
+    const placeholder = `{{${sourceLabel}.outputDir}}`;
     const currentValue = step.values[targetField.group][targetField.name] ?? "";
     const selectionStart = input?.selectionStart ?? currentValue.length;
     const selectionEnd = input?.selectionEnd ?? currentValue.length;
@@ -410,11 +546,16 @@ export function OperatorChainEditorDialog({
     );
   };
 
-  const canRun = steps.length > 0 && steps.every(stepIsValid) && !submitting;
-  const canSaveTemplate = steps.length > 0 && !submitting && !templateBusy;
+  const canRun =
+    steps.length > 0
+    && steps.every(stepIsValid)
+    && !chainGraphError
+    && !submitting;
+  const canSaveTemplate =
+    steps.length > 0 && !chainGraphError && !submitting && !templateBusy;
 
   const buildSteps = (): OperatorChainStep[] =>
-    steps.map((step) => {
+    steps.map((step, index) => {
       const operator = operatorsByKey.get(step.operatorKey ?? "");
       if (!operator) {
         throw new Error("Select an operator for every step.");
@@ -426,7 +567,9 @@ export function OperatorChainEditorDialog({
       };
       return {
         alias: operatorPrimaryAlias(operator),
+        label: stepLabels[index],
         arguments: args,
+        dependsOn: step.dependsOn,
       };
     });
 
@@ -460,6 +603,10 @@ export function OperatorChainEditorDialog({
     }
     if (!steps.every(stepIsValid)) {
       setTemplateError("Complete all required step fields before saving.");
+      return;
+    }
+    if (chainGraphError) {
+      setTemplateError(chainGraphError);
       return;
     }
 
@@ -498,13 +645,18 @@ export function OperatorChainEditorDialog({
 
   const templateToEditorSteps = (template: ChainTemplate) => {
     const missingAliases: string[] = [];
-    const nextSteps = template.steps.map((step) => {
+    const labels = template.steps.map((step, index) =>
+      normalizedTemplateStepLabel(step, index),
+    );
+    const nextSteps = template.steps.map((step, index) => {
       const operator = operatorsByAlias.get(normalizeOperatorAlias(step.alias)) ?? null;
       if (!operator) {
         missingAliases.push(step.alias);
       }
       return {
         id: createStepId(),
+        label: labels[index],
+        dependsOn: step.dependsOn ?? (index > 0 ? [labels[index - 1]] : []),
         operatorKey: operator ? operatorKey(operator) : null,
         values: operator
           ? valuesFromTemplateStep(operator, step)
@@ -701,6 +853,9 @@ export function OperatorChainEditorDialog({
             steps.map((step, index) => {
               const operator = operatorsByKey.get(step.operatorKey ?? "") ?? null;
               const priorSteps = steps.slice(0, index);
+              const currentLabel = stepLabels[index];
+              const priorLabels = stepLabels.slice(0, index);
+              const dependencyOptions = stepLabels.filter((_, labelIndex) => labelIndex !== index);
               const focusedInStep = focusedField?.stepId === step.id;
               const invalid = !stepIsValid(step);
 
@@ -725,6 +880,7 @@ export function OperatorChainEditorDialog({
                     >
                       <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap">
                         <Chip size="small" color="primary" variant="outlined" label={`Step ${index + 1}`} />
+                        <Chip size="small" variant="outlined" label={currentLabel} />
                         {operator && (
                           <Chip
                             size="small"
@@ -813,15 +969,48 @@ export function OperatorChainEditorDialog({
                       />
 
                       <TextField
+                        size="small"
+                        label="Step label"
+                        value={step.label}
+                        disabled={submitting}
+                        onChange={(event) => handleStepLabelChange(step.id, event.target.value)}
+                        helperText="Used in output references"
+                        sx={{ minWidth: { xs: "100%", md: 180 } }}
+                      />
+
+                      <Autocomplete
+                        multiple
+                        size="small"
+                        options={dependencyOptions}
+                        value={step.dependsOn.filter((label) => dependencyOptions.includes(label))}
+                        disabled={submitting}
+                        onChange={(_event, value) => handleDependsOnChange(step.id, value)}
+                        getOptionLabel={(option) => option}
+                        isOptionEqualToValue={(option, value) => option === value}
+                        sx={{ minWidth: { xs: "100%", md: 240 } }}
+                        renderInput={(params) => (
+                          <TextField
+                            {...params}
+                            label="Depends on"
+                            helperText={
+                              dependencyOptions.length === 0
+                                ? "No other steps"
+                                : "Required completed steps"
+                            }
+                          />
+                        )}
+                      />
+
+                      <TextField
                         select
                         size="small"
                         label="Use output from"
                         value=""
                         disabled={submitting || priorSteps.length === 0 || !focusedInStep}
                         onChange={(event) => {
-                          const sourceIndex = Number(event.target.value);
-                          if (Number.isInteger(sourceIndex)) {
-                            insertOutputReference(step.id, sourceIndex);
+                          const sourceLabel = String(event.target.value);
+                          if (sourceLabel.length > 0) {
+                            insertOutputReference(step.id, sourceLabel);
                           }
                         }}
                         helperText={
@@ -842,9 +1031,10 @@ export function OperatorChainEditorDialog({
                           const label = priorOperator
                             ? operatorDisplayName(priorOperator)
                             : "Unselected operator";
+                          const sourceLabel = priorLabels[priorIndex];
                           return (
-                            <MenuItem key={priorStep.id} value={priorIndex}>
-                              {`Step ${priorIndex + 1}: ${label}`}
+                            <MenuItem key={priorStep.id} value={sourceLabel}>
+                              {`${sourceLabel}: ${label}`}
                             </MenuItem>
                           );
                         })}
@@ -878,6 +1068,12 @@ export function OperatorChainEditorDialog({
           >
             Add step
           </Button>
+
+          {chainGraphError && (
+            <Alert severity="error" sx={{ borderRadius: 2 }}>
+              {chainGraphError}
+            </Alert>
+          )}
 
           {localError && (
             <Alert severity="error" sx={{ borderRadius: 2 }}>

@@ -18,6 +18,20 @@ const hookRuntimeRef = vi.hoisted(() => ({
   current: null as HookRuntimeApi | null,
 }));
 
+const pluginStoreRef = vi.hoisted(() => ({
+  current: {
+    chainTemplates: [],
+    loadChainTemplates: () => Promise.resolve(),
+    saveChainTemplate: () => Promise.resolve(),
+    deleteChainTemplate: () => Promise.resolve(),
+  },
+}));
+
+vi.mock("../../state/pluginStore", () => ({
+  usePluginStore: (selector: (state: typeof pluginStoreRef.current) => unknown) =>
+    selector(pluginStoreRef.current),
+}));
+
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
@@ -51,6 +65,8 @@ vi.mock("@mui/icons-material", async () => {
     "ArrowUpwardRounded",
     "CloseRounded",
     "DeleteOutlineRounded",
+    "FolderOpenRounded",
+    "SaveRounded",
   ]);
 });
 
@@ -173,9 +189,19 @@ const stepChips = (harness: ComponentHarness): RenderedNode[] =>
       && /^Step \d+$/.test(node.props.label),
   );
 
+const dependencyPickers = (harness: ComponentHarness): RenderedNode[] =>
+  findAllNodes(
+    harness.tree,
+    (node) =>
+      node.type === "autocomplete"
+      && Array.isArray(node.props.options)
+      && node.props.options.every((option) => typeof option === "string"),
+  );
+
 let consoleErrorSpy: ReturnType<typeof vi.spyOn> | null = null;
 
 beforeEach(() => {
+  pluginStoreRef.current.chainTemplates = [];
   const originalError = console.error;
   consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((message, ...args) => {
     if (
@@ -242,11 +268,13 @@ describe("OperatorChainEditorDialog", () => {
     expect(onRun).toHaveBeenCalledWith([
       {
         alias: "align_reads",
+        label: "step_1",
         arguments: {
           inputs: { reads: "/data/sample.fastq" },
           params: { threads: 4 },
           resources: {},
         },
+        dependsOn: [],
       },
     ]);
   });
@@ -264,11 +292,15 @@ describe("OperatorChainEditorDialog", () => {
 
     expect(onRun).toHaveBeenCalledWith([
       expect.objectContaining({
+        label: "step_2",
+        dependsOn: ["step_1"],
         arguments: expect.objectContaining({
           inputs: { reads: "second.fastq" },
         }),
       }),
       expect.objectContaining({
+        label: "step_1",
+        dependsOn: [],
         arguments: expect.objectContaining({
           inputs: { reads: "first.fastq" },
         }),
@@ -287,10 +319,30 @@ describe("OperatorChainEditorDialog", () => {
     const outputSelector = getLastControlByLabel(harness, "Use output from");
     expect(outputSelector.props.disabled).toBeFalsy();
 
-    harness.change(outputSelector, 0);
+    harness.change(outputSelector, "step_1");
 
     expect(getLastControlByLabel(harness, "reads").props.value).toBe(
-      "{{step1.outputDir}}",
+      "{{step_1.outputDir}}",
     );
+  });
+
+  it("surfaces dependency cycles before run", () => {
+    const { harness } = createDialogHarness();
+
+    harness.click(getButtonByText(harness, "Add step"));
+    harness.change(getLastControlByLabel(harness, "reads"), "first.fastq");
+    harness.click(getButtonByText(harness, "Add step"));
+    harness.change(getLastControlByLabel(harness, "reads"), "second.fastq");
+
+    const [firstDependencyPicker] = dependencyPickers(harness);
+    const onChange = firstDependencyPicker.props.onChange as (
+      event: unknown,
+      value: string[],
+    ) => void;
+    onChange({}, ["step_2"]);
+    harness.flush();
+
+    expect(textContent(harness.tree)).toContain("Dependency graph has a cycle.");
+    expect(getButtonByText(harness, "Run chain").props.disabled).toBe(true);
   });
 });

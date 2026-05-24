@@ -954,13 +954,87 @@ pub struct UserOperatorOutput {
     pub glob: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct ChainStep {
     pub alias: String,
+    pub label: Option<String>,
     pub arguments: JsonValue,
     /// Optional input field name that should receive the previous step's outputDir.
     pub inherit_prev_output_as: Option<String>,
+    pub depends_on: Vec<String>,
+    #[doc(hidden)]
+    pub depends_on_declared: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChainStepWire {
+    pub alias: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    pub arguments: JsonValue,
+    #[serde(default)]
+    pub inherit_prev_output_as: Option<String>,
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
+}
+
+impl ChainStep {
+    pub fn depends_on_declared(&self) -> bool {
+        self.depends_on_declared
+    }
+}
+
+impl<'de> Deserialize<'de> for ChainStep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ChainStepWire::deserialize(deserializer)?;
+        let depends_on_declared = wire.depends_on.is_some();
+        Ok(Self {
+            alias: wire.alias,
+            label: wire.label,
+            arguments: wire.arguments,
+            inherit_prev_output_as: wire.inherit_prev_output_as,
+            depends_on: wire.depends_on.unwrap_or_default(),
+            depends_on_declared,
+        })
+    }
+}
+
+impl Serialize for ChainStep {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut len = 2;
+        if self.label.is_some() {
+            len += 1;
+        }
+        if self.inherit_prev_output_as.is_some() {
+            len += 1;
+        }
+        if self.depends_on_declared {
+            len += 1;
+        }
+
+        let mut step = serializer.serialize_struct("ChainStep", len)?;
+        step.serialize_field("alias", &self.alias)?;
+        if let Some(label) = &self.label {
+            step.serialize_field("label", label)?;
+        }
+        step.serialize_field("arguments", &self.arguments)?;
+        if let Some(inherit_prev_output_as) = &self.inherit_prev_output_as {
+            step.serialize_field("inheritPrevOutputAs", inherit_prev_output_as)?;
+        }
+        if self.depends_on_declared {
+            step.serialize_field("dependsOn", &self.depends_on)?;
+        }
+        step.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
