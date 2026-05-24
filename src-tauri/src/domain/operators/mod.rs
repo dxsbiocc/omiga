@@ -73,6 +73,141 @@ fn current_epoch_ms() -> u64 {
         .unwrap_or_default()
 }
 
+pub mod operator_favorites {
+    use super::{current_epoch_ms, OPERATOR_STATE_DIR_NAME};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    const FAVORITES_FILE_NAME: &str = "operator-favorites.json";
+
+    pub fn favorites_path() -> PathBuf {
+        let path = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(OPERATOR_STATE_DIR_NAME)
+            .join(FAVORITES_FILE_NAME);
+        if let Some(parent) = path.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                tracing::warn!("create operator favorites dir {:?}: {}", parent, err);
+            }
+        }
+        path
+    }
+
+    pub fn list_favorites() -> Vec<String> {
+        list_favorites_at_path(&favorites_path())
+    }
+
+    pub fn set_favorite(alias: &str, pinned: bool) -> Result<Vec<String>, String> {
+        set_favorite_at_path(&favorites_path(), alias, pinned)
+    }
+
+    fn list_favorites_at_path(path: &Path) -> Vec<String> {
+        read_favorites(path).unwrap_or_default()
+    }
+
+    fn set_favorite_at_path(path: &Path, alias: &str, pinned: bool) -> Result<Vec<String>, String> {
+        let alias = alias.trim();
+        if alias.is_empty() {
+            return Err("operator alias cannot be empty".to_string());
+        }
+
+        let mut favorites = read_favorites(path).unwrap_or_default();
+        if pinned {
+            favorites.push(alias.to_string());
+        } else {
+            favorites.retain(|value| value != alias);
+        }
+        favorites = normalize_favorites(favorites);
+        write_favorites(path, &favorites)?;
+        Ok(favorites)
+    }
+
+    fn read_favorites(path: &Path) -> Result<Vec<String>, String> {
+        let raw = fs::read_to_string(path)
+            .map_err(|err| format!("read operator favorites {}: {err}", path.display()))?;
+        let parsed = serde_json::from_str::<Vec<String>>(&raw)
+            .map_err(|err| format!("parse operator favorites {}: {err}", path.display()))?;
+        Ok(normalize_favorites(parsed))
+    }
+
+    fn normalize_favorites(values: Vec<String>) -> Vec<String> {
+        let mut aliases: Vec<String> = values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        aliases.sort();
+        aliases.dedup();
+        aliases
+    }
+
+    fn write_favorites(path: &Path, favorites: &[String]) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("create operator favorites dir: {err}"))?;
+        }
+        let raw = serde_json::to_string_pretty(favorites).map_err(|err| err.to_string())?;
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(FAVORITES_FILE_NAME);
+        let tmp_path = path.with_file_name(format!(
+            ".{file_name}.tmp-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        fs::write(&tmp_path, format!("{raw}\n"))
+            .map_err(|err| format!("write operator favorites temp file: {err}"))?;
+        fs::rename(&tmp_path, path).map_err(|err| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("replace operator favorites file: {err}")
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use tempfile::TempDir;
+
+        #[test]
+        fn list_favorites_returns_empty_for_missing_or_invalid_file() {
+            let tmp = TempDir::new().expect("tempdir");
+            let path = tmp.path().join(".omiga/operator-favorites.json");
+
+            assert!(list_favorites_at_path(&path).is_empty());
+
+            fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+            fs::write(&path, "{not json").expect("write invalid json");
+
+            assert!(list_favorites_at_path(&path).is_empty());
+        }
+
+        #[test]
+        fn set_favorite_adds_removes_dedupes_and_persists_sorted_aliases() {
+            let tmp = TempDir::new().expect("tempdir");
+            let path = tmp.path().join(".omiga/operator-favorites.json");
+
+            assert_eq!(
+                set_favorite_at_path(&path, "zeta", true).expect("pin zeta"),
+                vec!["zeta".to_string()]
+            );
+            assert_eq!(
+                set_favorite_at_path(&path, "alpha", true).expect("pin alpha"),
+                vec!["alpha".to_string(), "zeta".to_string()]
+            );
+            assert_eq!(
+                set_favorite_at_path(&path, " zeta ", true).expect("dedupe zeta"),
+                vec!["alpha".to_string(), "zeta".to_string()]
+            );
+            assert_eq!(
+                set_favorite_at_path(&path, "alpha", false).expect("unpin alpha"),
+                vec!["zeta".to_string()]
+            );
+            assert_eq!(list_favorites_at_path(&path), vec!["zeta".to_string()]);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorMetadata {

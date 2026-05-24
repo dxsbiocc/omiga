@@ -322,6 +322,8 @@ pub fn run() {
             commands::operators::save_chain_template,
             commands::operators::delete_chain_template,
             commands::operators::list_operators,
+            commands::operators::list_operator_favorites,
+            commands::operators::toggle_operator_favorite,
             commands::operators::describe_operator,
             commands::operators::set_operator_enabled,
             commands::operators::run_operator,

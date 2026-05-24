@@ -18,6 +18,13 @@ const hookRuntimeRef = vi.hoisted(() => ({
   current: null as HookRuntimeApi | null,
 }));
 
+const pluginStoreMock = vi.hoisted(() => ({
+  chainTemplates: [],
+  loadChainTemplates: vi.fn().mockResolvedValue(undefined),
+  saveChainTemplate: vi.fn().mockResolvedValue(undefined),
+  deleteChainTemplate: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
@@ -29,6 +36,20 @@ vi.mock("react", async (importOriginal) => {
     useRef: <T,>(initial: T) => hookRuntimeRef.current?.useRef(initial),
     useState: <T,>(initial: T | (() => T)) =>
       hookRuntimeRef.current?.useState(initial),
+  };
+});
+
+vi.mock("../../state/pluginStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../state/pluginStore")>();
+  const state = {
+    chainTemplates: pluginStoreMock.chainTemplates,
+    loadChainTemplates: pluginStoreMock.loadChainTemplates,
+    saveChainTemplate: pluginStoreMock.saveChainTemplate,
+    deleteChainTemplate: pluginStoreMock.deleteChainTemplate,
+  };
+  return {
+    ...actual,
+    usePluginStore: (selector: (value: typeof state) => unknown) => selector(state),
   };
 });
 
@@ -51,6 +72,8 @@ vi.mock("@mui/icons-material", async () => {
     "ArrowUpwardRounded",
     "CloseRounded",
     "DeleteOutlineRounded",
+    "FolderOpenRounded",
+    "SaveRounded",
   ]);
 });
 
@@ -191,6 +214,10 @@ beforeEach(() => {
 afterEach(() => {
   hookRuntimeRef.current?.cleanup();
   hookRuntimeRef.current = null;
+  pluginStoreMock.chainTemplates = [];
+  pluginStoreMock.loadChainTemplates.mockClear();
+  pluginStoreMock.saveChainTemplate.mockClear();
+  pluginStoreMock.deleteChainTemplate.mockClear();
   consoleErrorSpy?.mockRestore();
   consoleErrorSpy = null;
   vi.clearAllMocks();
