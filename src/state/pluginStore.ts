@@ -353,6 +353,7 @@ export interface OperatorRunContext {
   kind?: string | null;
   smokeTestId?: string | null;
   smokeTestName?: string | null;
+  parentExecutionId?: string | null;
   bypassCache?: boolean;
 }
 
@@ -365,6 +366,8 @@ export interface OperatorRunSummary {
   operatorVersion?: string | null;
   sourcePlugin?: string | null;
   runKind?: string | null;
+  kind?: string | null;
+  parentExecutionId?: string | null;
   smokeTestId?: string | null;
   smokeTestName?: string | null;
   runDir: string;
@@ -1149,6 +1152,7 @@ export function summarizeOperatorRunResult(result: Record<string, unknown>): Ope
   const cache = result.cache && typeof result.cache === "object"
     ? result.cache as Record<string, unknown>
     : {};
+  const runKind = stringField(runContext.kind);
   return {
     runId,
     status,
@@ -1157,7 +1161,9 @@ export function summarizeOperatorRunResult(result: Record<string, unknown>): Ope
     operatorId: stringField(operator.id),
     operatorVersion: stringField(operator.version),
     sourcePlugin: stringField(operator.sourcePlugin),
-    runKind: stringField(runContext.kind),
+    runKind,
+    kind: runKind,
+    parentExecutionId: stringField(runContext.parentExecutionId),
     smokeTestId: stringField(runContext.smokeTestId),
     smokeTestName: stringField(runContext.smokeTestName),
     runDir,
