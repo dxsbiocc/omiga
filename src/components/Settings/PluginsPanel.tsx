@@ -6454,6 +6454,8 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     setMessage(
       result.ok
         ? `Operator chain completed (${result.steps.length} step${result.steps.length === 1 ? "" : "s"})`
+        : result.error
+          ? `Operator chain stopped: ${result.error}`
         : `Operator chain stopped after ${result.steps.length} step${result.steps.length === 1 ? "" : "s"}`,
     );
     return result;

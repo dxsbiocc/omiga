@@ -317,8 +317,10 @@ export interface OperatorRunResponse {
 
 export interface OperatorChainStep {
   alias: string;
+  label?: string | null;
   arguments: OperatorInvocationArguments;
   inheritPrevOutputAs?: string | null;
+  dependsOn?: string[];
 }
 
 export interface OperatorChainStepResult {
@@ -332,6 +334,7 @@ export interface OperatorChainStepResult {
 export interface OperatorChainResult {
   steps: OperatorChainStepResult[];
   ok: boolean;
+  error?: string | null;
 }
 
 export interface ChainTemplate {
