@@ -170,3 +170,28 @@ pub trait PlaybookStore {
     /// 删除一个 Playbook,并清理其指纹索引。
     fn delete(&mut self, playbook_id: &str) -> Result<(), String>;
 }
+
+// ───────────────────────── Phase 1 契约(orchestrator 维护) ─────────────────────────
+
+/// 凭引用重放前的解析结果(`replay.rs::resolve_for_replay` 返回)。
+///
+/// 重放只在 `Ready` 时进行;其余分支都应让调用方回退到正常的链路规划。
+#[derive(Debug, Clone)]
+pub enum ReplayResolution {
+    /// 仍 Active 且指纹与当前算子版本一致——可安全重放。
+    Ready(Playbook),
+    /// 算子版本漂移(指纹不再匹配)——已失效,回退正常规划。
+    Invalidated,
+    /// 不存在该 playbook。
+    NotFound,
+    /// 存在但非 Active(Stale / Quarantined)。
+    Inactive,
+}
+
+/// auto-demote 触发阈值:累计重放达到 [`DEMOTE_MIN_ATTEMPTS`] 次后,
+/// 若成功率低于 [`DEMOTE_SUCCESS_RATE`] 则 Quarantine,退出匹配池。
+pub const DEMOTE_MIN_ATTEMPTS: u64 = 3;
+/// auto-demote 的成功率下限(success_count / hit_count)。
+pub const DEMOTE_SUCCESS_RATE: f64 = 0.5;
+/// 探索阀门默认概率:命中后仍以此概率冷规划一次,防止能力固化。
+pub const DEFAULT_EXPLORE_EPSILON: f64 = 0.1;

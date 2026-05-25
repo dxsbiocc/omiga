@@ -11,11 +11,14 @@
 //! `fingerprint` 的指纹构造 / 匹配方法是 `Fingerprint` 的固有方法,随类型自动可用;
 //! `store` 的具体实现 `JsonFilePlaybookStore` 在此统一重导出。
 
+pub mod chain;
 pub mod fingerprint;
+pub mod replay;
 pub mod store;
 pub mod types;
 
 pub use store::JsonFilePlaybookStore;
 pub use types::{
     Fingerprint, Health, Playbook, PlaybookStatus, PlaybookStore, PlaybookVerification, Provenance,
+    ReplayResolution, DEFAULT_EXPLORE_EPSILON, DEMOTE_MIN_ATTEMPTS, DEMOTE_SUCCESS_RATE,
 };
