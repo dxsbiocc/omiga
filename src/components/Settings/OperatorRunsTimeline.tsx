@@ -1,16 +1,16 @@
 import { useMemo, useState } from "react";
 import {
   Box,
-  Button,
   Chip,
-  CircularProgress,
   Collapse,
+  IconButton,
   MenuItem,
   Paper,
+  Select,
   Stack,
-  TextField,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
   type ChipProps,
 } from "@mui/material";
@@ -66,7 +66,7 @@ const dateRangeOptions: Array<{ value: TimelineDateRange; label: string }> = [
 
 const viewOptions: Array<{ value: TimelineViewMode; label: string }> = [
   { value: "flat", label: "Flat" },
-  { value: "grouped", label: "Grouped chains" },
+  { value: "grouped", label: "Grouped" },
 ];
 
 function runAlias(run: OperatorRunSummary): string {
@@ -632,56 +632,90 @@ export function OperatorRunsTimeline({
             py: 1.25,
           }}
         >
-          <Stack direction={{ xs: "column", lg: "row" }} gap={1} alignItems={{ xs: "stretch", lg: "center" }}>
-            <ToggleButtonGroup
-              exclusive
-              size="small"
-              value={statusFilter}
-              onChange={(_, value: TimelineStatusFilter | null) => {
-                if (value) setStatusFilter(value);
-              }}
-              sx={{ flexWrap: "wrap" }}
+          <Stack direction="row" spacing={1.5} useFlexGap flexWrap="wrap" alignItems="center" sx={{ minWidth: 0 }}>
+            <Stack
+              direction="row"
+              spacing={0.75}
+              alignItems="center"
+              sx={{ minWidth: 0, maxWidth: "100%", overflowX: "auto", pb: 0.25 }}
             >
-              {statusOptions.map((option) => (
-                <ToggleButton key={option.value} value={option.value} sx={{ textTransform: "none" }}>
-                  {option.label}
-                </ToggleButton>
-              ))}
-            </ToggleButtonGroup>
+              <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ whiteSpace: "nowrap" }}>
+                Status:
+              </Typography>
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={statusFilter}
+                onChange={(_, value: TimelineStatusFilter | null) => {
+                  if (value) setStatusFilter(value);
+                }}
+                sx={{ flexWrap: "nowrap", minWidth: "max-content" }}
+              >
+                {statusOptions.map((option) => (
+                  <ToggleButton key={option.value} value={option.value} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+                    {option.label}
+                  </ToggleButton>
+                ))}
+              </ToggleButtonGroup>
+            </Stack>
 
-            <TextField
-              select
-              size="small"
-              label="Alias"
-              value={aliasFilter}
-              onChange={(event) => setAliasFilter(event.target.value)}
-              sx={{ minWidth: { xs: "100%", lg: 190 } }}
+            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0, maxWidth: "100%" }}>
+              <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ whiteSpace: "nowrap" }}>
+                Alias:
+              </Typography>
+              <Select
+                size="small"
+                value={aliasFilter}
+                onChange={(event) => setAliasFilter(event.target.value)}
+                sx={{
+                  minWidth: 140,
+                  maxWidth: 200,
+                  "& .MuiSelect-select": {
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  },
+                }}
+              >
+                <MenuItem value="all">All</MenuItem>
+                {aliases.map((alias) => (
+                  <MenuItem key={alias} value={alias}>
+                    {alias}
+                  </MenuItem>
+                ))}
+              </Select>
+            </Stack>
+
+            <Stack
+              direction="row"
+              spacing={0.75}
+              alignItems="center"
+              sx={{ minWidth: 0, maxWidth: "100%", overflowX: "auto", pb: 0.25 }}
             >
-              <MenuItem value="all">All</MenuItem>
-              {aliases.map((alias) => (
-                <MenuItem key={alias} value={alias}>
-                  {alias}
-                </MenuItem>
-              ))}
-            </TextField>
+              <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ whiteSpace: "nowrap" }}>
+                Date:
+              </Typography>
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={dateRange}
+                onChange={(_, value: TimelineDateRange | null) => {
+                  if (value) setDateRange(value);
+                }}
+                sx={{ flexWrap: "nowrap", minWidth: "max-content" }}
+              >
+                {dateRangeOptions.map((option) => (
+                  <ToggleButton key={option.value} value={option.value} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+                    {option.label}
+                  </ToggleButton>
+                ))}
+              </ToggleButtonGroup>
+            </Stack>
 
-            <ToggleButtonGroup
-              exclusive
-              size="small"
-              value={dateRange}
-              onChange={(_, value: TimelineDateRange | null) => {
-                if (value) setDateRange(value);
-              }}
-            >
-              {dateRangeOptions.map((option) => (
-                <ToggleButton key={option.value} value={option.value} sx={{ textTransform: "none" }}>
-                  {option.label}
-                </ToggleButton>
-              ))}
-            </ToggleButtonGroup>
-
-            <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-              <Chip size="small" variant="outlined" label="View" />
+            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0 }}>
+              <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ whiteSpace: "nowrap" }}>
+                View:
+              </Typography>
               <ToggleButtonGroup
                 exclusive
                 size="small"
@@ -691,23 +725,27 @@ export function OperatorRunsTimeline({
                 }}
               >
                 {viewOptions.map((option) => (
-                  <ToggleButton key={option.value} value={option.value} sx={{ textTransform: "none" }}>
+                  <ToggleButton key={option.value} value={option.value} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
                     {option.label}
                   </ToggleButton>
                 ))}
               </ToggleButtonGroup>
             </Stack>
 
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={busy ? <CircularProgress size={16} /> : <RefreshRounded />}
-              disabled={busy}
-              onClick={onRefresh}
-              sx={{ ml: { lg: "auto" }, textTransform: "none", borderRadius: 1.5, minHeight: 36 }}
-            >
-              Refresh
-            </Button>
+            <Tooltip title="Refresh runs">
+              <span>
+                <IconButton
+                  size="small"
+                  aria-label="Refresh runs"
+                  aria-busy={busy ? true : undefined}
+                  disabled={busy}
+                  onClick={onRefresh}
+                  sx={{ border: 1, borderColor: "divider", borderRadius: 1.25 }}
+                >
+                  <RefreshRounded fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
           </Stack>
         </Paper>
 
