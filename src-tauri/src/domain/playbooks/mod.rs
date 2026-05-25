@@ -13,11 +13,13 @@
 
 pub mod chain;
 pub mod fingerprint;
+pub mod orchestrate;
 pub mod replay;
 pub mod store;
 pub mod types;
 
 pub use chain::{build_chain_playbook, chain_canonical_id, chain_composite_version};
+pub use orchestrate::{execute_replay, ReplayOutcome};
 pub use replay::{record_replay_outcome, resolve_for_replay, should_explore};
 pub use store::JsonFilePlaybookStore;
 pub use types::{
