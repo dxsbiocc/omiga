@@ -1748,29 +1748,6 @@ mod tests {
         }
     }
 
-    fn legacy_plugin_root(plugin_name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/plugins/legacy")
-            .join(plugin_name)
-    }
-
-    fn bundled_loaded_plugin(plugin_name: &str, display_name: &str) -> LoadedPlugin {
-        let plugin_root = legacy_plugin_root(plugin_name);
-        LoadedPlugin {
-            id: format!("{plugin_name}@omiga-curated"),
-            manifest_name: Some(plugin_name.to_string()),
-            display_name: Some(display_name.to_string()),
-            description: None,
-            root: plugin_root,
-            enabled: true,
-            skill_roots: Vec::new(),
-            mcp_servers: HashMap::new(),
-            apps: Vec::new(),
-            retrieval: None,
-            error: None,
-        }
-    }
-
     fn project_loaded_plugin(plugin_name: &str, display_name: &str) -> LoadedPlugin {
         LoadedPlugin {
             id: format!("{plugin_name}@omiga-curated"),
@@ -1787,15 +1764,15 @@ mod tests {
         }
     }
 
-    fn bundled_template_and_operator(
-        plugin_name: &str,
+    fn transcriptomics_template_and_operator(
         template_dir: &str,
         operator_dir: &str,
     ) -> (
         TemplateSpecWithSource,
         crate::domain::operators::OperatorSpec,
     ) {
-        let plugin_root = legacy_plugin_root(plugin_name);
+        let plugin_name = "transcriptomics";
+        let plugin_root = repo_plugin_root(plugin_name);
         let template = load_template_manifest(
             &plugin_root
                 .join("templates")
@@ -1807,7 +1784,7 @@ mod tests {
         .expect("template");
         let operator = crate::domain::operators::load_operator_manifest(
             &plugin_root
-                .join("operators")
+                .join("template_backing_operators")
                 .join(operator_dir)
                 .join("operator.yaml"),
             format!("{plugin_name}@omiga-curated"),
@@ -2003,80 +1980,6 @@ template:
     }
 
     #[test]
-    fn discovers_bundled_differential_expression_template() {
-        let plugin = bundled_loaded_plugin(
-            "operator-differential-expression-r",
-            "Differential Expression",
-        );
-
-        let candidates = discover_template_candidates_from_plugins([&plugin]);
-        let template = candidates
-            .iter()
-            .find(|candidate| candidate.spec.metadata.id == "bulk_differential_expression_basic")
-            .expect("bundled differential expression template should be discovered");
-
-        assert_eq!(
-            template.spec.migration_target.as_deref(),
-            Some("omics_differential_expression_basic")
-        );
-        assert_eq!(
-            template.spec.classification.category.as_deref(),
-            Some("omics/transcriptomics/differential")
-        );
-        assert!(template.spec.exposure.expose_to_agent);
-    }
-
-    #[test]
-    fn discovers_bundled_analysis_template_migration_candidates() {
-        let plugins = [
-            bundled_loaded_plugin(
-                "operator-differential-expression-r",
-                "Differential Expression",
-            ),
-            bundled_loaded_plugin("operator-pca-r", "PCA"),
-            bundled_loaded_plugin("operator-enrichment-r", "Functional Enrichment"),
-        ];
-        let candidates = discover_template_candidates_from_plugins(plugins.iter());
-        let by_id = candidates
-            .iter()
-            .map(|candidate| (candidate.spec.metadata.id.as_str(), candidate))
-            .collect::<HashMap<_, _>>();
-
-        let expected = [
-            (
-                "bulk_differential_expression_basic",
-                "omics_differential_expression_basic",
-                "omics/transcriptomics/differential",
-            ),
-            (
-                "pca_matrix_basic",
-                "omics_pca_matrix",
-                "omics/transcriptomics/dimensionality-reduction",
-            ),
-            (
-                "functional_enrichment_basic",
-                "omics_functional_enrichment_basic",
-                "omics/knowledge/functional-enrichment",
-            ),
-        ];
-
-        for (template_id, migration_target, category) in expected {
-            let template = by_id
-                .get(template_id)
-                .unwrap_or_else(|| panic!("missing bundled template `{template_id}`"));
-            assert_eq!(
-                template.spec.migration_target.as_deref(),
-                Some(migration_target)
-            );
-            assert_eq!(
-                template.spec.classification.category.as_deref(),
-                Some(category)
-            );
-            assert!(template.spec.exposure.expose_to_agent);
-        }
-    }
-
-    #[test]
     fn discovers_aggregated_transcriptomics_analysis_templates() {
         let plugin = project_loaded_plugin("transcriptomics", "Transcriptomics");
         let candidates = discover_template_candidates_from_plugins([&plugin]);
@@ -2159,12 +2062,12 @@ template:
     }
 
     #[test]
-    fn short_template_ids_prefer_project_then_user_then_bundled_templates() {
+    fn short_template_ids_prefer_project_then_user_then_curated_templates() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let project_root = tmp.path().join("project");
         let user_root = tmp.path().join("user");
-        let bundled_root = tmp.path().join("bundled");
-        for root in [&project_root, &user_root, &bundled_root] {
+        let curated_root = tmp.path().join("curated");
+        for root in [&project_root, &user_root, &curated_root] {
             write_temp_template_plugin(root, "viz_scatter_basic");
         }
 
@@ -2173,9 +2076,9 @@ template:
             project_root.clone(),
         );
         let user = temp_loaded_plugin("user-visualization-r@omiga-user", user_root.clone());
-        let bundled = temp_loaded_plugin("visualization-r@omiga-curated", bundled_root.clone());
+        let curated = temp_loaded_plugin("visualization-r@omiga-curated", curated_root.clone());
 
-        let all = discover_template_candidates_from_plugins([&bundled, &user, &project]);
+        let all = discover_template_candidates_from_plugins([&curated, &user, &project]);
         let selected =
             select_template_match("viz_scatter_basic", all).expect("project preference template");
         assert_eq!(
@@ -2183,7 +2086,7 @@ template:
             "project-visualization-r@omiga-project"
         );
 
-        let without_project = discover_template_candidates_from_plugins([&bundled, &user]);
+        let without_project = discover_template_candidates_from_plugins([&curated, &user]);
         let selected =
             select_template_match("viz_scatter_basic", without_project).expect("user preference");
         assert_eq!(
@@ -2191,9 +2094,9 @@ template:
             "user-visualization-r@omiga-user"
         );
 
-        let bundled_only = discover_template_candidates_from_plugins([&bundled]);
+        let curated_only = discover_template_candidates_from_plugins([&curated]);
         let selected =
-            select_template_match("viz_scatter_basic", bundled_only).expect("bundled fallback");
+            select_template_match("viz_scatter_basic", curated_only).expect("curated fallback");
         assert_eq!(
             selected.source.source_plugin,
             "visualization-r@omiga-curated"
@@ -2298,24 +2201,19 @@ template:
     fn rendered_analysis_templates_preserve_backing_operator_contracts() {
         let cases = [
             (
-                "operator-differential-expression-r",
                 "differential-expression-basic",
                 "differential-expression-basic",
             ),
-            ("operator-pca-r", "pca-matrix", "pca-matrix"),
-            (
-                "operator-enrichment-r",
-                "functional-enrichment-basic",
-                "functional-enrichment-basic",
-            ),
+            ("pca-matrix", "pca-matrix"),
+            ("functional-enrichment-basic", "functional-enrichment-basic"),
         ];
 
-        for (plugin_name, template_dir, operator_dir) in cases {
+        for (template_dir, operator_dir) in cases {
             let (template, operator) =
-                bundled_template_and_operator(plugin_name, template_dir, operator_dir);
+                transcriptomics_template_and_operator(template_dir, operator_dir);
             assert!(
                 !uses_existing_operator(&template),
-                "{plugin_name} should default to rendered execution in v2"
+                "{template_dir} should default to rendered execution in v2"
             );
             assert!(template_fallback_to_migration_target(&template));
             assert_eq!(
@@ -2329,21 +2227,21 @@ template:
             assert_eq!(
                 template.spec.execution.argv,
                 operator.execution.argv[2..].to_vec(),
-                "{plugin_name} rendered argv must preserve backing operator args"
+                "{template_dir} rendered argv must preserve backing operator args"
             );
             let rendered_interface = parse_template_operator_interface(&template)
                 .expect("template interface should inherit target interface");
             assert_eq!(
                 serde_json::to_value(rendered_interface).unwrap(),
                 serde_json::to_value(operator.interface).unwrap(),
-                "{plugin_name} rendered template must inherit backing operator interface"
+                "{template_dir} rendered template must inherit backing operator interface"
             );
             let template_source =
                 fs::read_to_string(resolve_template_entry_path(&template).unwrap())
                     .expect("template source");
             assert!(
                 !template_source.contains("system2("),
-                "{plugin_name} V3 template body must not shell out to a legacy operator script"
+                "{template_dir} V3 template body must not shell out to a legacy operator script"
             );
             let legacy_script_name = Path::new(&operator.execution.argv[1])
                 .file_name()
@@ -2351,31 +2249,26 @@ template:
                 .expect("legacy script name");
             assert!(
                 !template_source.contains(legacy_script_name),
-                "{plugin_name} V3 template body must not reference legacy script `{legacy_script_name}`"
+                "{template_dir} V3 template body must not reference legacy script `{legacy_script_name}`"
             );
         }
     }
 
     #[test]
-    fn bundled_template_contract_snapshot_is_stable() {
+    fn transcriptomics_template_contract_snapshot_is_stable() {
         let cases = [
             (
-                "operator-differential-expression-r",
                 "differential-expression-basic",
                 "differential-expression-basic",
             ),
-            ("operator-pca-r", "pca-matrix", "pca-matrix"),
-            (
-                "operator-enrichment-r",
-                "functional-enrichment-basic",
-                "functional-enrichment-basic",
-            ),
+            ("pca-matrix", "pca-matrix"),
+            ("functional-enrichment-basic", "functional-enrichment-basic"),
         ];
         let snapshots = cases
             .into_iter()
-            .map(|(plugin_name, template_dir, operator_dir)| {
+            .map(|(template_dir, operator_dir)| {
                 let (template, operator) =
-                    bundled_template_and_operator(plugin_name, template_dir, operator_dir);
+                    transcriptomics_template_and_operator(template_dir, operator_dir);
                 (
                     template.spec.metadata.id.clone(),
                     template_contract_snapshot(&template, &operator),
@@ -2451,24 +2344,19 @@ template:
     }
 
     #[test]
-    fn bundled_templates_resolve_environment_profiles() {
-        for (plugin_name, template_dir, operator_dir) in [
+    fn transcriptomics_templates_resolve_environment_profiles() {
+        for (template_dir, operator_dir) in [
             (
-                "operator-differential-expression-r",
                 "differential-expression-basic",
                 "differential-expression-basic",
             ),
-            ("operator-pca-r", "pca-matrix", "pca-matrix"),
-            (
-                "operator-enrichment-r",
-                "functional-enrichment-basic",
-                "functional-enrichment-basic",
-            ),
+            ("pca-matrix", "pca-matrix"),
+            ("functional-enrichment-basic", "functional-enrichment-basic"),
         ] {
             let (template, _operator) =
-                bundled_template_and_operator(plugin_name, template_dir, operator_dir);
+                transcriptomics_template_and_operator(template_dir, operator_dir);
             let resolved = template_environment_resolution(&template);
-            assert_eq!(resolved.status, "resolved", "{plugin_name}");
+            assert_eq!(resolved.status, "resolved", "{template_dir}");
             assert_eq!(resolved.env_ref.as_deref(), Some("r-bioc"));
             assert!(
                 resolved
@@ -2476,7 +2364,7 @@ template:
                     .as_deref()
                     .unwrap_or_default()
                     .ends_with("/environment/r-bioc"),
-                "{plugin_name}"
+                "{template_dir}"
             );
             assert_eq!(
                 resolved
@@ -2494,7 +2382,7 @@ template:
     #[test]
     fn render_template_text_injects_template_source_context() {
         let (template, _operator) =
-            bundled_template_and_operator("operator-pca-r", "pca-matrix", "pca-matrix");
+            transcriptomics_template_and_operator("pca-matrix", "pca-matrix");
         let rendered = render_template_text(
             "{{ template.pluginRoot }}|{{template.manifestDir}}|${template.sourcePlugin}",
             &template,
@@ -2502,15 +2390,14 @@ template:
         )
         .expect("render");
 
-        assert!(rendered.contains("operator-pca-r"));
+        assert!(rendered.contains("transcriptomics"));
         assert!(rendered.contains("templates/pca-matrix"));
-        assert!(rendered.contains("operator-pca-r@omiga-curated"));
+        assert!(rendered.contains("transcriptomics@omiga-curated"));
     }
 
     #[test]
     fn template_preflight_reuses_migration_target_questions() {
-        let (template, _operator) = bundled_template_and_operator(
-            "operator-differential-expression-r",
+        let (template, _operator) = transcriptomics_template_and_operator(
             "differential-expression-basic",
             "differential-expression-basic",
         );
@@ -2547,8 +2434,7 @@ template:
 
     #[test]
     fn apply_template_preflight_answers_updates_template_params() {
-        let (template, _operator) = bundled_template_and_operator(
-            "operator-differential-expression-r",
+        let (template, _operator) = transcriptomics_template_and_operator(
             "differential-expression-basic",
             "differential-expression-basic",
         );
@@ -2817,7 +2703,7 @@ execution:
         .expect("matrix");
         fs::write(&metadata, "sample\tgroup\ns1\tA\ns2\tA\ns3\tB\ns4\tB\n").expect("metadata");
         let (template, _operator) =
-            bundled_template_and_operator("operator-pca-r", "pca-matrix", "pca-matrix");
+            transcriptomics_template_and_operator("pca-matrix", "pca-matrix");
         let invocation = crate::domain::operators::OperatorInvocation {
             inputs: BTreeMap::from([
                 ("matrix".to_string(), json!(matrix.to_string_lossy())),
@@ -2904,8 +2790,7 @@ execution:
             "sample\tgroup\ns1\tControl\ns2\tControl\ns3\tControl\ns4\tCase\ns5\tCase\ns6\tCase\n",
         )
         .expect("metadata");
-        let (template, _operator) = bundled_template_and_operator(
-            "operator-differential-expression-r",
+        let (template, _operator) = transcriptomics_template_and_operator(
             "differential-expression-basic",
             "differential-expression-basic",
         );
@@ -3003,8 +2888,7 @@ execution:
              CELL_CYCLE\tCHEK2\n",
         )
         .expect("gene sets");
-        let (template, _operator) = bundled_template_and_operator(
-            "operator-enrichment-r",
+        let (template, _operator) = transcriptomics_template_and_operator(
             "functional-enrichment-basic",
             "functional-enrichment-basic",
         );
@@ -3263,24 +3147,63 @@ migrationTarget: local_fallback_report
     #[tokio::test]
     async fn execute_template_via_migration_target_reuses_operator_runtime() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let fixture_root = legacy_plugin_root("operator-smoke");
         let operator_dir = tmp.path().join("operators").join("write-text-report");
         let script_dir = tmp.path().join("scripts");
         fs::create_dir_all(&operator_dir).expect("operator dir");
         fs::create_dir_all(&script_dir).expect("script dir");
-        fs::copy(
-            fixture_root
-                .join("operators")
-                .join("write-text-report")
-                .join("operator.yaml"),
+        fs::write(
             operator_dir.join("operator.yaml"),
+            r#"apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: write_text_report
+  version: 0.1.0
+  name: Write Text Report
+interface:
+  params:
+    message:
+      kind: string
+      default: hello from Omiga operator
+    repeat:
+      kind: integer
+      default: 1
+      minimum: 1
+      maximum: 20
+  outputs:
+    report:
+      kind: file
+      glob: operator-report.txt
+      required: true
+execution:
+  argv:
+    - /bin/sh
+    - ./scripts/write_text_report.sh
+    - ${outdir}
+    - ${params.message}
+    - ${params.repeat}
+"#,
         )
-        .expect("operator fixture");
-        fs::copy(
-            fixture_root.join("scripts").join("write_text_report.sh"),
+        .expect("operator manifest");
+        fs::write(
             script_dir.join("write_text_report.sh"),
+            r#"#!/bin/sh
+set -eu
+outdir="${1:?missing outdir}"
+message="${2:-hello from Omiga operator}"
+repeat="${3:-1}"
+case "$repeat" in ''|*[!0-9]*) repeat=1 ;; esac
+if [ "$repeat" -lt 1 ]; then repeat=1; fi
+if [ "$repeat" -gt 20 ]; then repeat=20; fi
+mkdir -p "$outdir"
+: > "$outdir/operator-report.txt"
+i=0
+while [ "$i" -lt "$repeat" ]; do
+  printf '%s\n' "$message" >> "$outdir/operator-report.txt"
+  i=$((i + 1))
+done
+"#,
         )
-        .expect("operator script fixture");
+        .expect("operator script");
         let template = TemplateSpecWithSource {
             spec: TemplateSpec {
                 api_version: TEMPLATE_API_VERSION_V1ALPHA1.to_string(),

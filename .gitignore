@@ -27,7 +27,6 @@ __pycache__/
 
 # Rust
 **/*.rs.bk
-src-tauri/bundled_plugins/plugins/computer-use/bin/computer-use-sidecar
 
 # codex
 .codex/
@@ -36,6 +35,8 @@ src-tauri/bundled_plugins/plugins/computer-use/bin/computer-use-sidecar
 # Plugin definitions live in the independent ../omiga-plugins repository.
 .omiga/plugins/
 src-tauri/omiga-plugins/
+src-tauri/bundled_plugins/
+src-tauri/fixtures/
 
 # claude
 .claude/

@@ -517,20 +517,67 @@ mod tests {
         }
     }
 
-    fn documented_basic_fixture_manifest() -> (std::path::PathBuf, PluginRetrievalManifest) {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/retrieval-plugins/basic");
+    fn documented_basic_example_manifest() -> (tempfile::TempDir, PluginRetrievalManifest) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(
+            root.join("plugin.json"),
+            r#"{
+              "name": "retrieval-protocol-example",
+              "version": "0.1.0",
+              "description": "Runnable example for the Omiga local retrieval plugin protocol.",
+              "retrieval": {
+                "protocolVersion": 1,
+                "runtime": {
+                  "command": "./scripts/basic_retrieval_plugin.py",
+                  "args": [],
+                  "cwd": ".",
+                  "idleTtlMs": 30000,
+                  "requestTimeoutMs": 5000,
+                  "cancelGraceMs": 500,
+                  "concurrency": 1
+                },
+                "resources": [{
+                  "id": "example_dataset",
+                  "category": "dataset",
+                  "label": "Example Dataset",
+                  "description": "Local example source that demonstrates search, query, and fetch responses.",
+                  "aliases": ["example data"],
+                  "subcategories": ["sample metadata"],
+                  "capabilities": ["search", "query", "fetch"],
+                  "requiredCredentialRefs": [],
+                  "optionalCredentialRefs": ["pubmed_email"],
+                  "riskLevel": "low",
+                  "riskNotes": ["Example only: does not perform network access or mutate local files."],
+                  "defaultEnabled": false,
+                  "replacesBuiltin": false,
+                  "parameters": [{
+                    "name": "organism",
+                    "type": "string",
+                    "description": "Optional organism label echoed into example metadata."
+                  }]
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("scripts/basic_retrieval_plugin.py"),
+            BASIC_RETRIEVAL_PLUGIN,
+        )
+        .unwrap();
         let plugin_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(root.join("plugin.json")).unwrap()).unwrap();
         let manifest = load_plugin_retrieval_manifest(
-            &root,
+            root,
             plugin_json
                 .get("retrieval")
                 .cloned()
-                .expect("fixture has retrieval manifest"),
+                .expect("example has retrieval manifest"),
         )
         .unwrap();
-        (root, manifest)
+        (dir, manifest)
     }
 
     fn fixture_request(operation: RetrievalOperation, marker: &str) -> RetrievalRequest {
@@ -621,6 +668,102 @@ for line in sys.stdin:
         break
 "#;
 
+    const BASIC_RETRIEVAL_PLUGIN: &str = r#"#!/usr/bin/env python3
+import json
+import sys
+
+PROTOCOL_VERSION = 1
+SOURCE = {
+    "category": "dataset",
+    "id": "example_dataset",
+    "capabilities": ["search", "query", "fetch"],
+}
+
+def write(message):
+    print(json.dumps(message, separators=(",", ":")), flush=True)
+
+def metadata(request):
+    params = request.get("params") if isinstance(request.get("params"), dict) else {}
+    credentials = request.get("credentials") if isinstance(request.get("credentials"), dict) else {}
+    return {
+        "organism": params.get("organism", "human"),
+        "credentialRefs": sorted(credentials.keys()),
+        "fixture": "retrieval-protocol-example",
+    }
+
+def item(request, index=1):
+    query = request.get("query") or request.get("id") or "example"
+    return {
+        "id": f"example-{index}",
+        "accession": f"EXAMPLE:{index}",
+        "title": f"Example result {index} for {query}",
+        "url": f"https://example.test/datasets/example-{index}",
+        "snippet": "Example response from the local retrieval plugin protocol.",
+        "content": f"Detailed example content for {query}.",
+        "metadata": metadata(request),
+        "raw": {"echo": request},
+    }
+
+def result(message_id, request):
+    operation = request.get("operation") or "search"
+    base = {
+        "ok": True,
+        "operation": operation,
+        "category": request.get("category", SOURCE["category"]),
+        "source": request.get("source", SOURCE["id"]),
+        "effectiveSource": SOURCE["id"],
+        "notes": ["example response"],
+        "raw": {"protocolExample": True},
+    }
+    if operation == "fetch":
+        base.update({"items": [], "detail": item(request, 1), "total": 1})
+    elif operation == "query":
+        base.update({"items": [item(request, 1), item(request, 2)], "total": 2})
+    else:
+        base.update({"items": [item(request, 1)], "total": 1})
+    return {"id": message_id, "type": "result", "response": base}
+
+def error(message_id, code, message):
+    return {"id": message_id, "type": "error", "error": {"code": code, "message": message}}
+
+def handle_execute(message):
+    request = message.get("request") if isinstance(message.get("request"), dict) else {}
+    if request.get("source") not in (None, SOURCE["id"]):
+        return error(message.get("id", "execute"), "unknown_source", "source is not registered by this example")
+    if request.get("operation") not in ("search", "query", "fetch"):
+        return error(message.get("id", "execute"), "unsupported_operation", "example supports search, query, and fetch")
+    params = request.get("params") if isinstance(request.get("params"), dict) else {}
+    if params.get("forceError"):
+        return error(message.get("id", "execute"), "forced_error", "forced example error")
+    return result(message.get("id", "execute"), request)
+
+def main():
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        message = json.loads(line)
+        message_type = message.get("type")
+        message_id = message.get("id", message_type or "unknown")
+        if message_type == "initialize":
+            write({
+                "id": message_id,
+                "type": "initialized",
+                "protocolVersion": PROTOCOL_VERSION,
+                "resources": [SOURCE],
+            })
+        elif message_type == "execute":
+            write(handle_execute(message))
+        elif message_type == "shutdown":
+            write({"id": message_id, "type": "shutdown"})
+            return 0
+        else:
+            write(error(message_id, "unknown_message_type", f"unsupported message type: {message_type}"))
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#;
+
     #[tokio::test]
     async fn process_executes_mock_search_result() {
         let (_dir, manifest) = write_mock_plugin(MOCK_PLUGIN, 1_000);
@@ -647,8 +790,8 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn documented_basic_fixture_executes_search_query_and_fetch_protocol() {
-        let (_root, manifest) = documented_basic_fixture_manifest();
+    async fn documented_basic_example_executes_search_query_and_fetch_protocol() {
+        let (_dir, manifest) = documented_basic_example_manifest();
         #[cfg(unix)]
         make_executable(&manifest.runtime.command);
         let mut process = PluginProcess::start("retrieval-protocol-example", manifest)

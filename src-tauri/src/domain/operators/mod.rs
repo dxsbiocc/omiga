@@ -9435,42 +9435,249 @@ mod tests {
         assert_eq!(success.suggested_action, None);
     }
 
-    fn bundled_smoke_operator_paths() -> (PathBuf, PathBuf) {
-        bundled_operator_manifest_path("write-text-report")
+    fn write_smoke_operator_plugin(tmp: &TempDir) -> PathBuf {
+        let plugin_root = tmp.path().join("operator-smoke");
+        fs::create_dir_all(plugin_root.join("operators/write-text-report")).unwrap();
+        fs::create_dir_all(plugin_root.join("operators/container-text-report")).unwrap();
+        fs::create_dir_all(plugin_root.join("scripts")).unwrap();
+        fs::write(
+            plugin_root.join("plugin.json"),
+            r#"{"name":"operator-smoke","version":"0.1.0","operators":"./operators"}"#,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("operators/write-text-report/operator.yaml"),
+            WRITE_TEXT_REPORT_OPERATOR,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("operators/container-text-report/operator.yaml"),
+            CONTAINER_TEXT_REPORT_OPERATOR,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("scripts/write_text_report.sh"),
+            WRITE_TEXT_REPORT_SCRIPT,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("scripts/write_container_report.sh"),
+            WRITE_CONTAINER_REPORT_SCRIPT,
+        )
+        .unwrap();
+        plugin_root
     }
 
-    fn bundled_container_operator_paths() -> (PathBuf, PathBuf) {
-        bundled_operator_manifest_path("container-text-report")
+    fn smoke_operator_paths(tmp: &TempDir) -> (PathBuf, PathBuf) {
+        smoke_operator_manifest_path(tmp, "write-text-report")
     }
 
-    fn bundled_operator_manifest_path(operator_dir: &str) -> (PathBuf, PathBuf) {
-        bundled_plugin_operator_manifest_path("operator-smoke", operator_dir)
+    fn container_operator_paths(tmp: &TempDir) -> (PathBuf, PathBuf) {
+        smoke_operator_manifest_path(tmp, "container-text-report")
     }
 
-    fn bundled_plugin_operator_manifest_path(
-        plugin_name: &str,
-        operator_dir: &str,
-    ) -> (PathBuf, PathBuf) {
-        let plugin_root = match plugin_name {
-            "ngs-alignment" | "ngs-sequence-processing" | "ngs-quality-control" => {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .expect("repo root")
-                    .parent()
-                    .expect("workspace root")
-                    .join("omiga-plugins/plugins/bioinformatics")
-                    .join(plugin_name)
-            }
-            _ => Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("fixtures/plugins/legacy")
-                .join(plugin_name),
-        };
+    fn smoke_operator_manifest_path(tmp: &TempDir, operator_dir: &str) -> (PathBuf, PathBuf) {
+        let plugin_root = write_smoke_operator_plugin(tmp);
         let manifest = plugin_root
             .join("operators")
             .join(operator_dir)
             .join("operator.yaml");
         (plugin_root, manifest)
     }
+
+    fn curated_operator_manifest_path(plugin_name: &str, operator_dir: &str) -> (PathBuf, PathBuf) {
+        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins/plugins/bioinformatics")
+            .join(plugin_name);
+        let manifest = plugin_root
+            .join("operators")
+            .join(operator_dir)
+            .join("operator.yaml");
+        (plugin_root, manifest)
+    }
+
+    const WRITE_TEXT_REPORT_OPERATOR: &str = r#"apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: write_text_report
+  version: 0.1.0
+  name: Write Text Report
+  description: Write a deterministic text artifact from a message parameter.
+  tags:
+    - smoke-test
+    - text
+interface:
+  params:
+    message:
+      kind: string
+      description: Text to write into the generated report artifact.
+      default: hello from Omiga operator
+    repeat:
+      kind: integer
+      description: Number of report lines to write.
+      default: 1
+      minimum: 1
+      maximum: 20
+  outputs:
+    report:
+      kind: file
+      description: Generated text report.
+      glob: operator-report.txt
+      required: true
+smokeTests:
+  - id: default
+    name: Write text report smoke
+    description: Generates a deterministic two-line report artifact.
+    params:
+      message: hello operator smoke
+      repeat: 2
+    resources: {}
+runtime:
+  placement:
+    supported:
+      - local
+      - ssh
+  container:
+    supported:
+      - none
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 60s
+    exposed: true
+execution:
+  argv:
+    - /bin/sh
+    - ./scripts/write_text_report.sh
+    - ${outdir}
+    - ${params.message}
+    - ${params.repeat}
+"#;
+
+    const CONTAINER_TEXT_REPORT_OPERATOR: &str = r#"apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: container_text_report
+  version: 0.1.0
+  name: Container Text Report
+  description: Write a deterministic text artifact from inside Docker or Singularity.
+  tags:
+    - smoke-test
+    - container
+    - docker
+    - singularity
+interface:
+  params:
+    message:
+      kind: string
+      description: Text to write into the generated container report artifact.
+      default: hello from Omiga container operator
+    repeat:
+      kind: integer
+      description: Number of report lines to write before the runtime marker.
+      default: 1
+      minimum: 1
+      maximum: 20
+  outputs:
+    report:
+      kind: file
+      description: Generated container text report.
+      glob: container-operator-report.txt
+      required: true
+smokeTests:
+  - id: default
+    name: Active container smoke
+    description: Runs the operator through the active Docker or Singularity backend and writes a two-line report plus a runtime marker.
+    params:
+      message: hello container operator smoke
+      repeat: 2
+    resources: {}
+runtime:
+  placement:
+    supported:
+      - local
+      - ssh
+  container:
+    supported:
+      - docker
+      - singularity
+    images:
+      docker: alpine:3.19
+      singularity: docker://alpine:3.19
+  scheduler:
+    supported:
+      - none
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 120s
+    exposed: true
+execution:
+  argv:
+    - /bin/sh
+    - ./scripts/write_container_report.sh
+    - ${outdir}
+    - ${params.message}
+    - ${params.repeat}
+"#;
+
+    const WRITE_TEXT_REPORT_SCRIPT: &str = r#"#!/bin/sh
+set -eu
+
+outdir="${1:?missing outdir}"
+message="${2:-hello from Omiga operator}"
+repeat="${3:-1}"
+
+case "$repeat" in
+  ''|*[!0-9]*) repeat=1 ;;
+esac
+if [ "$repeat" -lt 1 ]; then repeat=1; fi
+if [ "$repeat" -gt 20 ]; then repeat=20; fi
+
+mkdir -p "$outdir"
+: > "$outdir/operator-report.txt"
+i=0
+while [ "$i" -lt "$repeat" ]; do
+  printf '%s\n' "$message" >> "$outdir/operator-report.txt"
+  i=$((i + 1))
+done
+
+printf 'wrote %s line(s) to %s\n' "$repeat" "$outdir/operator-report.txt"
+"#;
+
+    const WRITE_CONTAINER_REPORT_SCRIPT: &str = r#"#!/bin/sh
+set -eu
+
+outdir="${1:?missing outdir}"
+message="${2:-hello from Omiga container operator}"
+repeat="${3:-1}"
+
+case "$repeat" in
+  ''|*[!0-9]*) repeat=1 ;;
+esac
+if [ "$repeat" -lt 1 ]; then repeat=1; fi
+if [ "$repeat" -gt 20 ]; then repeat=20; fi
+
+mkdir -p "$outdir"
+report="$outdir/container-operator-report.txt"
+: > "$report"
+i=0
+while [ "$i" -lt "$repeat" ]; do
+  printf '%s\n' "$message" >> "$report"
+  i=$((i + 1))
+done
+
+printf 'container smoke runtime: %s\n' "$(uname -s 2>/dev/null || printf unknown)" >> "$report"
+printf 'wrote %s line(s) plus runtime marker to %s\n' "$repeat" "$report"
+"#;
 
     fn cached_report_operator_spec(
         tmp: &TempDir,
@@ -9922,8 +10129,9 @@ execution:
     }
 
     #[test]
-    fn discovers_bundled_smoke_operator_from_active_plugin() {
-        let (plugin_root, manifest) = bundled_smoke_operator_paths();
+    fn discovers_temp_smoke_operator_from_active_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) = smoke_operator_paths(&tmp);
         assert!(manifest.is_file());
 
         let plugin = crate::domain::plugins::LoadedPlugin {
@@ -9944,7 +10152,7 @@ execution:
         let smoke = candidates
             .iter()
             .find(|candidate| candidate.metadata.id == "write_text_report")
-            .expect("bundled smoke operator should be discovered");
+            .expect("temp smoke operator should be discovered");
         assert_eq!(smoke.source.source_plugin, "operator-smoke@omiga-curated");
         assert_eq!(smoke.metadata.version, "0.1.0");
         assert_eq!(smoke.execution.argv[0], "/bin/sh");
@@ -9959,7 +10167,7 @@ execution:
         let container = candidates
             .iter()
             .find(|candidate| candidate.metadata.id == "container_text_report")
-            .expect("bundled container smoke operator should be discovered");
+            .expect("temp container smoke operator should be discovered");
         assert_eq!(
             container.source.source_plugin,
             "operator-smoke@omiga-curated"
@@ -9994,26 +10202,8 @@ execution:
     }
 
     #[test]
-    fn discovers_atomic_bundled_analysis_operator_plugins() {
+    fn discovers_curated_ngs_operator_plugins() {
         let cases = [
-            (
-                "operator-pca-r",
-                "pca-matrix",
-                "omics_pca_matrix",
-                "Rscript",
-            ),
-            (
-                "operator-differential-expression-r",
-                "differential-expression-basic",
-                "omics_differential_expression_basic",
-                "Rscript",
-            ),
-            (
-                "operator-enrichment-r",
-                "functional-enrichment-basic",
-                "omics_functional_enrichment_basic",
-                "Rscript",
-            ),
             (
                 "ngs-sequence-processing",
                 "seqtk-sample",
@@ -10026,24 +10216,10 @@ execution:
                 "seqtk_fqchk",
                 "/bin/sh",
             ),
-            (
-                "operator-pubmed-search",
-                "pubmed-search",
-                "pubmed_search",
-                "python3",
-            ),
-            ("operator-geo-search", "geo-search", "geo_search", "python3"),
-            (
-                "operator-uniprot-search",
-                "uniprot-search",
-                "uniprot_search",
-                "python3",
-            ),
         ];
 
         for (plugin_name, operator_dir, operator_id, first_argv) in cases {
-            let (plugin_root, manifest) =
-                bundled_plugin_operator_manifest_path(plugin_name, operator_dir);
+            let (plugin_root, manifest) = curated_operator_manifest_path(plugin_name, operator_dir);
             assert!(manifest.is_file(), "{plugin_name} manifest should exist");
 
             let plugin = crate::domain::plugins::LoadedPlugin {
@@ -10080,55 +10256,6 @@ execution:
                 operator.interface.outputs["summary"].kind,
                 OperatorFieldKind::Json
             ));
-            if plugin_name == "operator-differential-expression-r" {
-                let preflight = operator
-                    .preflight
-                    .as_ref()
-                    .expect("differential expression choices should live in manifest preflight");
-                assert_eq!(preflight.questions.len(), 4);
-                assert!(preflight.questions.iter().any(|question| {
-                    question.param == "de_method"
-                        && question
-                            .options
-                            .iter()
-                            .any(|option| option.value == json!("deseq2"))
-                }));
-                assert!(preflight.questions.iter().any(|question| {
-                    question.param == "pvalue_threshold"
-                        && question
-                            .options
-                            .iter()
-                            .any(|option| option.custom && option.custom_placeholder.is_some())
-                }));
-                let schema = operator_parameters_schema(operator);
-                assert!(schema["required"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|value| value == "params"));
-                let required_params = schema["properties"]["params"]["required"]
-                    .as_array()
-                    .unwrap();
-                assert!(required_params.iter().any(|value| value == "group_column"));
-                assert!(!required_params.iter().any(|value| value == "de_method"));
-                assert!(!required_params
-                    .iter()
-                    .any(|value| value == "input_data_type"));
-                assert!(
-                    schema["properties"]["params"]["properties"]["de_method"]["description"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Ask state")
-                );
-                let ask_state_schema = schema["properties"]["params"]["properties"]["de_method"]
-                    ["oneOf"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|candidate| candidate["enum"] == json!(["ask"]))
-                    .expect("preflight params should allow explicit ask state");
-                assert_eq!(ask_state_schema["type"], "string");
-            }
             assert_eq!(
                 operator.source.source_plugin,
                 format!("{plugin_name}@omiga-curated")
@@ -10594,9 +10721,9 @@ execution:
     }
 
     #[test]
-    fn bundled_container_smoke_operator_builds_docker_command() {
+    fn temp_container_smoke_operator_builds_docker_command() {
         let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) = bundled_container_operator_paths();
+        let (plugin_root, manifest) = container_operator_paths(&tmp);
         let spec =
             load_operator_manifest(&manifest, "operator-smoke@omiga-curated", plugin_root).unwrap();
         assert_eq!(spec.metadata.id, "container_text_report");
@@ -10647,9 +10774,9 @@ execution:
 
     #[tokio::test]
     #[ignore = "requires a running Docker daemon and access to the alpine:3.19 image"]
-    async fn executes_bundled_container_smoke_operator_with_docker_runtime() {
+    async fn executes_temp_container_smoke_operator_with_docker_runtime() {
         let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) = bundled_container_operator_paths();
+        let (plugin_root, manifest) = container_operator_paths(&tmp);
         let spec =
             load_operator_manifest(&manifest, "operator-smoke@omiga-curated", plugin_root).unwrap();
         let smoke_invocation = spec
@@ -11568,7 +11695,7 @@ runtime:
 
     #[test]
     fn ngs_alignment_wrapper_smoke_fixture_runs_with_mock_tools() {
-        let (plugin_root, _) = bundled_plugin_operator_manifest_path("ngs-alignment", "bwa-index");
+        let (plugin_root, _) = curated_operator_manifest_path("ngs-alignment", "bwa-index");
         let script = plugin_root
             .join("scripts")
             .join("test_ngs_alignment_smoke.py");
@@ -11971,9 +12098,9 @@ runtime:
     }
 
     #[tokio::test]
-    async fn executes_bundled_smoke_operator_locally() {
+    async fn executes_temp_smoke_operator_locally() {
         let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) = bundled_smoke_operator_paths();
+        let (plugin_root, manifest) = smoke_operator_paths(&tmp);
         let spec =
             load_operator_manifest(&manifest, "operator-smoke@omiga-curated", plugin_root).unwrap();
         let smoke_invocation = spec.smoke_tests[0].arguments.clone();
@@ -12168,179 +12295,6 @@ runtime:
             first.outputs["report"][0].path
         );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "run\nrun\n");
-    }
-
-    #[tokio::test]
-    async fn executes_pubmed_operator_with_offline_fixture() {
-        let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) =
-            bundled_plugin_operator_manifest_path("operator-pubmed-search", "pubmed-search");
-        let spec = load_operator_manifest(
-            &manifest,
-            "operator-pubmed-search@omiga-curated",
-            plugin_root.clone(),
-        )
-        .unwrap();
-        let fixture = plugin_root.join("examples").join("pubmed_fixture.json");
-        let invocation = OperatorInvocation {
-            inputs: BTreeMap::new(),
-            params: BTreeMap::from([
-                ("query".to_string(), json!("TP53 cancer")),
-                ("limit".to_string(), json!(2)),
-                ("mode".to_string(), json!("offline_fixture")),
-                (
-                    "fixture_json".to_string(),
-                    json!(fixture.to_string_lossy().to_string()),
-                ),
-                ("email".to_string(), json!("")),
-            ]),
-            resources: BTreeMap::new(),
-            metadata: BTreeMap::new(),
-        };
-        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
-
-        let result = execute_resolved_operator(
-            &ctx,
-            ResolvedOperator {
-                alias: "pubmed_search".to_string(),
-                spec,
-            },
-            invocation,
-            Some(OperatorRunContext {
-                kind: Some("operator-pilot".to_string()),
-                smoke_test_id: Some("offline-fixture".to_string()),
-                smoke_test_name: Some("PubMed offline fixture".to_string()),
-                parent_execution_id: None,
-                bypass_cache: false,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.status, "succeeded");
-        let structured_outputs = result.structured_outputs.as_ref().unwrap();
-        assert_eq!(structured_outputs["summary"]["count"], 2);
-        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
-        let results_path = Path::new(&result.outputs["results"][0].path);
-        let results = fs::read_to_string(results_path).expect("results");
-        assert!(results.contains("31452104"));
-        assert!(results.contains("25772236"));
-    }
-
-    #[tokio::test]
-    async fn executes_geo_operator_with_offline_fixture() {
-        let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) =
-            bundled_plugin_operator_manifest_path("operator-geo-search", "geo-search");
-        let spec = load_operator_manifest(
-            &manifest,
-            "operator-geo-search@omiga-curated",
-            plugin_root.clone(),
-        )
-        .unwrap();
-        let fixture = plugin_root.join("examples").join("geo_fixture.json");
-        let invocation = OperatorInvocation {
-            inputs: BTreeMap::new(),
-            params: BTreeMap::from([
-                ("query".to_string(), json!("TP53 cancer")),
-                ("limit".to_string(), json!(2)),
-                ("mode".to_string(), json!("offline_fixture")),
-                (
-                    "fixture_json".to_string(),
-                    json!(fixture.to_string_lossy().to_string()),
-                ),
-                ("email".to_string(), json!("")),
-            ]),
-            resources: BTreeMap::new(),
-            metadata: BTreeMap::new(),
-        };
-        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
-
-        let result = execute_resolved_operator(
-            &ctx,
-            ResolvedOperator {
-                alias: "geo_search".to_string(),
-                spec,
-            },
-            invocation,
-            Some(OperatorRunContext {
-                kind: Some("operator-pilot".to_string()),
-                smoke_test_id: Some("offline-fixture".to_string()),
-                smoke_test_name: Some("GEO offline fixture".to_string()),
-                parent_execution_id: None,
-                bypass_cache: false,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.status, "succeeded");
-        let structured_outputs = result.structured_outputs.as_ref().unwrap();
-        assert_eq!(structured_outputs["summary"]["count"], 2);
-        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
-        let results_path = Path::new(&result.outputs["results"][0].path);
-        let results = fs::read_to_string(results_path).expect("results");
-        assert!(results.contains("GSE123456"));
-        assert!(results.contains("GSE123457"));
-    }
-
-    #[tokio::test]
-    async fn executes_uniprot_operator_with_offline_fixture() {
-        let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) =
-            bundled_plugin_operator_manifest_path("operator-uniprot-search", "uniprot-search");
-        let spec = load_operator_manifest(
-            &manifest,
-            "operator-uniprot-search@omiga-curated",
-            plugin_root.clone(),
-        )
-        .unwrap();
-        let fixture = plugin_root.join("examples").join("uniprot_fixture.json");
-        let invocation = OperatorInvocation {
-            inputs: BTreeMap::new(),
-            params: BTreeMap::from([
-                ("query".to_string(), json!("TP53")),
-                ("limit".to_string(), json!(2)),
-                ("mode".to_string(), json!("offline_fixture")),
-                (
-                    "fixture_json".to_string(),
-                    json!(fixture.to_string_lossy().to_string()),
-                ),
-                ("organism".to_string(), json!("")),
-                ("taxon_id".to_string(), json!("9606")),
-                ("reviewed".to_string(), json!("true")),
-            ]),
-            resources: BTreeMap::new(),
-            metadata: BTreeMap::new(),
-        };
-        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
-
-        let result = execute_resolved_operator(
-            &ctx,
-            ResolvedOperator {
-                alias: "uniprot_search".to_string(),
-                spec,
-            },
-            invocation,
-            Some(OperatorRunContext {
-                kind: Some("operator-pilot".to_string()),
-                smoke_test_id: Some("offline-fixture".to_string()),
-                smoke_test_name: Some("UniProt offline fixture".to_string()),
-                parent_execution_id: None,
-                bypass_cache: false,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.status, "succeeded");
-        let structured_outputs = result.structured_outputs.as_ref().unwrap();
-        assert_eq!(structured_outputs["summary"]["count"], 2);
-        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
-        let results_path = Path::new(&result.outputs["results"][0].path);
-        let results = fs::read_to_string(results_path).expect("results");
-        assert!(results.contains("P04637"));
-        assert!(results.contains("P38398"));
     }
 
     #[tokio::test]

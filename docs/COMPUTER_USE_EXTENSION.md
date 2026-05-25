@@ -8,7 +8,7 @@ Computer Use for a task or session in the chat composer.
 ## Install and enable
 
 1. Open **Settings → Plugins**.
-2. Install and enable the bundled **Computer Use** plugin.
+2. Install and enable the external marketplace **Computer Use** plugin.
 3. In the chat composer, choose **Computer Use → Computer Task** for one
    message or **Computer Use → Computer Session** for repeated local actions.
 4. Use **Computer Use → Stop current Computer Use run** to stop the active run.
@@ -17,10 +17,10 @@ The settings and audit controls live in **Settings → Computer Use**.
 
 ## Backend implementation status
 
-Computer Use is packaged as a bundled optional plugin under:
+Computer Use lives in the external plugin marketplace repository under:
 
 ```text
-src-tauri/bundled_plugins/plugins/computer-use/
+../omiga-plugins/plugins/automation/computer-use/
   plugin.json
   .mcp.json
   bin/computer-use
@@ -39,7 +39,7 @@ scripts/install-computer-use-sidecar.sh --profile release
 Use `scripts/install-computer-use-sidecar.sh --status` to inspect source and
 destination paths without building or copying; status output includes source
 and destination SHA-256 values when those files exist. The script installs
-`bin/computer-use-sidecar` inside the bundled plugin, but runtime remains
+`bin/computer-use-sidecar` inside the external marketplace plugin, but runtime remains
 Python unless an internal developer flag enables Rust. This keeps the core
 `computer_*` facade protocol unchanged while the Rust port matures behind a
 feature flag.
@@ -57,7 +57,7 @@ scripts/computer-use-release-check.py
 ```
 
 For final packaging, add `--fail-on-generated-artifacts` after cleaning
-`__pycache__`/`.pyc` files from bundled plugin resources.
+`__pycache__`/`.pyc` files from external plugin resources.
 
 For distribution hardening, the same release check can write and verify a
 checksum manifest for Computer Use packaging artifacts:

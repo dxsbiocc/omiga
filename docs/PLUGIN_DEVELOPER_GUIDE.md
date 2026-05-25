@@ -92,7 +92,7 @@ execution:
 smokeTests:
   - id: default
     name: Analysis smoke
-    description: Runs with a bundled fixture file.
+    description: Runs with a plugin-owned example fixture file.
     inputs:
       data_file: test/fixture.csv
     params:
@@ -158,13 +158,11 @@ EOF
 cargo test --manifest-path src-tauri/Cargo.toml operator_manifest -- --nocapture
 ```
 
-### 4. Run the smoke fixture manually
+### 4. Run a smoke test manually
 
-Reference the legacy test fixture as a working example:
-
-```
-src-tauri/bundled_plugins/plugins/operator-smoke/operators/write-text-report/operator.yaml
-```
+Omiga no longer keeps app-local plugin fixtures under `src-tauri/`. Use your
+plugin's own `smokeTests` entry, or copy the temporary smoke operator generated
+in `src-tauri/src/domain/operators.rs` tests as a local development example.
 
 To run the smoke test via the UI:
 

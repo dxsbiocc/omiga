@@ -696,7 +696,7 @@ pub fn format_plugins_system_section(outcome: &PluginLoadOutcome) -> Option<Stri
     lines.push("### How to use plugins".to_string());
     lines.push(
         "- Plugins are not invoked directly; use their underlying skills, MCP tools, operator tools, or explicitly available app tools.\n\
-         - Template plugins expose Template units. Discover them with `unit_search` / `unit_describe`, then run bundled templates with `template_execute`; do not rebuild template logic with ad-hoc shell/file writes unless the user explicitly asks for custom code.\n\
+         - Template plugins expose Template units. Discover them with `unit_search` / `unit_describe`, then run exposed templates with `template_execute`; do not rebuild template logic with ad-hoc shell/file writes unless the user explicitly asks for custom code.\n\
          - Operator plugins expose atomic tools dynamically as `operator__...`; use those operator tools directly when the user's request matches them.\n\
          - Retrieval plugin routes are local Search / Query / Fetch routes, not MCP tool names. If a plugin lists `retrieval routes: category.source`, call `search`, `query`, or `fetch` with that category/source.\n\
          - If the user explicitly names a plugin, prefer capabilities associated with that plugin for that turn.\n\
@@ -876,13 +876,6 @@ pub fn dev_builtin_marketplace_path() -> PathBuf {
         .parent()
         .expect("workspace root")
         .join("omiga-plugins")
-        .join(MARKETPLACE_FILE_NAME)
-}
-
-#[cfg(test)]
-fn dev_bundled_marketplace_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("bundled_plugins")
         .join(MARKETPLACE_FILE_NAME)
 }
 
@@ -1228,7 +1221,7 @@ fn read_config() -> PluginConfigFile {
         .unwrap_or_default();
     if migrate_superseded_builtin_plugin_config(&mut config) {
         if let Err(err) = write_config(&config) {
-            tracing::warn!("failed to persist superseded bundled plugin migration: {err}");
+            tracing::warn!("failed to persist superseded curated plugin migration: {err}");
         }
     }
     config
@@ -2989,10 +2982,10 @@ fn refresh_configured_builtin_plugins_best_effort(config: &PluginConfigFile, cac
     match refresh_configured_builtin_plugins(config, cache_root) {
         Ok(refreshed) if refreshed > 0 => tracing::info!(
             count = refreshed,
-            "refreshed configured bundled plugin installs"
+            "refreshed configured curated plugin installs"
         ),
         Ok(_) => {}
-        Err(err) => tracing::warn!("failed to refresh configured bundled plugin installs: {err}"),
+        Err(err) => tracing::warn!("failed to refresh configured curated plugin installs: {err}"),
     }
 }
 
@@ -4308,12 +4301,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn legacy_plugin_fixture_root(plugin_name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/plugins/legacy")
-            .join(plugin_name)
-    }
-
     fn curated_marketplace_path() -> PathBuf {
         dev_builtin_marketplace_path()
     }
@@ -4354,7 +4341,7 @@ mod tests {
         assert_eq!(
             paths,
             vec![dev_builtin_marketplace_path()],
-            "Omiga must not add app-local .omiga, src-tauri fixtures, bundled, or project plugin marketplaces"
+            "Omiga must not add app-local .omiga, src-tauri fixtures, packaged resources, or project plugin marketplaces"
         );
     }
 
@@ -4366,7 +4353,7 @@ mod tests {
             .join("omiga-plugins")
             .join(MARKETPLACE_FILE_NAME);
         let internal = resource_dir
-            .join("bundled_plugins")
+            .join("embedded_plugins")
             .join(MARKETPLACE_FILE_NAME);
         fs::create_dir_all(curated.parent().unwrap()).unwrap();
         fs::create_dir_all(internal.parent().unwrap()).unwrap();
@@ -4392,7 +4379,7 @@ mod tests {
         let entry = entries
             .iter()
             .find(|entry| entry.path == builtin.to_string_lossy())
-            .expect("bundled marketplace entry");
+            .expect("curated marketplace entry");
         assert!(
             entry
                 .remote
@@ -4573,7 +4560,7 @@ mod tests {
     }
 
     #[test]
-    fn superseded_bundled_plugin_config_migrates_to_aggregate_plugins() {
+    fn superseded_curated_plugin_config_migrates_to_aggregate_plugins() {
         let mut config = PluginConfigFile::default();
         for key in [
             "operator-pca-r@omiga-curated",
@@ -4760,10 +4747,17 @@ mod tests {
 
     #[test]
     fn plugin_kind_classification_matches_install_sections() {
-        let operator_root = legacy_plugin_fixture_root("operator-pca-r");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let operator_root = curated_plugin_root("ngs-alignment");
         let analysis_root = curated_plugin_root("transcriptomics");
-        let source_root = legacy_plugin_fixture_root("retrieval-dataset-geo");
-        let workflow_root = legacy_plugin_fixture_root("notebook-helper");
+        let source_root = curated_plugin_root("resource-ncbi");
+        let workflow_root = write_typed_plugin(
+            tmp.path(),
+            PluginKind::Workflow,
+            "notebook-helper",
+            r#"{"displayName":"Notebook Helper","category":"Notebook"}"#,
+            false,
+        );
         let visualization_root = curated_plugin_root("visualization-r");
 
         let operator_manifest = load_plugin_manifest(&operator_root).expect("operator manifest");
@@ -4835,7 +4829,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_bundled_plugins_refresh_updates_stale_typed_roots() {
+    fn configured_curated_plugins_refresh_updates_stale_typed_roots() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store_root = tmp.path().join("plugins");
         let cache_root = store_root.join("cache");
@@ -4856,7 +4850,7 @@ mod tests {
         );
 
         let refreshed = refresh_configured_builtin_plugins(&config, &cache_root)
-            .expect("refresh bundled plugin");
+            .expect("refresh curated plugin");
 
         let workflow_root = store_root.join("workflow").join("visualization-r");
         assert_eq!(refreshed, 1);
@@ -5307,10 +5301,10 @@ template:
 
     #[test]
     fn retrieval_only_plugins_are_visible_in_system_section() {
-        let plugin_root = legacy_plugin_fixture_root("retrieval-dataset-biosample");
-        let manifest = load_plugin_manifest(&plugin_root).expect("biosample plugin manifest");
+        let plugin_root = curated_plugin_root("resource-ncbi");
+        let manifest = load_plugin_manifest(&plugin_root).expect("NCBI resource plugin manifest");
         let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
-            id: "retrieval-dataset-biosample@omiga-curated".to_string(),
+            id: "resource-ncbi@omiga-curated".to_string(),
             manifest_name: Some(manifest.name.clone()),
             display_name: manifest
                 .interface
@@ -5328,7 +5322,7 @@ template:
 
         let section = format_plugins_system_section(&outcome).expect("plugins section");
 
-        assert!(section.contains("BioSample Retrieval Resource"));
+        assert!(section.contains("NCBI"));
         assert!(section.contains("retrieval routes"));
         assert!(section.contains("`dataset.biosample`"));
         assert!(!section.contains("`dataset.arrayexpress`"));
@@ -5528,7 +5522,7 @@ template:
     }
 
     #[test]
-    fn bundled_marketplace_hides_internal_smoke_and_notebook_helper_plugins() {
+    fn external_marketplace_hides_internal_smoke_and_notebook_helper_plugins() {
         let marketplace = read_marketplace(&dev_builtin_marketplace_path()).unwrap();
         for removed in ["operator-smoke", "notebook-helper"] {
             assert!(
@@ -5539,22 +5533,6 @@ template:
                 "internal helper plugin `{removed}` should not be marketplace-visible"
             );
         }
-    }
-
-    #[test]
-    fn bundled_internal_marketplace_is_not_public_marketplace_mirror() {
-        let marketplace = read_marketplace(&dev_bundled_marketplace_path()).unwrap();
-        let plugin_names = marketplace
-            .plugins
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(plugin_names, vec!["computer-use"]);
-        assert!(
-            marketplace.remote.is_none(),
-            "bundled internal plugins should not masquerade as the remote curated marketplace"
-        );
     }
 
     #[test]
