@@ -157,7 +157,9 @@ pub struct Playbook {
 /// - 所有写操作返回 `Result`,失败给出可读错误,不 panic、不静默吞错。
 /// - 持久化布局参照 `research_system/stores.rs::JsonFileTaskGraphStore`
 ///   (每个 Playbook 一个 `<playbook_id>.json`)。
-pub trait PlaybookStore {
+/// `Send` 超 trait:重放编排会在 `.await` 间隙持有 `&mut dyn PlaybookStore`,
+/// 故 trait 对象必须 `Send`(tauri 命令返回的 future 要求 `Send`)。
+pub trait PlaybookStore: Send {
     /// 保存(新增或覆盖)一个 Playbook,并维护指纹索引。
     fn save(&mut self, playbook: Playbook) -> Result<(), String>;
     /// 按 id 取回。

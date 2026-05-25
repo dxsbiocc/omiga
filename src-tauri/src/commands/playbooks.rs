@@ -1,0 +1,200 @@
+//! Playbook 固化系统的 tauri 命令层(Wave 3 productionization)。
+//!
+//! 薄包装:把已验证的 `domain::playbooks` 逻辑接到实时算子链执行路径。
+//! - `save_playbook_from_chain`:把一条(成功的)链固化为 Playbook。
+//! - `list_playbooks`:列出项目内 Playbook(供前端像 Skill 一样展示)。
+//! - `replay_playbook`:按 id 重放——重算当前算子版本指纹 → 失效检测 → 执行 → 验证 →
+//!   回写 health(含 auto-demote)。失效 / 未找到 / 非 Active 时不执行,交由调用方回退。
+
+use crate::app_state::OmigaAppState;
+use crate::commands::operators::{
+    build_operator_context, resolve_project_root, run_chain_with_context, OperatorChainResult,
+};
+use crate::commands::CommandResult;
+use crate::domain::operators::{self, ChainStep};
+use crate::domain::playbooks::{
+    build_chain_playbook, execute_replay, JsonFilePlaybookStore, Playbook, PlaybookStatus,
+    PlaybookStore, Provenance, ReplayOutcome,
+};
+use crate::errors::AppError;
+use serde::Serialize;
+use std::collections::HashSet;
+use std::path::Path;
+use tauri::State;
+
+const PLAYBOOKS_SUBDIR: &str = ".omiga/playbooks";
+
+fn playbook_store(project_root: &Path) -> JsonFilePlaybookStore {
+    JsonFilePlaybookStore::new(project_root.join(PLAYBOOKS_SUBDIR))
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn status_str(status: PlaybookStatus) -> String {
+    match status {
+        PlaybookStatus::Active => "active",
+        PlaybookStatus::Stale => "stale",
+        PlaybookStatus::Quarantined => "quarantined",
+    }
+    .to_string()
+}
+
+/// 解析链中每个唯一算子别名的当前版本(去重,保持首次出现顺序)。
+fn resolve_chain_versions(steps: &[ChainStep]) -> Result<Vec<(String, String)>, AppError> {
+    let mut versions = Vec::new();
+    let mut seen = HashSet::new();
+    for step in steps {
+        if !seen.insert(step.alias.clone()) {
+            continue;
+        }
+        let resolved = operators::resolve_operator_alias(&step.alias).map_err(|err| {
+            AppError::Config(format!("resolve operator '{}': {}", step.alias, err.message))
+        })?;
+        versions.push((step.alias.clone(), resolved.spec.metadata.version.clone()));
+    }
+    Ok(versions)
+}
+
+/// 把一条链固化为 Playbook 并持久化到 `.omiga/playbooks/`。
+#[tauri::command]
+pub async fn save_playbook_from_chain(
+    playbook_id: String,
+    title: String,
+    steps: Vec<ChainStep>,
+    expected_output_keys: Vec<String>,
+    project_root: Option<String>,
+    execution_environment: Option<String>,
+) -> CommandResult<Playbook> {
+    if steps.len() < 2 {
+        return Err(AppError::Config(
+            "a chain playbook requires at least two steps".to_string(),
+        ));
+    }
+    let versions = resolve_chain_versions(&steps)?;
+    let root = resolve_project_root(project_root);
+    let env_signature = execution_environment.filter(|value| !value.trim().is_empty());
+    let provenance = Provenance {
+        distilled_from: Vec::new(),
+        proposal_id: None,
+        created_at: now_rfc3339(),
+    };
+    let playbook = build_chain_playbook(
+        playbook_id,
+        title,
+        &steps,
+        &versions,
+        expected_output_keys,
+        env_signature,
+        provenance,
+    )
+    .map_err(AppError::Config)?;
+
+    let mut store = playbook_store(&root);
+    store.save(playbook.clone()).map_err(AppError::Config)?;
+    Ok(playbook)
+}
+
+/// 列出项目内全部 Playbook(含非 Active,供管理面板使用)。
+#[tauri::command]
+pub async fn list_playbooks(project_root: Option<String>) -> CommandResult<Vec<Playbook>> {
+    let root = resolve_project_root(project_root);
+    Ok(playbook_store(&root).list())
+}
+
+/// 重放结果(返回给前端)。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayPlaybookResponse {
+    /// "replayed" | "invalidated" | "notFound" | "inactive"。
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<OperatorChainResult>,
+}
+
+/// 按 id 重放一条链 Playbook。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn replay_playbook(
+    state: State<'_, OmigaAppState>,
+    playbook_id: String,
+    project_root: Option<String>,
+    session_id: Option<String>,
+    execution_environment: Option<String>,
+    ssh_server: Option<String>,
+    sandbox_backend: Option<String>,
+) -> CommandResult<ReplayPlaybookResponse> {
+    let ctx = build_operator_context(
+        &state,
+        project_root,
+        session_id,
+        execution_environment,
+        ssh_server,
+        sandbox_backend,
+        120,
+    )
+    .await;
+    let root = ctx.project_root.clone();
+    let mut store = playbook_store(&root);
+
+    // 取存储的链 steps 以解析当前算子版本(失效检测的输入)。
+    let Some(stored) = store.get(&playbook_id) else {
+        return Ok(ReplayPlaybookResponse {
+            outcome: "notFound".to_string(),
+            verified: None,
+            status: None,
+            result: None,
+        });
+    };
+    let steps: Vec<ChainStep> = serde_json::from_value(stored.params.clone())
+        .map_err(|err| AppError::Config(format!("decode stored chain steps: {err}")))?;
+    let current_versions = resolve_chain_versions(&steps)?;
+    let now = now_rfc3339();
+
+    let outcome = execute_replay(
+        &mut store,
+        &playbook_id,
+        &current_versions,
+        &now,
+        |chain_steps| run_chain_with_context(ctx, chain_steps),
+        |result: &OperatorChainResult| result.ok,
+    )
+    .await
+    .map_err(AppError::Config)?;
+
+    Ok(match outcome {
+        ReplayOutcome::Replayed {
+            result,
+            verified,
+            status,
+        } => ReplayPlaybookResponse {
+            outcome: "replayed".to_string(),
+            verified: Some(verified),
+            status: Some(status_str(status)),
+            result: Some(result),
+        },
+        ReplayOutcome::Invalidated => ReplayPlaybookResponse {
+            outcome: "invalidated".to_string(),
+            verified: None,
+            status: None,
+            result: None,
+        },
+        ReplayOutcome::NotFound => ReplayPlaybookResponse {
+            outcome: "notFound".to_string(),
+            verified: None,
+            status: None,
+            result: None,
+        },
+        ReplayOutcome::Inactive => ReplayPlaybookResponse {
+            outcome: "inactive".to_string(),
+            verified: None,
+            status: None,
+            result: None,
+        },
+    })
+}
