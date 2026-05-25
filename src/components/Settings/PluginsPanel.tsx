@@ -7136,6 +7136,8 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       autoHideDuration={error ? null : 4200}
       onClose={handleFeedbackClose}
       anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      // Sit above any open Dialog (modal stacks at theme.zIndex.modal=1300).
+      sx={{ zIndex: (t) => t.zIndex.modal + 50 }}
     >
       <Alert
         severity={feedbackSeverity}
