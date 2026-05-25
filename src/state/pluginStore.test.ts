@@ -17,7 +17,6 @@ import {
   buildRetrievalRuntimeDiagnostics,
   flattenMarketplacePlugins,
   summarizeOperatorRunResult,
-  updateOperatorEnabledInCatalog,
   updatePluginEnabledInMarketplaces,
   updatePluginInstalledInMarketplaces,
   updateRetrievalResourceEnabledInMarketplaces,
@@ -113,8 +112,8 @@ describe("local plugin catalog updates", () => {
       enabled: false,
     });
     const other = plugin({
-      id: "operator-seqtk@omiga-curated",
-      name: "operator-seqtk",
+      id: "ngs-sequence-processing@omiga-curated",
+      name: "ngs-sequence-processing",
       installed: false,
       enabled: false,
     });
@@ -139,53 +138,6 @@ describe("local plugin catalog updates", () => {
       authPolicy: "ON_USE",
     });
     expect(updated[0].plugins[1]).toBe(other);
-  });
-
-  it("updates one operator registry entry without requiring a full plugin reload", () => {
-    const operator: OperatorSummary = {
-      id: "write_text_report",
-      version: "0.1.0",
-      name: "Write Text Report",
-      description: null,
-      sourcePlugin: "operator-smoke@omiga-curated",
-      manifestPath: "/plugins/operator-smoke/operators/write_text_report.yaml",
-      smokeTests: [],
-      enabledAliases: [],
-      exposed: false,
-      unavailableReason: null,
-    };
-    const other: OperatorSummary = {
-      ...operator,
-      id: "fastqc",
-      sourcePlugin: "bio-operators@local",
-      manifestPath: "/plugins/bio/operators/fastqc.yaml",
-    };
-
-    const enabled = updateOperatorEnabledInCatalog([operator, other], {
-      alias: "write_text_report",
-      operatorId: "write_text_report",
-      sourcePlugin: "operator-smoke@omiga-curated",
-      version: "0.1.0",
-      enabled: true,
-    });
-
-    expect(enabled[0]).toMatchObject({
-      exposed: true,
-      enabledAliases: ["write_text_report"],
-    });
-    expect(enabled[1]).toBe(other);
-
-    const disabled = updateOperatorEnabledInCatalog(enabled, {
-      alias: "write_text_report",
-      operatorId: "write_text_report",
-      sourcePlugin: "operator-smoke@omiga-curated",
-      version: "0.1.0",
-      enabled: false,
-    });
-    expect(disabled[0]).toMatchObject({
-      exposed: false,
-      enabledAliases: [],
-    });
   });
 
   it("updates one retrieval route exposure without rebuilding unrelated plugins", () => {
@@ -383,8 +335,8 @@ describe("usePluginStore operator actions", () => {
       enabled: false,
     });
     const other = plugin({
-      id: "operator-seqtk@omiga-curated",
-      name: "operator-seqtk",
+      id: "ngs-sequence-processing@omiga-curated",
+      name: "ngs-sequence-processing",
       installed: false,
       enabled: false,
     });
@@ -433,6 +385,55 @@ describe("usePluginStore operator actions", () => {
     });
     expect(usePluginStore.getState().marketplaces[0].plugins[1]).toBe(other);
     expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("refreshes dynamic operator exposure when toggling a plugin", async () => {
+    const target = plugin({
+      id: "operator-pca-r@omiga-curated",
+      name: "operator-pca-r",
+      installed: true,
+      enabled: false,
+    });
+    const exposedOperator: OperatorSummary = {
+      id: "pca_matrix",
+      version: "0.1.0",
+      name: "PCA Matrix",
+      description: null,
+      sourcePlugin: "operator-pca-r@omiga-curated",
+      manifestPath: "/plugins/operator-pca-r/operators/pca-matrix/operator.yaml",
+      smokeTests: [],
+      enabledAliases: ["pca_matrix"],
+      exposed: true,
+      unavailableReason: null,
+    };
+    usePluginStore.setState({
+      marketplaces: [marketplace("/marketplace.json", [target])],
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "set_omiga_plugin_enabled") return undefined;
+      if (command === "list_omiga_plugin_retrieval_statuses") return [];
+      if (command === "list_operators") {
+        return {
+          registryPath: "/registry.json",
+          operators: [exposedOperator],
+          diagnostics: [],
+        };
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().setPluginEnabled(target.id, true, "/project");
+
+    expect(invokeMock).toHaveBeenCalledWith("set_omiga_plugin_enabled", {
+      pluginId: target.id,
+      enabled: true,
+      projectRoot: "/project",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("list_operators");
+    expect(usePluginStore.getState().operators).toEqual([exposedOperator]);
+    expect(usePluginStore.getState().marketplaces[0].plugins[0]).toMatchObject({
+      enabled: true,
+    });
   });
 
   it("passes force overwrite when syncing a plugin with local edits", async () => {

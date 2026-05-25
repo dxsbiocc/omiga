@@ -33,6 +33,10 @@ src-tauri/bundled_plugins/plugins/computer-use/bin/computer-use-sidecar
 .codex/
 .omx/
 
+# Plugin definitions live in the independent ../omiga-plugins repository.
+.omiga/plugins/
+src-tauri/omiga-plugins/
+
 # claude
 .claude/
 CLAUDE.md

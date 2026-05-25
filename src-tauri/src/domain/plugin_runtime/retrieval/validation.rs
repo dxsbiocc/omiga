@@ -483,6 +483,10 @@ mod tests {
 
     fn curated_marketplace_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .parent()
+            .expect("workspace root")
             .join("omiga-plugins")
             .join("marketplace.json")
     }

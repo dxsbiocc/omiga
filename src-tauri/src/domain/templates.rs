@@ -1732,11 +1732,20 @@ mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     fn repo_plugin_root(plugin_name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
+        let plugins_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
-            .join(".omiga/plugins")
-            .join(plugin_name)
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins/plugins");
+        match plugin_name {
+            "visualization-r" => plugins_root.join("visualization/visualization-r"),
+            "transcriptomics"
+            | "ngs-alignment"
+            | "ngs-sequence-processing"
+            | "ngs-quality-control" => plugins_root.join("bioinformatics").join(plugin_name),
+            _ => plugins_root.join(plugin_name),
+        }
     }
 
     fn legacy_plugin_root(plugin_name: &str) -> PathBuf {
@@ -2222,10 +2231,7 @@ template:
             return;
         }
 
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .join(".omiga/plugins/visualization-r");
+        let plugin_root = repo_plugin_root("visualization-r");
         let template_dir = plugin_root.join("templates/scatter/basic");
         let template = load_template_manifest(
             &template_dir.join("template.yaml"),

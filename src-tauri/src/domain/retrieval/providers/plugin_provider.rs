@@ -583,10 +583,14 @@ mod tests {
             | "retrieval-dataset-gtex"
             | "retrieval-dataset-cbioportal"
             | "retrieval-literature-semantic-scholar"
-            | "retrieval-knowledge-uniprot" => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            | "retrieval-knowledge-uniprot"
+            | "resource-drugs"
+            | "resource-pathways" => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .expect("repo root")
-                .join(".omiga/plugins")
+                .parent()
+                .expect("workspace root")
+                .join("omiga-plugins/plugins/resources")
                 .join(plugin_dir),
             _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/plugins/legacy")

@@ -1208,7 +1208,9 @@ mod tests {
         let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
-            .join(".omiga/plugins/visualization-r");
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins/plugins/visualization/visualization-r");
         let template = crate::domain::templates::load_template_manifest(
             &plugin_root
                 .join("templates")
@@ -1244,7 +1246,9 @@ mod tests {
         let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
-            .join(".omiga/plugins/visualization-r");
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins/plugins/visualization/visualization-r");
         let template = crate::domain::templates::load_template_manifest(
             &plugin_root
                 .join("templates")

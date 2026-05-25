@@ -1807,11 +1807,46 @@ fn apply_operator_registry_update(
     Ok(())
 }
 
+fn registry_entry_matches_candidate(
+    alias: &str,
+    entry: &OperatorRegistryEntry,
+    candidate: &OperatorSpec,
+) -> bool {
+    candidate.metadata.id == entry.operator_id(alias)
+        && entry
+            .version()
+            .map(|version| candidate.metadata.version == version)
+            .unwrap_or(true)
+        && entry
+            .source_plugin()
+            .map(|plugin| candidate.source.source_plugin == plugin)
+            .unwrap_or(true)
+}
+
+fn operator_candidate_key(candidate: &OperatorSpec) -> (String, String, String, PathBuf) {
+    (
+        candidate.source.source_plugin.clone(),
+        candidate.metadata.id.clone(),
+        candidate.metadata.version.clone(),
+        candidate.source.manifest_path.clone(),
+    )
+}
+
 fn resolve_enabled_operators_from(
     candidates: Vec<OperatorSpec>,
     registry: OperatorRegistryFile,
 ) -> Vec<ResolvedOperator> {
     let mut resolved = Vec::new();
+    let mut resolved_aliases = HashSet::new();
+    let mut resolved_candidates = HashSet::new();
+    let mut candidate_id_counts: HashMap<String, usize> = HashMap::new();
+
+    for candidate in &candidates {
+        *candidate_id_counts
+            .entry(candidate.metadata.id.clone())
+            .or_default() += 1;
+    }
+
     for (alias, entry) in registry.enabled {
         if !entry.enabled() {
             continue;
@@ -1823,26 +1858,19 @@ fn resolve_enabled_operators_from(
         let wanted_id = entry.operator_id(&alias);
         let matches = candidates
             .iter()
-            .filter(|candidate| candidate.metadata.id == wanted_id)
-            .filter(|candidate| {
-                entry
-                    .version()
-                    .map(|version| candidate.metadata.version == version)
-                    .unwrap_or(true)
-            })
-            .filter(|candidate| {
-                entry
-                    .source_plugin()
-                    .map(|plugin| candidate.source.source_plugin == plugin)
-                    .unwrap_or(true)
-            })
+            .filter(|candidate| registry_entry_matches_candidate(&alias, &entry, candidate))
             .cloned()
             .collect::<Vec<_>>();
         match matches.as_slice() {
-            [only] => resolved.push(ResolvedOperator {
-                alias,
-                spec: only.clone(),
-            }),
+            [only] => {
+                if resolved_aliases.insert(alias.clone()) {
+                    resolved_candidates.insert(operator_candidate_key(only));
+                    resolved.push(ResolvedOperator {
+                        alias,
+                        spec: only.clone(),
+                    });
+                }
+            }
             [] => tracing::warn!(
                 alias = %alias,
                 operator_id = %wanted_id,
@@ -1856,6 +1884,28 @@ fn resolve_enabled_operators_from(
             ),
         }
     }
+
+    for candidate in candidates {
+        let alias = candidate.metadata.id.clone();
+        if candidate_id_counts.get(&alias).copied().unwrap_or_default() != 1 {
+            tracing::warn!(
+                alias = %alias,
+                "operator auto-exposure skipped because multiple active plugins define the same operator id"
+            );
+            continue;
+        }
+        if resolved_candidates.contains(&operator_candidate_key(&candidate)) {
+            continue;
+        }
+        if resolved_aliases.insert(alias.clone()) {
+            resolved_candidates.insert(operator_candidate_key(&candidate));
+            resolved.push(ResolvedOperator {
+                alias,
+                spec: candidate,
+            });
+        }
+    }
+
     resolved.sort_by(|left, right| left.alias.cmp(&right.alias));
     resolved
 }
@@ -2003,6 +2053,69 @@ pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
         .into_iter()
         .map(operator_tool_schema)
         .collect()
+}
+
+fn operator_prompt_inline_text(raw: &str, max_chars: usize) -> String {
+    raw.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+fn format_enabled_operator_tools_system_section_from_resolved(
+    mut resolved: Vec<ResolvedOperator>,
+) -> Option<String> {
+    if resolved.is_empty() {
+        return None;
+    }
+
+    resolved.sort_by(|left, right| left.alias.cmp(&right.alias));
+    let total = resolved.len();
+    let mut lines = vec![
+        "## Plugin operator tools (auto-exposed)".to_string(),
+        "Active plugins dynamically expose atomic Operator tools as `operator__{id}`. When a user request matches one of these tools, prefer the matching `operator__...` tool over ad-hoc shell/code. Do not ask the user to manually register operator tools; enabling/disabling the owning plugin controls exposure.".to_string(),
+        String::new(),
+    ];
+
+    for operator in resolved.into_iter().take(40) {
+        let tool_name = format!("{OPERATOR_TOOL_PREFIX}{}", operator.alias);
+        let display = operator
+            .spec
+            .metadata
+            .name
+            .as_deref()
+            .unwrap_or(operator.spec.metadata.id.as_str());
+        let description = operator
+            .spec
+            .metadata
+            .description
+            .as_deref()
+            .map(|value| operator_prompt_inline_text(value, 150))
+            .filter(|value| !value.is_empty());
+        let description = description
+            .map(|value| format!(" — {value}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- `{}`: {}{} (plugin: `{}`, operator id: `{}`)",
+            tool_name,
+            operator_prompt_inline_text(display, 80),
+            description,
+            operator_prompt_inline_text(&operator.spec.source.source_plugin, 96),
+            operator_prompt_inline_text(&operator.spec.metadata.id, 96),
+        ));
+    }
+
+    if total > 40 {
+        lines.push(format!("- …and {} more operator tools.", total - 40));
+    }
+
+    Some(lines.join("\n"))
+}
+
+pub fn format_enabled_operator_tools_system_section() -> Option<String> {
+    format_enabled_operator_tools_system_section_from_resolved(resolve_enabled_operators())
 }
 
 pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
@@ -9339,11 +9452,15 @@ mod tests {
         operator_dir: &str,
     ) -> (PathBuf, PathBuf) {
         let plugin_root = match plugin_name {
-            "operator-seqtk" | "ngs-alignment" => Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("repo root")
-                .join(".omiga/plugins")
-                .join(plugin_name),
+            "ngs-alignment" | "ngs-sequence-processing" | "ngs-quality-control" => {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .expect("repo root")
+                    .parent()
+                    .expect("workspace root")
+                    .join("omiga-plugins/plugins/bioinformatics")
+                    .join(plugin_name)
+            }
             _ => Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/plugins/legacy")
                 .join(plugin_name),
@@ -9410,6 +9527,41 @@ mod tests {
             permissions: None,
             source: OperatorSource {
                 source_plugin: "test@local".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        }
+    }
+
+    fn simple_operator_spec(
+        tmp: &TempDir,
+        id: &str,
+        version: &str,
+        source_plugin: &str,
+    ) -> OperatorSpec {
+        OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: id.to_string(),
+                version: version.to_string(),
+                name: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec::default(),
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec!["true".to_string()],
+            },
+            preflight: None,
+            runtime: None,
+            cache: None,
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: source_plugin.to_string(),
                 plugin_root: tmp.path().to_path_buf(),
                 manifest_path: tmp.path().join("operator.yaml"),
             },
@@ -9863,9 +10015,15 @@ execution:
                 "Rscript",
             ),
             (
-                "operator-seqtk",
+                "ngs-sequence-processing",
                 "seqtk-sample",
                 "seqtk_sample_reads",
+                "/bin/sh",
+            ),
+            (
+                "ngs-quality-control",
+                "seqtk-fqchk",
+                "seqtk_fqchk",
                 "/bin/sh",
             ),
             (
@@ -9903,7 +10061,7 @@ execution:
             };
 
             let candidates = discover_operator_candidates_from_plugins([&plugin]);
-            // Plugins may bundle multiple operators (e.g. `operator-seqtk` ships
+            // Plugins may bundle multiple operators (e.g. NGS seqtk plugins ship
             // several subcommand wrappers). Look up the one this test case targets.
             let operator = candidates
                 .iter()
@@ -9983,7 +10141,9 @@ execution:
         let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
-            .join(".omiga/plugins/transcriptomics");
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins/plugins/bioinformatics/transcriptomics");
         assert!(
             !plugin_root.join("operators").exists(),
             "transcriptomics keeps template-only public units"
@@ -10599,76 +10759,105 @@ execution:
     }
 
     #[test]
+    fn active_plugin_operator_auto_exposes_with_default_alias() {
+        let tmp = TempDir::new().unwrap();
+        let spec = simple_operator_spec(&tmp, "fastqc", "1", "bio@builtin");
+
+        let resolved = resolve_enabled_operators_from(vec![spec], OperatorRegistryFile::default());
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].alias, "fastqc");
+        assert_eq!(resolved[0].spec.source.source_plugin, "bio@builtin");
+    }
+
+    #[test]
+    fn disabled_registry_entry_does_not_suppress_plugin_auto_exposure() {
+        let tmp = TempDir::new().unwrap();
+        let spec = simple_operator_spec(&tmp, "fastqc", "1", "bio@builtin");
+        let registry = OperatorRegistryFile {
+            enabled: BTreeMap::from([(
+                "fastqc".to_string(),
+                OperatorRegistryEntry::Full {
+                    operator_id: Some("fastqc".to_string()),
+                    source_plugin: Some("bio@builtin".to_string()),
+                    version: Some("1".to_string()),
+                    enabled: Some(false),
+                },
+            )]),
+        };
+
+        let resolved = resolve_enabled_operators_from(vec![spec], registry);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].alias, "fastqc");
+    }
+
+    #[test]
+    fn explicit_registry_alias_does_not_duplicate_same_operator() {
+        let tmp = TempDir::new().unwrap();
+        let spec = simple_operator_spec(&tmp, "fastqc", "1", "bio@builtin");
+        let registry = OperatorRegistryFile {
+            enabled: BTreeMap::from([(
+                "fastqc_legacy".to_string(),
+                OperatorRegistryEntry::Full {
+                    operator_id: Some("fastqc".to_string()),
+                    source_plugin: Some("bio@builtin".to_string()),
+                    version: Some("1".to_string()),
+                    enabled: Some(true),
+                },
+            )]),
+        };
+
+        let resolved = resolve_enabled_operators_from(vec![spec], registry);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].alias, "fastqc_legacy");
+    }
+
+    #[test]
+    fn operator_system_section_tells_agents_to_use_auto_exposed_tools() {
+        let tmp = TempDir::new().unwrap();
+        let section =
+            format_enabled_operator_tools_system_section_from_resolved(vec![ResolvedOperator {
+                alias: "seqtk_comp".to_string(),
+                spec: simple_operator_spec(
+                    &tmp,
+                    "seqtk_comp",
+                    "1",
+                    "ngs-quality-control@omiga-curated",
+                ),
+            }])
+            .expect("operator tools prompt section");
+
+        assert!(section.contains("Plugin operator tools (auto-exposed)"));
+        assert!(section.contains("`operator__seqtk_comp`"));
+        assert!(section.contains("prefer the matching `operator__...` tool"));
+        assert!(section.contains("Do not ask the user to manually register"));
+    }
+
+    #[test]
     fn registry_requires_disambiguation_for_conflicts() {
         let tmp = TempDir::new().unwrap();
-        let source = |plugin: &str| OperatorSpec {
-            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
-            kind: OPERATOR_KIND.to_string(),
-            metadata: OperatorMetadata {
-                id: "fastqc".to_string(),
-                version: "1".to_string(),
-                name: None,
-                description: None,
-                tags: Vec::new(),
-            },
-            interface: OperatorInterfaceSpec::default(),
-            smoke_tests: Vec::new(),
-            execution: OperatorExecutionSpec {
-                argv: vec!["true".to_string()],
-            },
-            preflight: None,
-            runtime: None,
-            cache: None,
-            resources: BTreeMap::new(),
-            bindings: Vec::new(),
-            permissions: None,
-            source: OperatorSource {
-                source_plugin: plugin.to_string(),
-                plugin_root: tmp.path().to_path_buf(),
-                manifest_path: tmp.path().join("operator.yaml"),
-            },
-        };
         let registry = OperatorRegistryFile {
             enabled: BTreeMap::from([(
                 "fastqc".to_string(),
                 OperatorRegistryEntry::Version("1".to_string()),
             )]),
         };
-        assert!(
-            resolve_enabled_operators_from(vec![source("a"), source("b")], registry).is_empty()
-        );
+        assert!(resolve_enabled_operators_from(
+            vec![
+                simple_operator_spec(&tmp, "fastqc", "1", "a"),
+                simple_operator_spec(&tmp, "fastqc", "1", "b")
+            ],
+            registry
+        )
+        .is_empty());
     }
 
     #[test]
     fn registry_update_pins_resolved_source_and_version() {
         let tmp = TempDir::new().unwrap();
-        let spec = OperatorSpec {
-            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
-            kind: OPERATOR_KIND.to_string(),
-            metadata: OperatorMetadata {
-                id: "fastqc".to_string(),
-                version: "0.12.1".to_string(),
-                name: None,
-                description: None,
-                tags: Vec::new(),
-            },
-            interface: OperatorInterfaceSpec::default(),
-            smoke_tests: Vec::new(),
-            execution: OperatorExecutionSpec {
-                argv: vec!["true".to_string()],
-            },
-            preflight: None,
-            runtime: None,
-            cache: None,
-            resources: BTreeMap::new(),
-            bindings: Vec::new(),
-            permissions: None,
-            source: OperatorSource {
-                source_plugin: "bio@builtin".to_string(),
-                plugin_root: tmp.path().to_path_buf(),
-                manifest_path: tmp.path().join("operator.yaml"),
-            },
-        };
+        let spec = simple_operator_spec(&tmp, "fastqc", "0.12.1", "bio@builtin");
         let mut registry = OperatorRegistryFile::default();
         apply_operator_registry_update(
             &mut registry,

@@ -173,7 +173,17 @@ pub(super) async fn build_subagent_tool_schemas(
         filter_tool_schemas_by_deny_rule_entries(all_tool_schemas(include_skill), &deny_entries);
     let mut built = filter_tool_schemas_for_subagent(built, subagent_opts);
     sort_tool_schemas_for_model(&mut built);
-    let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
+    let mut base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
+    let operator_tools = filter_tool_schemas_by_deny_rule_entries(
+        crate::domain::operators::enabled_operator_tool_schemas(),
+        &deny_entries,
+    );
+    let mut operator_tools = filter_tool_schemas_for_subagent(operator_tools, subagent_opts);
+    sort_tool_schemas_for_model(&mut operator_tools);
+    let operator_filtered = operator_tools
+        .into_iter()
+        .filter(|schema| base_names.insert(schema.name.clone()))
+        .collect::<Vec<_>>();
     let mcp_timeout = std::time::Duration::from_secs(45);
     let mcp_tools =
         crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(project_root, mcp_timeout).await;
@@ -188,7 +198,11 @@ pub(super) async fn build_subagent_tool_schemas(
         .collect();
     let mcp_filtered =
         integrations_config::filter_mcp_tools_by_integrations(mcp_filtered, &integrations_cfg);
-    built.into_iter().chain(mcp_filtered).collect()
+    built
+        .into_iter()
+        .chain(operator_filtered)
+        .chain(mcp_filtered)
+        .collect()
 }
 
 /// Forked skill execution - runs skill in isolated sub-agent session.
@@ -275,6 +289,11 @@ pub(super) async fn run_skill_forked(request: ForkedSkillRequest<'_>) -> Result<
         &crate::domain::plugins::plugin_load_outcome(),
     ) {
         prompt_parts.push(plugins_system_section);
+    }
+    if let Some(operator_tools_system_section) =
+        crate::domain::operators::format_enabled_operator_tools_system_section()
+    {
+        prompt_parts.push(operator_tools_system_section);
     }
     let connector_catalog = crate::domain::connectors::list_connector_catalog();
     if let Some(connectors_system_section) =
@@ -673,6 +692,11 @@ pub(super) async fn run_subagent_session_foreground_inner(
             &crate::domain::plugins::plugin_load_outcome(),
         ) {
             prompt_parts.push(plugins_system_section);
+        }
+        if let Some(operator_tools_system_section) =
+            crate::domain::operators::format_enabled_operator_tools_system_section()
+        {
+            prompt_parts.push(operator_tools_system_section);
         }
         let connector_catalog = crate::domain::connectors::list_connector_catalog();
         if let Some(connectors_system_section) =

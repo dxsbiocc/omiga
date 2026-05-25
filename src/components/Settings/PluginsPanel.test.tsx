@@ -142,7 +142,7 @@ function remoteMarketplaceCheck(
 ): MarketplaceRemoteCheckResult {
   return {
     name: "omiga-curated",
-    path: "/project/.omiga/plugins/marketplace.json",
+    path: "/workspace/omiga-plugins/marketplace.json",
     remote: {
       url: "https://raw.githubusercontent.com/dxsbiocc/omiga-plugins/main/marketplace.json",
     },
@@ -159,24 +159,39 @@ function remoteMarketplaceCheck(
 }
 
 describe("PluginsPanel diagnostics helpers", () => {
-  it("keeps raw tool registry and run diagnostics behind the development diagnostics gate", () => {
+  it("removes the duplicate global operator registration surface", () => {
     const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
 
-    expect(source).toContain("SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS = import.meta.env.DEV");
-    expect(source).toContain("SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS && (");
-    expect(source).toMatch(/<OperatorCatalogSection[\s\S]*onSmokeRun=/);
-    expect(source).not.toContain("{false && (\n      <OperatorCatalogSection");
+    expect(source).not.toContain("OperatorCatalogSection");
+    expect(source).not.toContain("SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS");
+    expect(source).not.toContain("onOperatorRegistrationChange");
+    expect(source).not.toContain("New Script Operator");
   });
 
-  it("keeps advanced tool registration behind product-oriented wording", () => {
+  it("keeps operator exposure plugin-owned instead of manually registered", () => {
     const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
 
-    expect(source).toContain("Agent tools");
-    expect(source).toContain("Advanced controls for plugin-defined tools");
-    expect(source).toContain("Register to run smoke test");
-    expect(source).not.toContain(">Operators<");
-    expect(source).not.toContain(" exposed`");
+    expect(source).toContain("tools exposed");
+    expect(source).toContain("Exposed by plugin");
+    expect(source).toContain("Exposed");
+    expect(source).toContain('plugin.enabled ? "Disable" : "Enable"');
+    expect(source).toContain('plugin.enabled ? "Enabled" : "Disabled"');
+    expect(source).toContain("Operator tools are exposed automatically while this plugin is enabled");
+    expect(source).not.toContain("Agent tools");
+    expect(source).not.toContain("Register to run smoke test");
+    expect(source).not.toContain("Register");
+    expect(source).not.toContain("Unregister");
     expect(source).not.toContain("Operators are plugin-defined tools");
+  });
+
+  it("keeps run history explained without another operator catalog", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+    const timelineSource = readFileSync(new URL("./OperatorRunsTimeline.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("<OperatorRunsTimeline");
+    expect(timelineSource).toContain("Operator run history");
+    expect(timelineSource).toContain("Chronological history for smoke tests");
+    expect(timelineSource).not.toContain('position: "sticky"');
   });
 
   it("keeps plugin technical content out of the default capability summary", () => {
@@ -195,6 +210,14 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(source).not.toContain("Operator details");
     expect(source).not.toContain("<OperatorBundleContentList operators={operators}");
     expect(source).not.toContain("Included content");
+  });
+
+  it("keeps plugin feedback visible above modal dialogs", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("<Portal>");
+    expect(source).toContain("t.zIndex.tooltip + 1");
+    expect(source).toContain("Rendered through Portal and lifted above Dialog + Backdrop");
   });
 
   it("summarizes remote marketplace updates as durable UI state", () => {
@@ -820,7 +843,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     ).toEqual(["R visualization"]);
     expect(
       groupPluginsByCatalogSection("bioinformatics", [bioinformaticsPlugin, analysisPlugin]).map((section) => section.title),
-    ).toEqual(["NGS", "Transcriptomics"]);
+    ).toEqual(["NGS · Alignment", "NGS · Transcriptomics"]);
     expect(
       groupPluginsByCatalogSection("resource", [geo, literatureSearchPlugin, providerSourcePlugin]).map((section) => section.title),
     ).toEqual(["Provider resources", "Dataset resources", "Literature resources"]);
@@ -830,6 +853,317 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(
       groupPluginsByCatalogSection("other", [notebook]).map((section) => section.title),
     ).toEqual(["Notebook"]);
+  });
+
+  it("does not let domain keywords move resources or visualization into analysis/bioinformatics", () => {
+    const visualizationWithGeneTemplates = pluginSummary({
+      id: "visualization-r@omiga-curated",
+      name: "visualization-r",
+      interface: {
+        displayName: "R Visualization",
+        shortDescription: "Publication figure templates",
+        longDescription: "Includes enrichment dot plots, gene terms, volcano plots, and heatmaps.",
+        developerName: null,
+        category: "Visualization",
+        capabilities: ["Rscript", "Static Figures", "Publication Figures"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const pathwayDatabaseResource = pluginSummary({
+      id: "resource-pathways@omiga-curated",
+      name: "resource-pathways",
+      retrieval: {
+        protocolVersion: 1,
+        resources: [
+          {
+            id: "reactome",
+            category: "knowledge",
+            label: "Reactome",
+            description: "Pathway and gene-set lookup.",
+            subcategories: ["pathway"],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: false,
+            replacesBuiltin: true,
+          },
+        ],
+      },
+      interface: {
+        displayName: "Pathway Databases",
+        shortDescription: "4 Knowledge routes",
+        longDescription: "Pathway analysis and annotation database retrieval.",
+        developerName: null,
+        category: "Analysis",
+        capabilities: ["Knowledge", "Analysis", "Retrieval"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const ncbiProviderResource = pluginSummary({
+      id: "resource-ncbi@omiga-curated",
+      name: "resource-ncbi",
+      retrieval: {
+        protocolVersion: 1,
+        resources: [
+          {
+            id: "ncbi_gene",
+            category: "knowledge",
+            label: "NCBI Gene",
+            description: "Gene, variant, and assembly metadata lookup.",
+            subcategories: ["gene", "variant"],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: false,
+            replacesBuiltin: true,
+          },
+          {
+            id: "geo",
+            category: "dataset",
+            label: "NCBI GEO",
+            description: "Gene expression datasets.",
+            subcategories: ["expression"],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: false,
+            replacesBuiltin: true,
+          },
+        ],
+      },
+      interface: {
+        displayName: "NCBI",
+        shortDescription: "PubMed, GEO, BioSample, Datasets, and Gene retrieval",
+        longDescription: "Aggregates literature, datasets, gene, variant, and genome assembly routes.",
+        developerName: null,
+        category: "Retrieval",
+        capabilities: ["Provider", "Dataset", "Knowledge", "Retrieval"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+
+    expect(pluginCatalogGroupId(visualizationWithGeneTemplates)).toBe("visualization");
+    expect(pluginCatalogGroupId(pathwayDatabaseResource)).toBe("resource");
+    expect(pluginCatalogGroupId(ncbiProviderResource)).toBe("resource");
+    expect(
+      groupPluginsByCatalogSection("resource", [pathwayDatabaseResource, ncbiProviderResource]).map(
+        (section) => section.title,
+      ),
+    ).toEqual(["Provider resources", "Knowledge resources"]);
+  });
+
+  it("splits NGS bioinformatics plugins by workflow stage in a stable section order", () => {
+    const sequenceProcessingPlugin = pluginSummary({
+      id: "seqtk-convert@omiga-curated",
+      name: "seqtk-convert",
+      interface: {
+        displayName: "Seqtk Convert",
+        shortDescription: "Convert FASTQ and FASTA reads for downstream analysis.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const qualityControlPlugin = pluginSummary({
+      id: "multiqc-reports@omiga-curated",
+      name: "multiqc-reports",
+      interface: {
+        displayName: "MultiQC Reports",
+        shortDescription: "Aggregate FastQC and fqchk quality control summaries.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const alignmentPlugin = pluginSummary({
+      id: "alignment-bundle@omiga-curated",
+      name: "alignment-bundle",
+      interface: {
+        displayName: "Alignment",
+        shortDescription: "BWA, Bowtie2, STAR, and HISAT2 alignment",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS", "Alignment", "SAM/BAM"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const quantificationPlugin = pluginSummary({
+      id: "salmon-quant@omiga-curated",
+      name: "salmon-quant",
+      interface: {
+        displayName: "Salmon Quant",
+        shortDescription: "Transcript abundance quantification with Salmon.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS", "Quantification"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const variantCallingPlugin = pluginSummary({
+      id: "deepvariant-caller@omiga-curated",
+      name: "deepvariant-caller",
+      interface: {
+        displayName: "DeepVariant Caller",
+        shortDescription: null,
+        longDescription: "DeepVariant variant calling for germline small variants.",
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const fusionPlugin = pluginSummary({
+      id: "star-fusion@omiga-curated",
+      name: "star-fusion",
+      interface: {
+        displayName: "STAR-Fusion",
+        shortDescription: "Detect fusion transcripts and structural variants.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const copyNumberVariationPlugin = pluginSummary({
+      id: "somatic-workflow@omiga-curated",
+      name: "somatic-workflow",
+      interface: {
+        displayName: "Somatic Workflow",
+        shortDescription: "Somatic DNA analysis workflow.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+      operators: [
+        operatorSummary({
+          id: "cnvkit",
+          name: "CNVkit",
+          description: "Copy-number segmentation",
+          tags: ["cnvkit", "copy number"],
+        }),
+      ],
+    });
+    const assemblyAnnotationPlugin = pluginSummary({
+      id: "assembly-annotation@omiga-curated",
+      name: "assembly-annotation",
+      interface: {
+        displayName: "Assembly Annotation",
+        shortDescription: null,
+        longDescription: "Genome assembly and annotation with SPAdes and Prokka.",
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+
+    expect(
+      groupPluginsByCatalogSection("bioinformatics", [
+        fusionPlugin,
+        assemblyAnnotationPlugin,
+        variantCallingPlugin,
+        quantificationPlugin,
+        sequenceProcessingPlugin,
+        copyNumberVariationPlugin,
+        alignmentPlugin,
+        qualityControlPlugin,
+      ]).map((section) => section.title),
+    ).toEqual([
+      "NGS · Sequence Processing",
+      "NGS · Quality Control",
+      "NGS · Alignment",
+      "NGS · Quantification",
+      "NGS · Variant Calling",
+      "NGS · Fusion / SV",
+      "NGS · Copy Number Variation",
+      "NGS · Assembly / Annotation",
+    ]);
   });
 
   it("detects stale runtime records whose plugin id is no longer catalogued", () => {
@@ -1306,7 +1640,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     ).toContain("<path");
     expect(
       operatorPluginIconSpec(pluginSummary({
-        name: "operator-seqtk",
+        name: "ngs-sequence-processing",
         interface: {
           displayName: "seqtk",
           shortDescription: "FASTQ/FASTA subsampling with seqtk",

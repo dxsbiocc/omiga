@@ -695,8 +695,9 @@ pub fn format_plugins_system_section(outcome: &PluginLoadOutcome) -> Option<Stri
     lines.push(String::new());
     lines.push("### How to use plugins".to_string());
     lines.push(
-        "- Plugins are not invoked directly; use their underlying skills, MCP tools, or explicitly available app tools.\n\
+        "- Plugins are not invoked directly; use their underlying skills, MCP tools, operator tools, or explicitly available app tools.\n\
          - Template plugins expose Template units. Discover them with `unit_search` / `unit_describe`, then run bundled templates with `template_execute`; do not rebuild template logic with ad-hoc shell/file writes unless the user explicitly asks for custom code.\n\
+         - Operator plugins expose atomic tools dynamically as `operator__...`; use those operator tools directly when the user's request matches them.\n\
          - Retrieval plugin routes are local Search / Query / Fetch routes, not MCP tool names. If a plugin lists `retrieval routes: category.source`, call `search`, `query`, or `fetch` with that category/source.\n\
          - If the user explicitly names a plugin, prefer capabilities associated with that plugin for that turn.\n\
          - If a plugin contributes skills, those skills also appear in the Skills list and should be loaded with `skill_view` / `skill` before use.\n\
@@ -870,49 +871,25 @@ fn plugin_store_root_from_cache_root(cache_root: &Path) -> PathBuf {
 
 pub fn dev_builtin_marketplace_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .parent()
+        .expect("workspace root")
         .join("omiga-plugins")
         .join(MARKETPLACE_FILE_NAME)
 }
 
+#[cfg(test)]
 fn dev_bundled_marketplace_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("bundled_plugins")
         .join(MARKETPLACE_FILE_NAME)
 }
 
-fn resource_builtin_marketplace_path(resource_dir: &Path) -> PathBuf {
-    resource_dir
-        .join("bundled_plugins")
-        .join(MARKETPLACE_FILE_NAME)
-}
-
-fn resource_curated_marketplace_path(resource_dir: &Path) -> PathBuf {
-    resource_dir
-        .join("omiga-plugins")
-        .join(MARKETPLACE_FILE_NAME)
-}
-
-fn dev_project_marketplace_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("repo root")
-        .join(".omiga")
-        .join("plugins")
-        .join(MARKETPLACE_FILE_NAME)
-}
-
-fn user_marketplace_path() -> PathBuf {
-    omiga_home().join("plugins").join(MARKETPLACE_FILE_NAME)
-}
-
-fn project_marketplace_path(project_root: &Path) -> PathBuf {
-    project_root
-        .join(".omiga")
-        .join("plugins")
-        .join(MARKETPLACE_FILE_NAME)
-}
-
-pub fn marketplace_paths(project_root: Option<&Path>, resource_dir: Option<&Path>) -> Vec<PathBuf> {
+pub fn marketplace_paths(
+    _project_root: Option<&Path>,
+    _resource_dir: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut push_path = |path: PathBuf| {
         if path.is_file() && !paths.contains(&path) {
@@ -920,16 +897,6 @@ pub fn marketplace_paths(project_root: Option<&Path>, resource_dir: Option<&Path
         }
     };
     push_path(dev_builtin_marketplace_path());
-    push_path(dev_bundled_marketplace_path());
-    push_path(dev_project_marketplace_path());
-    if let Some(resource_dir) = resource_dir {
-        push_path(resource_curated_marketplace_path(resource_dir));
-        push_path(resource_builtin_marketplace_path(resource_dir));
-    }
-    push_path(user_marketplace_path());
-    if let Some(root) = project_root {
-        push_path(project_marketplace_path(root));
-    }
     paths
 }
 
@@ -1287,6 +1254,13 @@ fn superseded_builtin_plugin_replacement(plugin_name: &str) -> Option<&'static s
     }
 }
 
+fn superseded_builtin_plugin_replacements(plugin_name: &str) -> Option<&'static [&'static str]> {
+    match plugin_name {
+        "operator-seqtk" => Some(&["ngs-sequence-processing", "ngs-quality-control"]),
+        _ => None,
+    }
+}
+
 fn superseded_builtin_plugin_resource_key(plugin_name: &str) -> Option<&'static str> {
     match plugin_name {
         "retrieval-dataset-geo" => Some("dataset.geo"),
@@ -1318,6 +1292,17 @@ fn migrate_superseded_builtin_plugin_config(config: &mut PluginConfigFile) -> bo
         }
         if removed_builtin_plugin(&plugin_id.name) {
             config.plugins.remove(&key);
+            changed = true;
+            continue;
+        }
+        if let Some(replacement_names) = superseded_builtin_plugin_replacements(&plugin_id.name) {
+            let removed_entry = config.plugins.remove(&key).unwrap_or_default();
+            for replacement_name in replacement_names {
+                let replacement = replacements
+                    .entry(format!("{replacement_name}@omiga-curated"))
+                    .or_default();
+                replacement.enabled = replacement.enabled || removed_entry.enabled;
+            }
             changed = true;
             continue;
         }
@@ -4321,18 +4306,12 @@ pub fn uninstall_plugin(plugin_id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     fn legacy_plugin_fixture_root(plugin_name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures/plugins/legacy")
             .join(plugin_name)
-    }
-
-    fn repo_project_marketplace_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .join(".omiga/plugins/marketplace.json")
     }
 
     fn curated_marketplace_path() -> PathBuf {
@@ -4352,33 +4331,35 @@ mod tests {
     }
 
     #[test]
-    fn dev_curated_marketplace_is_checked_in_not_sibling_checkout() {
+    fn dev_curated_marketplace_uses_external_omiga_plugins_repo() {
         let marketplace_path = dev_builtin_marketplace_path();
-        let expected_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("omiga-plugins");
+        let expected_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins");
 
         assert_eq!(
             marketplace_path,
             expected_root.join(MARKETPLACE_FILE_NAME),
-            "dev curated marketplace must be repo-local so clean clones and CI do not depend on ../omiga-plugins"
+            "dev curated marketplace must come from the independent omiga-plugins repository"
         );
         assert!(marketplace_path.is_file());
     }
 
     #[test]
-    fn default_marketplace_paths_include_project_omiga_plugins() {
+    fn default_marketplace_paths_use_only_external_omiga_plugins_repo() {
         let paths = marketplace_paths(None, None);
-        assert!(
-            paths.contains(&repo_project_marketplace_path()),
-            "the repository-local .omiga/plugins marketplace should be visible without requiring an active project root"
-        );
-        assert!(
-            paths.contains(&dev_bundled_marketplace_path()),
-            "the app-bundled internal marketplace should remain visible without becoming the curated marketplace source"
+        assert_eq!(
+            paths,
+            vec![dev_builtin_marketplace_path()],
+            "Omiga must not add app-local .omiga, src-tauri fixtures, bundled, or project plugin marketplaces"
         );
     }
 
     #[test]
-    fn packaged_resource_paths_include_curated_marketplace_and_internal_bundles() {
+    fn packaged_resource_paths_do_not_add_embedded_marketplaces() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let resource_dir = tmp.path();
         let curated = resource_dir
@@ -4397,18 +4378,10 @@ mod tests {
         fs::write(&internal, r#"{"name":"omiga-internal","plugins":[]}"#).unwrap();
 
         let paths = marketplace_paths(None, Some(resource_dir));
-        let curated_index = paths
-            .iter()
-            .position(|path| path == &curated)
-            .expect("packaged curated marketplace path");
-        let internal_index = paths
-            .iter()
-            .position(|path| path == &internal)
-            .expect("packaged internal marketplace path");
-
-        assert!(
-            curated_index < internal_index,
-            "packaged curated marketplace should be considered before app-internal bundled plugins"
+        assert_eq!(
+            paths,
+            vec![dev_builtin_marketplace_path()],
+            "resource-dir plugin copies must not become marketplace sources"
         );
     }
 
@@ -4610,6 +4583,7 @@ mod tests {
             "retrieval-dataset-ena@omiga-curated",
             "retrieval-knowledge-ensembl@omiga-curated",
             "operator-uniprot-search@omiga-curated",
+            "operator-seqtk@omiga-curated",
             "operator-smoke@omiga-curated",
             "notebook-helper@omiga-curated",
         ] {
@@ -4671,8 +4645,23 @@ mod tests {
                 .unwrap()
                 .enabled
         );
+        assert!(
+            config
+                .plugins
+                .get("ngs-sequence-processing@omiga-curated")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            config
+                .plugins
+                .get("ngs-quality-control@omiga-curated")
+                .unwrap()
+                .enabled
+        );
         assert!(config.plugins.contains_key("third-party-old@custom-market"));
         assert!(!config.plugins.contains_key("operator-pca-r@omiga-curated"));
+        assert!(!config.plugins.contains_key("operator-seqtk@omiga-curated"));
         assert!(!config
             .plugins
             .contains_key("retrieval-literature-pubmed@omiga-curated"));
@@ -5253,6 +5242,9 @@ mod tests {
         assert!(section.contains("skills"));
         assert!(section.contains("MCP servers: `sample`"));
         assert!(section.contains("app connector refs: `calendar`"));
+        assert!(
+            section.contains("Operator plugins expose atomic tools dynamically as `operator__...`")
+        );
         assert!(section.contains("Do not assume VS Code extension UI/runtime behavior"));
     }
 
@@ -5566,8 +5558,8 @@ template:
     }
 
     #[test]
-    fn project_marketplace_exposes_omiga_plugin_creator_skill() {
-        let marketplace_path = repo_project_marketplace_path();
+    fn external_marketplace_exposes_omiga_plugin_creator_skill() {
+        let marketplace_path = curated_marketplace_path();
         let marketplace = read_marketplace(&marketplace_path).unwrap();
         let entry = marketplace
             .plugins
@@ -5593,8 +5585,8 @@ template:
     }
 
     #[test]
-    fn project_marketplace_exposes_ngs_alignment_operator_bundle() {
-        let marketplace_path = repo_project_marketplace_path();
+    fn external_marketplace_exposes_ngs_alignment_operator_bundle() {
+        let marketplace_path = curated_marketplace_path();
         let marketplace = read_marketplace(&marketplace_path).unwrap();
         let entry = marketplace
             .plugins
@@ -5661,18 +5653,34 @@ template:
         )
         .expect("ngs alignment summary");
         assert_eq!(summary.operators.len(), 9);
-        let star = summary
+        let resource_tiers = summary
             .operators
             .iter()
-            .find(|operator| operator.id == "star_align_reads")
-            .expect("STAR align operator summary");
+            .map(|operator| {
+                (
+                    operator.id.as_str(),
+                    operator
+                        .runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.get("resourceProfile"))
+                        .and_then(|profile| profile.get("tier"))
+                        .and_then(JsonValue::as_str),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         assert_eq!(
-            star.runtime
-                .as_ref()
-                .and_then(|runtime| runtime.get("resourceProfile"))
-                .and_then(|profile| profile.get("tier"))
-                .and_then(JsonValue::as_str),
-            Some("hpc-recommended")
+            resource_tiers,
+            BTreeMap::from([
+                ("bowtie2_align_reads", Some("hpc-recommended")),
+                ("bowtie2_build_reference", Some("heavy")),
+                ("bwa_index_reference", Some("heavy")),
+                ("bwa_mem_align_reads", Some("hpc-recommended")),
+                ("hisat2_align_reads", Some("hpc-recommended")),
+                ("hisat2_build_reference", Some("heavy")),
+                ("samtools_alignment_utility", Some("heavy")),
+                ("star_align_reads", Some("hpc-recommended")),
+                ("star_generate_genome_index", Some("hpc-recommended")),
+            ])
         );
 
         let envs = plugin_environment_summaries(
@@ -5699,7 +5707,158 @@ template:
     }
 
     #[test]
-    fn project_marketplace_exposes_provider_level_retrieval_resource_plugins() {
+    fn sequence_processing_and_quality_control_replace_legacy_seqtk_plugin() {
+        let tmp = TempDir::new().expect("tempdir");
+        let marketplace_root = tmp.path().join("marketplace");
+        let plugins_root = marketplace_root.join("plugins");
+        let sequence_processing_root = plugins_root.join("ngs-sequence-processing");
+        let quality_control_root = plugins_root.join("ngs-quality-control");
+        fs::create_dir_all(&plugins_root).expect("create plugins root");
+        copy_dir_recursive(
+            &curated_plugin_root("ngs-sequence-processing"),
+            &sequence_processing_root,
+        )
+        .expect("copy sequence processing plugin");
+        copy_dir_recursive(
+            &curated_plugin_root("ngs-quality-control"),
+            &quality_control_root,
+        )
+        .expect("copy quality control plugin");
+        fs::write(
+            marketplace_root.join(MARKETPLACE_FILE_NAME),
+            r#"{
+  "name": "omiga-curated",
+  "plugins": [
+    {
+      "name": "ngs-sequence-processing",
+      "source": {
+        "source": "local",
+        "path": "./plugins/ngs-sequence-processing"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Bioinformatics"
+    },
+    {
+      "name": "ngs-quality-control",
+      "source": {
+        "source": "local",
+        "path": "./plugins/ngs-quality-control"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Bioinformatics"
+    }
+  ]
+}"#,
+        )
+        .expect("write marketplace fixture");
+
+        let marketplace_path = marketplace_root.join(MARKETPLACE_FILE_NAME);
+        let marketplace = read_marketplace(&marketplace_path).expect("fixture marketplace");
+        assert!(
+            !marketplace
+                .plugins
+                .iter()
+                .any(|entry| entry.name == "operator-seqtk"),
+            "legacy seqtk plugin should not remain marketplace-visible"
+        );
+        let entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "ngs-sequence-processing")
+            .expect("sequence processing marketplace entry");
+        assert_eq!(entry.category.as_deref(), Some("Bioinformatics"));
+        let qc_entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "ngs-quality-control")
+            .expect("quality control marketplace entry");
+        assert_eq!(qc_entry.category.as_deref(), Some("Bioinformatics"));
+
+        let source_path = resolve_marketplace_source_path(&marketplace_path, &entry.source)
+            .expect("sequence processing source path");
+        let manifest = load_plugin_manifest(&source_path).expect("sequence processing manifest");
+        assert_eq!(
+            manifest
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.display_name.as_deref()),
+            Some("Sequence Processing")
+        );
+        let qc_source_path = resolve_marketplace_source_path(&marketplace_path, &qc_entry.source)
+            .expect("quality control source path");
+        let qc_manifest = load_plugin_manifest(&qc_source_path).expect("quality control manifest");
+        assert_eq!(
+            qc_manifest
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.display_name.as_deref()),
+            Some("Quality Control")
+        );
+
+        let summary = plugin_summary_from_marketplace_entry(
+            &marketplace_path,
+            &marketplace.name,
+            entry,
+            &PluginConfigFile::default(),
+        )
+        .expect("sequence processing summary");
+        assert_eq!(summary.id, "ngs-sequence-processing@omiga-curated");
+        assert_eq!(summary.operators.len(), 3);
+        let mut operator_ids = summary
+            .operators
+            .iter()
+            .map(|operator| operator.id.as_str())
+            .collect::<Vec<_>>();
+        operator_ids.sort_unstable();
+        assert_eq!(
+            operator_ids,
+            vec!["seqtk_sample_reads", "seqtk_seq", "seqtk_subseq"]
+        );
+        let qc_summary = plugin_summary_from_marketplace_entry(
+            &marketplace_path,
+            &marketplace.name,
+            qc_entry,
+            &PluginConfigFile::default(),
+        )
+        .expect("quality control summary");
+        assert_eq!(qc_summary.id, "ngs-quality-control@omiga-curated");
+        assert_eq!(qc_summary.operators.len(), 3);
+        let mut qc_operator_ids = qc_summary
+            .operators
+            .iter()
+            .map(|operator| operator.id.as_str())
+            .collect::<Vec<_>>();
+        qc_operator_ids.sort_unstable();
+        assert_eq!(
+            qc_operator_ids,
+            vec!["seqtk_comp", "seqtk_fqchk", "seqtk_size"]
+        );
+        assert!(summary.operators.iter().all(|operator| {
+            operator
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.get("resourceProfile"))
+                .and_then(|profile| profile.get("tier"))
+                .is_none()
+        }));
+        assert!(qc_summary.operators.iter().all(|operator| {
+            operator
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.get("resourceProfile"))
+                .and_then(|profile| profile.get("tier"))
+                .is_none()
+        }));
+    }
+
+    #[test]
+    fn external_marketplace_exposes_provider_level_retrieval_resource_plugins() {
         let marketplace_path = curated_marketplace_path();
         let marketplace = read_marketplace(&marketplace_path).unwrap();
         for removed in [
@@ -6007,18 +6166,21 @@ template:
     }
 
     #[test]
-    fn project_marketplace_exposes_visualization_r_omiga_plugin_and_skill() {
-        let marketplace_path = repo_project_marketplace_path();
+    fn external_marketplace_exposes_visualization_r_omiga_plugin_and_skill() {
+        let marketplace_path = curated_marketplace_path();
         let marketplace = read_marketplace(&marketplace_path).unwrap();
         for (plugin_name, category) in [
             ("visualization-r", "Visualization"),
-            ("transcriptomics", "Analysis"),
-            ("operator-seqtk", "Operator"),
+            ("transcriptomics", "Bioinformatics"),
             ("computer-use", "Automation"),
             ("omiga-developer-tools", "Tools"),
+            ("ngs-sequence-processing", "Bioinformatics"),
+            ("ngs-quality-control", "Bioinformatics"),
             ("ngs-alignment", "Bioinformatics"),
             ("resource-ncbi", "Retrieval"),
             ("resource-embl-ebi", "Retrieval"),
+            ("resource-drugs", "Retrieval"),
+            ("resource-pathways", "Retrieval"),
             ("retrieval-dataset-gtex", "Retrieval"),
             ("retrieval-dataset-cbioportal", "Retrieval"),
             ("retrieval-literature-semantic-scholar", "Retrieval"),
@@ -6034,11 +6196,17 @@ template:
             assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
             let source_path = resolve_marketplace_source_path(&marketplace_path, &entry.source)
                 .unwrap_or_else(|_| panic!("{plugin_name} source path"));
-            assert!(
-                source_path.join(".omiga-plugin/plugin.json").is_file(),
-                "{plugin_name} should use an omiga-plugin manifest"
-            );
+            let manifest = load_plugin_manifest(&source_path)
+                .unwrap_or_else(|| panic!("{plugin_name} plugin manifest"));
+            assert_eq!(manifest.name, plugin_name);
         }
+        assert!(
+            !marketplace
+                .plugins
+                .iter()
+                .any(|entry| entry.name == "operator-seqtk"),
+            "external marketplace should not expose the legacy seqtk plugin"
+        );
         let entry = marketplace
             .plugins
             .iter()

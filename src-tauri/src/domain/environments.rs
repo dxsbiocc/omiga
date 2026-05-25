@@ -788,7 +788,9 @@ metadata:
         let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
-            .join(".omiga/plugins/visualization-r");
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins/plugins/visualization/visualization-r");
         let plugin = loaded_plugin("visualization-r@omiga-curated", &plugin_root);
 
         let profiles = discover_environment_profiles_from_plugins([&plugin]);
@@ -809,7 +811,9 @@ metadata:
         let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
-            .join(".omiga/plugins/ngs-alignment");
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins/plugins/bioinformatics/ngs-alignment");
         let plugin = loaded_plugin("ngs-alignment@omiga-curated", &plugin_root);
 
         let profiles = discover_environment_profiles_from_plugins([&plugin]);

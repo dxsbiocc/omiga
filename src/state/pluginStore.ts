@@ -289,14 +289,6 @@ export interface OperatorCatalogResponse {
   diagnostics: OperatorManifestDiagnostic[];
 }
 
-export interface OperatorRegistryUpdate {
-  alias: string;
-  operatorId?: string | null;
-  sourcePlugin?: string | null;
-  version?: string | null;
-  enabled: boolean;
-}
-
 export interface OperatorManifestDiagnostic {
   sourcePlugin: string;
   manifestPath: string;
@@ -577,11 +569,6 @@ interface PluginState {
   checkRemoteMarketplaces: (projectRoot?: string) => Promise<MarketplaceRemoteCheckResult[]>;
   uninstallPlugin: (pluginId: string, projectRoot?: string) => Promise<void>;
   setPluginEnabled: (pluginId: string, enabled: boolean, projectRoot?: string) => Promise<void>;
-  setOperatorEnabled: (
-    update: OperatorRegistryUpdate,
-    projectRoot?: string,
-    surface?: OperatorExecutionSurfaceArgs,
-  ) => Promise<void>;
   setTemplateEnabled: (
     pluginId: string,
     templateId: string,
@@ -854,50 +841,6 @@ function pluginDeclaresOperator(plugin: PluginSummary): boolean {
     .filter((value): value is string => Boolean(value?.trim()))
     .map((value) => value.trim().toLowerCase().replace(/[-_]+/g, " "));
   return terms.some((value) => value === "operator" || value.includes("operator"));
-}
-
-export function updateOperatorEnabledInCatalog(
-  operators: OperatorSummary[],
-  update: OperatorRegistryUpdate,
-): OperatorSummary[] {
-  const alias = update.alias.trim();
-  if (!alias) return operators;
-
-  let changed = false;
-  const next = operators.map((operator) => {
-    if (update.operatorId?.trim() && operator.id !== update.operatorId) return operator;
-    if (update.sourcePlugin?.trim() && operator.sourcePlugin !== update.sourcePlugin) return operator;
-    if (update.version?.trim() && operator.version !== update.version) return operator;
-    if (
-      !update.operatorId?.trim() &&
-      operator.id !== alias &&
-      !operator.enabledAliases.includes(alias)
-    ) {
-      return operator;
-    }
-
-    const aliases = operator.enabledAliases
-      .map((value) => value.trim())
-      .filter(Boolean);
-    const nextAliases = update.enabled
-      ? Array.from(new Set([...aliases, alias]))
-      : aliases.filter((value) => value !== alias);
-    const nextExposed = nextAliases.length > 0;
-    if (
-      nextAliases.length === aliases.length &&
-      nextAliases.every((value, index) => value === aliases[index]) &&
-      operator.exposed === nextExposed
-    ) {
-      return operator;
-    }
-    changed = true;
-    return {
-      ...operator,
-      enabledAliases: nextAliases,
-      exposed: nextExposed,
-    };
-  });
-  return changed ? next : operators;
 }
 
 export function updateTemplateEnabledInMarketplaces(
@@ -1598,28 +1541,10 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     try {
       await invoke("set_omiga_plugin_enabled", { pluginId, enabled, projectRoot });
       await get().loadRetrievalStatuses(projectRoot);
+      await get().loadOperators(projectRoot);
     } catch (e) {
       const error = extractErrorMessage(e);
       set({ marketplaces: previousMarketplaces, error });
-      throw new Error(error);
-    }
-  },
-
-  setOperatorEnabled: async (
-    update: OperatorRegistryUpdate,
-    _projectRoot?: string,
-    _surface?: OperatorExecutionSurfaceArgs,
-  ) => {
-    const previousOperators = get().operators;
-    set({
-      operators: updateOperatorEnabledInCatalog(previousOperators, update),
-      error: null,
-    });
-    try {
-      await invoke("set_operator_enabled", { update });
-    } catch (e) {
-      const error = extractErrorMessage(e);
-      set({ operators: previousOperators, error });
       throw new Error(error);
     }
   },

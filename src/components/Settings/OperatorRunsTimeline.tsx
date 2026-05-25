@@ -605,117 +605,182 @@ export function OperatorRunsTimeline({
   };
 
   return (
-    <Paper variant="outlined" sx={{ borderRadius: 2 }}>
+    <Paper
+      variant="outlined"
+      sx={{
+        borderRadius: 3,
+        overflow: "hidden",
+        bgcolor: "background.paper",
+        borderColor: "divider",
+      }}
+    >
       <Stack spacing={0}>
-        <Stack spacing={0.5} sx={{ px: 2, pt: 2, pb: 1.25 }}>
-          <Stack direction="row" gap={1} alignItems="center" justifyContent="space-between" flexWrap="wrap">
-            <Typography variant="subtitle2" fontWeight={800}>
-              Runs timeline
-            </Typography>
-            <Chip size="small" variant="outlined" label={`${filteredRuns.length} of ${runs.length}`} />
-          </Stack>
-        </Stack>
-
-        <Paper
-          square
-          elevation={0}
+        <Stack
+          direction={{ xs: "column", md: "row" }}
+          gap={1.25}
+          alignItems={{ xs: "stretch", md: "center" }}
+          justifyContent="space-between"
           sx={{
-            position: "sticky",
-            top: 0,
-            zIndex: 1,
-            borderTop: 1,
-            borderBottom: 1,
-            borderColor: "divider",
-            bgcolor: alpha(theme.palette.background.paper, theme.palette.mode === "dark" ? 0.92 : 0.96),
-            backdropFilter: "blur(10px)",
             px: 2,
-            py: 1.25,
+            py: 1.75,
+            bgcolor: alpha(theme.palette.info.main, theme.palette.mode === "dark" ? 0.1 : 0.04),
           }}
         >
-          <Stack direction={{ xs: "column", lg: "row" }} gap={1} alignItems={{ xs: "stretch", lg: "center" }}>
-            <ToggleButtonGroup
-              exclusive
-              size="small"
-              value={statusFilter}
-              onChange={(_, value: TimelineStatusFilter | null) => {
-                if (value) setStatusFilter(value);
-              }}
-              sx={{ flexWrap: "wrap" }}
-            >
-              {statusOptions.map((option) => (
-                <ToggleButton key={option.value} value={option.value} sx={{ textTransform: "none" }}>
-                  {option.label}
-                </ToggleButton>
-              ))}
-            </ToggleButtonGroup>
-
-            <TextField
-              select
-              size="small"
-              label="Alias"
-              value={aliasFilter}
-              onChange={(event) => setAliasFilter(event.target.value)}
-              sx={{ minWidth: { xs: "100%", lg: 190 } }}
-            >
-              <MenuItem value="all">All</MenuItem>
-              {aliases.map((alias) => (
-                <MenuItem key={alias} value={alias}>
-                  {alias}
-                </MenuItem>
-              ))}
-            </TextField>
-
-            <ToggleButtonGroup
-              exclusive
-              size="small"
-              value={dateRange}
-              onChange={(_, value: TimelineDateRange | null) => {
-                if (value) setDateRange(value);
-              }}
-            >
-              {dateRangeOptions.map((option) => (
-                <ToggleButton key={option.value} value={option.value} sx={{ textTransform: "none" }}>
-                  {option.label}
-                </ToggleButton>
-              ))}
-            </ToggleButtonGroup>
-
+          <Stack spacing={0.45} sx={{ minWidth: 0, flex: 1 }}>
             <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-              <Chip size="small" variant="outlined" label="View" />
-              <ToggleButtonGroup
-                exclusive
+              <Typography variant="subtitle2" fontWeight={850}>
+                Operator run history
+              </Typography>
+              <Chip
                 size="small"
-                value={viewMode}
-                onChange={(_, value: TimelineViewMode | null) => {
-                  if (value) setViewMode(value);
+                variant="outlined"
+                label={
+                  runs.length === 0
+                    ? "0 recorded"
+                    : `${visibleItemCount} shown · ${runs.length} recorded`
+                }
+              />
+            </Stack>
+            <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.45, maxWidth: 880 }}>
+              Chronological history for smoke tests, background runs, and chain steps. Open a row to inspect logs,
+              outputs, provenance, and verification.
+            </Typography>
+          </Stack>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={busy ? <CircularProgress size={16} /> : <RefreshRounded />}
+            disabled={busy}
+            onClick={onRefresh}
+            sx={{
+              alignSelf: { xs: "flex-start", md: "center" },
+              textTransform: "none",
+              borderRadius: 1.5,
+              minHeight: 36,
+              whiteSpace: "nowrap",
+            }}
+          >
+            Refresh
+          </Button>
+        </Stack>
+
+        {runs.length > 0 && (
+          <Paper
+            square
+            elevation={0}
+            sx={{
+              borderTop: 1,
+              borderBottom: 1,
+              borderColor: "divider",
+              bgcolor: alpha(theme.palette.background.default, theme.palette.mode === "dark" ? 0.36 : 0.64),
+              px: 2,
+              py: 1.25,
+            }}
+          >
+            <Stack
+              direction={{ xs: "column", xl: "row" }}
+              gap={1}
+              alignItems={{ xs: "stretch", xl: "center" }}
+            >
+              <Stack direction={{ xs: "column", sm: "row" }} gap={0.75} alignItems={{ xs: "stretch", sm: "center" }}>
+                <Typography variant="caption" color="text.secondary" fontWeight={850} sx={{ minWidth: 44 }}>
+                  State
+                </Typography>
+                <ToggleButtonGroup
+                  exclusive
+                  size="small"
+                  value={statusFilter}
+                  onChange={(_, value: TimelineStatusFilter | null) => {
+                    if (value) setStatusFilter(value);
+                  }}
+                  sx={{
+                    flexWrap: "wrap",
+                    "& .MuiToggleButton-root": { textTransform: "none", px: 1.15 },
+                  }}
+                >
+                  {statusOptions.map((option) => (
+                    <ToggleButton key={option.value} value={option.value}>
+                      {option.label}
+                    </ToggleButton>
+                  ))}
+                </ToggleButtonGroup>
+              </Stack>
+
+              <TextField
+                select
+                size="small"
+                label="Operator alias"
+                value={aliasFilter}
+                onChange={(event) => setAliasFilter(event.target.value)}
+                sx={{
+                  minWidth: { xs: "100%", xl: 200 },
+                  "& .MuiOutlinedInput-root": { borderRadius: 1.5, bgcolor: "background.paper" },
                 }}
               >
-                {viewOptions.map((option) => (
-                  <ToggleButton key={option.value} value={option.value} sx={{ textTransform: "none" }}>
-                    {option.label}
-                  </ToggleButton>
+                <MenuItem value="all">All operators</MenuItem>
+                {aliases.map((alias) => (
+                  <MenuItem key={alias} value={alias}>
+                    {alias}
+                  </MenuItem>
                 ))}
-              </ToggleButtonGroup>
+              </TextField>
+
+              <Stack direction={{ xs: "column", sm: "row" }} gap={0.75} alignItems={{ xs: "stretch", sm: "center" }}>
+                <Typography variant="caption" color="text.secondary" fontWeight={850} sx={{ minWidth: 44 }}>
+                  Range
+                </Typography>
+                <ToggleButtonGroup
+                  exclusive
+                  size="small"
+                  value={dateRange}
+                  onChange={(_, value: TimelineDateRange | null) => {
+                    if (value) setDateRange(value);
+                  }}
+                  sx={{ "& .MuiToggleButton-root": { textTransform: "none", px: 1.15 } }}
+                >
+                  {dateRangeOptions.map((option) => (
+                    <ToggleButton key={option.value} value={option.value}>
+                      {option.label}
+                    </ToggleButton>
+                  ))}
+                </ToggleButtonGroup>
+              </Stack>
+
+              <Stack direction={{ xs: "column", sm: "row" }} gap={0.75} alignItems={{ xs: "stretch", sm: "center" }}>
+                <Typography variant="caption" color="text.secondary" fontWeight={850} sx={{ minWidth: 44 }}>
+                  View
+                </Typography>
+                <ToggleButtonGroup
+                  exclusive
+                  size="small"
+                  value={viewMode}
+                  onChange={(_, value: TimelineViewMode | null) => {
+                    if (value) setViewMode(value);
+                  }}
+                  sx={{ "& .MuiToggleButton-root": { textTransform: "none", px: 1.15 } }}
+                >
+                  {viewOptions.map((option) => (
+                    <ToggleButton key={option.value} value={option.value}>
+                      {option.label}
+                    </ToggleButton>
+                  ))}
+                </ToggleButtonGroup>
+              </Stack>
             </Stack>
+          </Paper>
+        )}
 
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={busy ? <CircularProgress size={16} /> : <RefreshRounded />}
-              disabled={busy}
-              onClick={onRefresh}
-              sx={{ ml: { lg: "auto" }, textTransform: "none", borderRadius: 1.5, minHeight: 36 }}
-            >
-              Refresh
-            </Button>
-          </Stack>
-        </Paper>
-
-        <Stack spacing={0.75} sx={{ p: 1.25 }}>
-          {visibleItemCount === 0 ? (
-            <Paper variant="outlined" sx={{ p: 2, borderRadius: 1.5, textAlign: "center", bgcolor: "action.hover" }}>
+        <Stack spacing={0.85} sx={{ p: { xs: 1, sm: 1.25 } }}>
+          {runs.length === 0 ? (
+            <Paper variant="outlined" sx={{ p: 2.25, borderRadius: 2, textAlign: "center", bgcolor: "action.hover" }}>
               <Typography variant="body2" color="text.secondary">
-                No matching operator runs.
+                No operator runs recorded yet. Run a smoke test or background operator to populate this history.
+              </Typography>
+            </Paper>
+          ) : visibleItemCount === 0 ? (
+            <Paper variant="outlined" sx={{ p: 2.25, borderRadius: 2, textAlign: "center", bgcolor: "action.hover" }}>
+              <Typography variant="body2" color="text.secondary">
+                No operator runs match the current filters.
               </Typography>
             </Paper>
           ) : viewMode === "grouped" ? (

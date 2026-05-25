@@ -158,9 +158,9 @@ EOF
 cargo test --manifest-path src-tauri/Cargo.toml operator_manifest -- --nocapture
 ```
 
-### 4. Run the bundled smoke fixture manually
+### 4. Run the smoke fixture manually
 
-Reference the bundled `operator-smoke@omiga-curated` plugin as a working example:
+Reference the legacy test fixture as a working example:
 
 ```
 src-tauri/bundled_plugins/plugins/operator-smoke/operators/write-text-report/operator.yaml
@@ -176,17 +176,18 @@ To run the smoke test via the UI:
 
 ## Installing and testing locally
 
-Copy your plugin directory into `~/.omiga/plugins/` (user-level) or `.omiga/plugins/` (project-level):
+Curated marketplace plugins live in the independent `omiga-plugins` repository next to the Omiga app checkout:
 
 ```bash
-cp -r my-plugin ~/.omiga/plugins/my-plugin
+cd ../omiga-plugins
+python3 scripts/validate_marketplace.py
 ```
 
-Omiga scans both locations at startup. After restarting, your plugin appears in **Settings → Plugins**.
+Omiga reads that repository's `marketplace.json` as the curated marketplace source. Do not add project-local marketplace copies under `.omiga/plugins/` or `src-tauri/omiga-plugins/`.
 
 For MCP server wrapping, no additional `~/.cursor/mcp.json` changes are required. Omiga manages MCP server processes independently of Cursor's configuration.
 
-To verify operator tool registration, look for `operator__my_analysis` in the agent tool list after enabling the operator alias.
+To verify operator tool registration, enable the plugin and look for the dynamically exposed `operator__my_analysis` tool in the agent tool list.
 
 ## Plugin permissions model
 
@@ -202,11 +203,11 @@ High-risk operators (those running arbitrary shell commands) are subject to the 
 
 ## Publishing to the marketplace
 
-Marketplace publishing is not yet available in v2.0. To distribute a plugin:
+To distribute a curated plugin:
 
-1. Host the plugin directory as a Git repository or archive.
-2. Document the `plugin.json` `id`, the operator aliases, and the required execution environment.
-3. Users install by copying the plugin directory into `~/.omiga/plugins/`.
+1. Add the plugin directory and `marketplace.json` entry in `../omiga-plugins`.
+2. Run `python3 scripts/validate_marketplace.py`.
+3. Commit and push the `omiga-plugins` repository so Omiga can refresh from the remote marketplace.
 
 ## Common pitfalls
 

@@ -2593,6 +2593,11 @@ pub async fn send_message(
     {
         prompt_parts.push(plugins_system_section);
     }
+    if let Some(operator_tools_system_section) =
+        crate::domain::operators::format_enabled_operator_tools_system_section()
+    {
+        prompt_parts.push(operator_tools_system_section);
+    }
     if let Some(selected_plugins_system_section) =
         crate::domain::plugins::format_selected_plugins_system_section(
             &plugin_load_outcome,
