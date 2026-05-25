@@ -9903,13 +9903,20 @@ execution:
             };
 
             let candidates = discover_operator_candidates_from_plugins([&plugin]);
-            assert_eq!(
-                candidates.len(),
-                1,
-                "{plugin_name} should expose one operator"
-            );
-            let operator = &candidates[0];
-            assert_eq!(operator.metadata.id, operator_id);
+            // Plugins may bundle multiple operators (e.g. `operator-seqtk` ships
+            // several subcommand wrappers). Look up the one this test case targets.
+            let operator = candidates
+                .iter()
+                .find(|c| c.metadata.id == operator_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{plugin_name} should expose operator id {operator_id}, found: {:?}",
+                        candidates
+                            .iter()
+                            .map(|c| &c.metadata.id)
+                            .collect::<Vec<_>>()
+                    )
+                });
             assert_eq!(operator.execution.argv[0], first_argv);
             assert!(matches!(
                 operator.interface.outputs["summary"].kind,

@@ -1,0 +1,46 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: seqtk_subseq
+  version: 0.1.0
+  name: seqtk Subseq
+  description: Use seqtk subseq to extract reads by ID list from FASTQ/FASTA input.
+  tags: [seqtk, fastq, fasta, extraction]
+interface:
+  inputs:
+    reads:
+      kind: file
+      required: true
+      description: FASTQ/FASTA input to extract reads from.
+    id_list:
+      kind: file
+      required: true
+      description: Text file of read IDs (one per line) to extract.
+  params: {}
+  outputs:
+    extracted_reads:
+      kind: file
+      glob: seqtk-subseq*
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 300s
+    exposed: true
+execution:
+  argv:
+    - /bin/sh
+    - ./scripts/seqtk_subseq.sh
+    - ${inputs.reads}
+    - ${outdir}
+    - ${inputs.id_list}
