@@ -9911,7 +9911,10 @@ execution:
                 .unwrap_or_else(|| {
                     panic!(
                         "{plugin_name} should expose operator id {operator_id}, found: {:?}",
-                        candidates.iter().map(|c| &c.metadata.id).collect::<Vec<_>>()
+                        candidates
+                            .iter()
+                            .map(|c| &c.metadata.id)
+                            .collect::<Vec<_>>()
                     )
                 });
             assert_eq!(operator.execution.argv[0], first_argv);
