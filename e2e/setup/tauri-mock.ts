@@ -217,10 +217,19 @@ export const TAURI_MOCK_SCRIPT = `
 
     // Operators
     list_operators: () => ({ registryPath: "", operators: [], diagnostics: [] }),
+    // The plugin settings panel and app shell load these catalogs on mount.
+    // Returning arrays here keeps new command surfaces from failing as null.map().
+    list_operator_favorites: () => ([]),
+    toggle_operator_favorite: () => ([]),
+    list_chain_templates: () => ([]),
+    save_chain_template: () => "mock-chain-template",
+    delete_chain_template: () => null,
     describe_operator: () => null,
     set_operator_enabled: () => null,
     run_operator: () => null,
+    run_operator_chain: () => ({ ok: true, steps: [] }),
     list_operator_runs: () => ([]),
+    list_active_operator_tasks: () => ([]),
     read_operator_run: () => null,
     read_operator_run_log: () => null,
     verify_operator_run: () => null,
