@@ -8,13 +8,14 @@
 //! - [`fingerprint`]:指纹构造与精确匹配(Wave 1 / Codex A)。
 //! - [`store`]:Playbook 持久化与 O(1) 指纹查找(Wave 1 / Codex B)。
 //!
-//! 注:`fingerprint` / `store` 内部条目的 `pub use` 重导出在 Wave 1 合并时由
-//! orchestrator 统一补齐,避免并行实现期间争抢本文件造成冲突。
+//! `fingerprint` 的指纹构造 / 匹配方法是 `Fingerprint` 的固有方法,随类型自动可用;
+//! `store` 的具体实现 `JsonFilePlaybookStore` 在此统一重导出。
 
 pub mod fingerprint;
 pub mod store;
 pub mod types;
 
+pub use store::JsonFilePlaybookStore;
 pub use types::{
     Fingerprint, Health, Playbook, PlaybookStatus, PlaybookStore, PlaybookVerification, Provenance,
 };
