@@ -17,6 +17,8 @@ pub mod replay;
 pub mod store;
 pub mod types;
 
+pub use chain::{build_chain_playbook, chain_canonical_id, chain_composite_version};
+pub use replay::{record_replay_outcome, resolve_for_replay, should_explore};
 pub use store::JsonFilePlaybookStore;
 pub use types::{
     Fingerprint, Health, Playbook, PlaybookStatus, PlaybookStore, PlaybookVerification, Provenance,
