@@ -5689,8 +5689,8 @@ template:
         let tmp = TempDir::new().expect("tempdir");
         let marketplace_root = tmp.path().join("marketplace");
         let plugins_root = marketplace_root.join("plugins");
-        let sequence_processing_root = plugins_root.join("ngs-sequence-processing");
-        let quality_control_root = plugins_root.join("ngs-quality-control");
+        let sequence_processing_root = plugins_root.join("bioinformatics/ngs/sequence-processing");
+        let quality_control_root = plugins_root.join("bioinformatics/ngs/quality-control");
         fs::create_dir_all(&plugins_root).expect("create plugins root");
         copy_dir_recursive(
             &curated_plugin_root("ngs-sequence-processing"),
@@ -5711,7 +5711,7 @@ template:
       "name": "ngs-sequence-processing",
       "source": {
         "source": "local",
-        "path": "./plugins/ngs-sequence-processing"
+        "path": "./plugins/bioinformatics/ngs/sequence-processing"
       },
       "policy": {
         "installation": "AVAILABLE",
@@ -5723,7 +5723,7 @@ template:
       "name": "ngs-quality-control",
       "source": {
         "source": "local",
-        "path": "./plugins/ngs-quality-control"
+        "path": "./plugins/bioinformatics/ngs/quality-control"
       },
       "policy": {
         "installation": "AVAILABLE",

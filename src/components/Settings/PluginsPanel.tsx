@@ -219,10 +219,6 @@ function pluginClassificationTerms(plugin: PluginSummary): string[] {
     .map((value) => value.trim().toLowerCase().replace(/[-_]+/g, " "));
 }
 
-function pluginClassificationText(plugin: PluginSummary): string {
-  return pluginClassificationTerms(plugin).join(" ");
-}
-
 function pluginHasTerm(plugin: PluginSummary, terms: string[]): boolean {
   const haystack = pluginClassificationTerms(plugin);
   return haystack.some((value) => terms.some((term) => value === term || value.includes(term)));
@@ -240,6 +236,87 @@ function pluginNameIdText(plugin: PluginSummary): string {
     .replace(/[-_]+/g, " ");
 }
 
+function pluginMarketplaceTaxonomySegments(plugin: PluginSummary): string[] {
+  const rawPath = plugin.sourcePath?.trim() || plugin.installedPath?.trim() || "";
+  if (!rawPath) return [];
+  const pathSegments = rawPath
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const pluginsIndex = pathSegments.lastIndexOf("plugins");
+  if (pluginsIndex < 0 || pluginsIndex >= pathSegments.length - 1) return [];
+  return pathSegments.slice(pluginsIndex + 1).map((segment) => segment.toLowerCase().replace(/[_\s]+/g, "-"));
+}
+
+function humanizeTaxonomySegment(segment: string): string {
+  const normalized = segment.trim().toLowerCase().replace(/[_\s]+/g, "-");
+  const acronyms: Record<string, string> = {
+    ngs: "NGS",
+    qc: "QC",
+    hpc: "HPC",
+    r: "R",
+    rna: "RNA",
+    rnaseq: "RNA-seq",
+    "rna-seq": "RNA-seq",
+    dna: "DNA",
+    sv: "SV",
+    cnv: "CNV",
+  };
+  if (acronyms[normalized]) return acronyms[normalized];
+  return normalized
+    .split("-")
+    .filter(Boolean)
+    .map((part) => acronyms[part] ?? part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function pluginCatalogGroupIdFromTaxonomyRoot(root: string): PluginCatalogGroupId | null {
+  switch (root) {
+    case "analysis":
+    case "analyses":
+      return "analysis";
+    case "bioinformatics":
+    case "omics":
+      return "bioinformatics";
+    case "visualization":
+    case "visualizations":
+    case "visualisation":
+    case "visualisations":
+      return "visualization";
+    case "automation":
+    case "operator":
+    case "operators":
+      return "operator";
+    case "tool":
+    case "tools":
+      return "tools";
+    case "resource":
+    case "resources":
+    case "retrieval":
+    case "retrievals":
+      return "resource";
+    default:
+      return null;
+  }
+}
+
+function pluginCatalogGroupIdFromPath(plugin: PluginSummary): PluginCatalogGroupId | null {
+  const [root] = pluginMarketplaceTaxonomySegments(plugin);
+  return root ? pluginCatalogGroupIdFromTaxonomyRoot(root) : null;
+}
+
+function pluginCatalogSectionFromPath(
+  groupId: PluginCatalogGroupId,
+  plugin: PluginSummary,
+): string | null {
+  const segments = pluginMarketplaceTaxonomySegments(plugin);
+  if (segments.length < 3) return null;
+  const rootGroup = pluginCatalogGroupIdFromTaxonomyRoot(segments[0]);
+  if (rootGroup !== groupId) return null;
+  return segments[1];
+}
+
 function pluginHasAnyCategory(plugin: PluginSummary, categories: string[]): boolean {
   const category = normalizedPluginCategory(plugin);
   return categories.some((value) => category === value);
@@ -247,12 +324,6 @@ function pluginHasAnyCategory(plugin: PluginSummary, categories: string[]): bool
 
 function pluginLooksLikeResourceBundle(plugin: PluginSummary): boolean {
   return /(^|\s)(resource|retrieval)(\s|$)/.test(pluginNameIdText(plugin));
-}
-
-function isTranscriptomicsPlugin(plugin: PluginSummary): boolean {
-  return [plugin.name, plugin.id, plugin.interface?.displayName]
-    .filter((value): value is string => Boolean(value?.trim()))
-    .some((value) => value.trim().toLowerCase().replace(/[-_]+/g, " ") === "transcriptomics");
 }
 
 function isOperatorPlugin(plugin: PluginSummary): boolean {
@@ -266,14 +337,7 @@ function isTemplatePlugin(plugin: PluginSummary): boolean {
 function isAnalysisPlugin(plugin: PluginSummary): boolean {
   if (isResourcePlugin(plugin) || isVisualizationPlugin(plugin)) return false;
   if (pluginHasAnyCategory(plugin, ["analysis"])) return true;
-  return pluginHasTerm(plugin, [
-    "analysis",
-    "omics analysis",
-    "transcriptomics",
-    "genomics",
-    "metabolomics",
-    "proteomics",
-  ]);
+  return pluginHasTerm(plugin, ["analysis", "statistics", "statistical"]);
 }
 
 function isAutomationPlugin(plugin: PluginSummary): boolean {
@@ -428,51 +492,7 @@ function isComputerUsePlugin(plugin: PluginSummary): boolean {
 function isBioinformaticsPlugin(plugin: PluginSummary): boolean {
   if (isResourcePlugin(plugin) || isVisualizationPlugin(plugin)) return false;
   if (pluginHasAnyCategory(plugin, ["bioinformatics"])) return true;
-  return pluginHasTerm(plugin, [
-    "bioinformatics",
-    "omics",
-    "transcriptomics",
-    "genomics",
-    "metabolomics",
-    "proteomics",
-    "ngs",
-    "next generation sequencing",
-    "sequencing",
-    "alignment",
-    "aligner",
-    "fastq",
-    "fasta",
-    "sam/bam",
-    "genome index",
-    "quality control",
-    "quantification",
-    "variant calling",
-    "structural variant",
-    "copy number",
-    "cnv",
-    "assembly",
-    "annotation",
-    "fqchk",
-    "fastqc",
-    "multiqc",
-    "featurecounts",
-    "salmon",
-    "kallisto",
-    "rsem",
-    "htseq",
-    "gatk",
-    "bcftools",
-    "freebayes",
-    "deepvariant",
-    "star fusion",
-    "arriba",
-    "manta",
-    "delly",
-    "lumpy",
-    "cnvkit",
-    "freec",
-    "ichor",
-  ]);
+  return pluginHasTerm(plugin, ["bioinformatics", "omics", "ngs"]);
 }
 
 export type PluginCatalogGroupId =
@@ -498,11 +518,12 @@ export interface PluginCatalogSection {
 }
 
 export function pluginCatalogGroupId(plugin: PluginSummary): PluginCatalogGroupId {
+  const pathGroup = pluginCatalogGroupIdFromPath(plugin);
+  if (pathGroup) return pathGroup;
   // Preserve explicit plugin surface boundaries first. Retrieval bundles can mention
   // genes/variants/assemblies, and visualization templates can mention gene plots;
   // those domain words must not override the plugin's declared contribution type.
   if (isVisualizationPlugin(plugin)) return "visualization";
-  if (isTranscriptomicsPlugin(plugin)) return "bioinformatics";
   if (isResourcePlugin(plugin)) return "resource";
   if (isBioinformaticsPlugin(plugin)) return "bioinformatics";
   if (isAnalysisPlugin(plugin)) return "analysis";
@@ -536,7 +557,7 @@ function pluginCatalogGroupDescription(group: PluginCatalogGroupId): string {
     case "analysis":
       return "Analysis plugins that bundle atomic Operator/Template units by domain.";
     case "bioinformatics":
-      return "Bioinformatics plugins grouped by workflow stage while preserving atomic units.";
+      return "Bioinformatics plugins grouped by marketplace directory taxonomy while preserving atomic units.";
     case "visualization":
       return "Plugins for creating, editing, or reviewing visual outputs.";
     case "operator":
@@ -570,9 +591,7 @@ export function groupPluginsByCatalogGroup(plugins: PluginSummary[]): PluginCata
       id,
       title: pluginCatalogGroupLabel(id),
       description: pluginCatalogGroupDescription(id),
-      plugins: (grouped.get(id) ?? []).sort((left, right) =>
-        displayName(left).localeCompare(displayName(right)),
-      ),
+      plugins: grouped.get(id) ?? [],
     }))
     .filter((group) => group.plugins.length > 0);
 }
@@ -619,7 +638,7 @@ export function groupPluginsByCatalogSection(
     .map(([sectionId, sectionPlugins]) => ({
       id: sectionId,
       title: pluginCatalogSectionLabel(groupId, sectionId),
-      plugins: sectionPlugins.sort((left, right) => displayName(left).localeCompare(displayName(right))),
+      plugins: sectionPlugins,
     }))
     .sort((left, right) => {
       const orderDelta =
@@ -641,34 +660,18 @@ function pluginCatalogSectionOrder(groupId: PluginCatalogGroupId, sectionId: str
   }
   if (groupId === "bioinformatics" && sectionId.startsWith("bioinformatics:")) {
     switch (sectionId.slice("bioinformatics:".length)) {
-      case "ngs-sequence-processing":
+      case "ngs":
         return 0;
-      case "ngs-quality-control":
-        return 10;
-      case "ngs-alignment":
-        return 20;
-      case "ngs-quantification":
-        return 30;
-      case "ngs-transcriptomics":
-        return 35;
-      case "ngs-variant-calling":
-        return 40;
-      case "ngs-fusion-sv":
-        return 50;
-      case "ngs-copy-number-variation":
-        return 60;
-      case "ngs-assembly-annotation":
-        return 70;
-      case "transcriptomics":
-        return 80;
       case "genomics":
-        return 90;
+        return 10;
+      case "transcriptomics":
+        return 20;
       case "proteomics":
-        return 100;
+        return 30;
       case "metabolomics":
-        return 110;
+        return 40;
       default:
-        return 130;
+        return 80;
     }
   }
   if (groupId === "visualization" && sectionId.startsWith("visualization:")) {
@@ -926,6 +929,8 @@ export function filterPluginsForCatalog(
 }
 
 function primaryResourceCategory(plugin: PluginSummary): string {
+  const pathCategory = pluginCatalogSectionFromPath("resource", plugin);
+  if (pathCategory) return pathCategory;
   const categories = Array.from(
     new Set((plugin.retrieval?.resources ?? []).map((resource) => resource.category).filter(Boolean)),
   );
@@ -949,6 +954,8 @@ function resourceCategoryLabel(category: string): string {
 }
 
 function primaryAnalysisCategory(plugin: PluginSummary): string {
+  const pathCategory = pluginCatalogSectionFromPath("analysis", plugin);
+  if (pathCategory) return pathCategory;
   if (pluginHasTerm(plugin, ["statistical", "statistics", "stats"])) return "statistics";
   if (pluginHasTerm(plugin, ["workflow", "pipeline"])) return "workflow";
   return "general";
@@ -961,142 +968,27 @@ function analysisCategoryLabel(category: string): string {
     case "workflow":
       return "Analysis workflows";
     default:
-      return "General analysis";
+      return category === "general" ? "General analysis" : humanizeTaxonomySegment(category);
   }
 }
 
 function primaryBioinformaticsCategory(plugin: PluginSummary): string {
-  const classificationText = pluginClassificationText(plugin);
-  if (
-    pluginHasTerm(plugin, [
-      "fusion",
-      "star fusion",
-      "arriba",
-      "manta",
-      "delly",
-      "lumpy",
-      "structural variant",
-    ]) ||
-    /\bsv\b/.test(classificationText)
-  ) {
-    return "ngs-fusion-sv";
-  }
-  if (pluginHasTerm(plugin, ["cnv", "copy number", "cnvkit", "freec", "ichor"])) {
-    return "ngs-copy-number-variation";
-  }
-  if (
-    pluginHasTerm(plugin, [
-      "gatk",
-      "bcftools",
-      "freebayes",
-      "deepvariant",
-      "variant calling",
-      "variant",
-    ])
-  ) {
-    return "ngs-variant-calling";
-  }
-  if (
-    pluginHasTerm(plugin, [
-      "featurecounts",
-      "salmon",
-      "kallisto",
-      "rsem",
-      "htseq",
-      "quantification",
-    ])
-  ) {
-    return "ngs-quantification";
-  }
-  if (
-    pluginHasTerm(plugin, [
-      "alignment",
-      "aligner",
-      "bowtie",
-      "bowtie2",
-      "bwa",
-      "star",
-      "hisat",
-      "hisat2",
-      "samtools",
-      "mapping",
-      "sam/bam",
-    ])
-  ) {
-    return "ngs-alignment";
-  }
-  if (
-    pluginHasTerm(plugin, [
-      "sequence processing",
-      "seqtk sample",
-      "seqtk seq",
-      "seqtk subseq",
-      "seqtk_sample",
-      "seqtk_seq",
-      "seqtk_subseq",
-      "subsample",
-      "sampling",
-      "extract reads",
-      "extraction",
-      "reverse-complement",
-      "conversion",
-    ])
-  ) {
-    return "ngs-sequence-processing";
-  }
-  if (pluginHasTerm(plugin, ["fqchk", "fastqc", "multiqc", "quality control", "qc"])) {
-    return "ngs-quality-control";
-  }
-  if (pluginHasTerm(plugin, ["assembly", "annotation", "spades", "prokka"])) {
-    return "ngs-assembly-annotation";
-  }
-  if (
-    pluginHasTerm(plugin, [
-      "seqtk",
-      "fastq",
-      "fasta",
-      "subseq",
-      "convert",
-      "sequence processing",
-    ])
-  ) {
-    return "ngs-sequence-processing";
-  }
-  if (pluginHasTerm(plugin, ["transcriptomics", "rna seq", "rna-seq", "differential expression"])) {
-    return "ngs-transcriptomics";
-  }
-  if (pluginHasTerm(plugin, ["genomics", "variant", "annotation", "assembly"])) {
-    return "genomics";
-  }
-  if (pluginHasTerm(plugin, ["proteomics", "protein", "peptide"])) {
-    return "proteomics";
-  }
-  if (pluginHasTerm(plugin, ["metabolomics", "metabolite"])) {
-    return "metabolomics";
-  }
+  const pathCategory = pluginCatalogSectionFromPath("bioinformatics", plugin);
+  if (pathCategory) return pathCategory;
+  const declaredCapabilities = (plugin.interface?.capabilities ?? [])
+    .map((capability) => capability.trim().toLowerCase().replace(/[-_\s]+/g, "-"))
+    .filter(Boolean);
+  const taxonomyCapability = declaredCapabilities.find((capability) =>
+    ["ngs", "genomics", "transcriptomics", "proteomics", "metabolomics"].includes(capability),
+  );
+  if (taxonomyCapability) return taxonomyCapability;
   return "other";
 }
 
 function bioinformaticsCategoryLabel(category: string): string {
   switch (category) {
-    case "ngs-sequence-processing":
-      return "NGS · Sequence Processing";
-    case "ngs-quality-control":
-      return "NGS · Quality Control";
-    case "ngs-alignment":
-      return "NGS · Alignment";
-    case "ngs-quantification":
-      return "NGS · Quantification";
-    case "ngs-transcriptomics":
-      return "NGS · Transcriptomics";
-    case "ngs-variant-calling":
-      return "NGS · Variant Calling";
-    case "ngs-fusion-sv":
-      return "NGS · Fusion / SV";
-    case "ngs-copy-number-variation":
-      return "NGS · Copy Number Variation";
-    case "ngs-assembly-annotation":
-      return "NGS · Assembly / Annotation";
+    case "ngs":
+      return "NGS";
     case "transcriptomics":
       return "Transcriptomics";
     case "genomics":
@@ -1106,11 +998,13 @@ function bioinformaticsCategoryLabel(category: string): string {
     case "metabolomics":
       return "Metabolomics";
     default:
-      return capabilityLabel(category);
+      return humanizeTaxonomySegment(category);
   }
 }
 
 function primaryVisualizationCategory(plugin: PluginSummary): string {
+  const pathCategory = pluginCatalogSectionFromPath("visualization", plugin);
+  if (pathCategory) return pathCategory;
   if (isRVisualizationPlugin(plugin) || pluginHasTerm(plugin, ["rscript", "ggplot", "ggplot2"])) {
     return "r";
   }
@@ -1127,7 +1021,7 @@ function visualizationCategoryLabel(category: string): string {
     case "python":
       return "Python visualization";
     default:
-      return "Visualization templates";
+      return category === "template" ? "Visualization templates" : humanizeTaxonomySegment(category);
   }
 }
 

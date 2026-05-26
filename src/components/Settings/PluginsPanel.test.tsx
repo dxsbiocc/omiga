@@ -220,6 +220,16 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(source).toContain("Rendered through Portal and lifted above Dialog + Backdrop");
   });
 
+  it("derives bioinformatics subgroups from marketplace paths instead of hard-coded plugin content", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("pluginMarketplaceTaxonomySegments");
+    expect(source).toContain("marketplace directory taxonomy");
+    expect(source).not.toContain("NGS ·");
+    expect(source).not.toContain("ngs-sequence-processing");
+    expect(source).not.toContain("ngs-quality-control");
+  });
+
   it("summarizes remote marketplace updates as durable UI state", () => {
     const checks = [
       remoteMarketplaceCheck({ changedPlugins: ["alignment", "transcriptomics", "alignment"] }),
@@ -495,7 +505,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const bioinformaticsPlugin = pluginSummary({
       id: "ngs-alignment@omiga-curated",
       name: "ngs-alignment",
-      sourcePath: "/plugins/ngs-alignment",
+      sourcePath: "/plugins/bioinformatics/ngs/alignment",
       interface: {
         displayName: "Alignment",
         shortDescription: "BWA, Bowtie2, STAR, and HISAT2 alignment",
@@ -699,7 +709,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const analysisPlugin = pluginSummary({
       id: "transcriptomics@omiga-curated",
       name: "transcriptomics",
-      sourcePath: "/plugins/transcriptomics",
+      sourcePath: "/plugins/bioinformatics/ngs/transcriptomics",
       interface: {
         displayName: "Transcriptomics",
         shortDescription: null,
@@ -720,7 +730,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const bioinformaticsPlugin = pluginSummary({
       id: "ngs-alignment@omiga-curated",
       name: "ngs-alignment",
-      sourcePath: "/plugins/ngs-alignment",
+      sourcePath: "/plugins/bioinformatics/ngs/alignment",
       interface: {
         displayName: "Alignment",
         shortDescription: "BWA, Bowtie2, STAR, and HISAT2 alignment",
@@ -843,7 +853,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     ).toEqual(["R visualization"]);
     expect(
       groupPluginsByCatalogSection("bioinformatics", [bioinformaticsPlugin, analysisPlugin]).map((section) => section.title),
-    ).toEqual(["NGS · Alignment", "NGS · Transcriptomics"]);
+    ).toEqual(["NGS"]);
     expect(
       groupPluginsByCatalogSection("resource", [geo, literatureSearchPlugin, providerSourcePlugin]).map((section) => section.title),
     ).toEqual(["Provider resources", "Dataset resources", "Literature resources"]);
@@ -973,10 +983,11 @@ describe("PluginsPanel diagnostics helpers", () => {
     ).toEqual(["Provider resources", "Knowledge resources"]);
   });
 
-  it("splits NGS bioinformatics plugins by workflow stage in a stable section order", () => {
+  it("groups NGS bioinformatics plugins by marketplace directory taxonomy instead of hard-coded stages", () => {
     const sequenceProcessingPlugin = pluginSummary({
       id: "seqtk-convert@omiga-curated",
       name: "seqtk-convert",
+      sourcePath: "/plugins/bioinformatics/ngs/sequence-processing",
       interface: {
         displayName: "Seqtk Convert",
         shortDescription: "Convert FASTQ and FASTA reads for downstream analysis.",
@@ -997,6 +1008,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const qualityControlPlugin = pluginSummary({
       id: "multiqc-reports@omiga-curated",
       name: "multiqc-reports",
+      sourcePath: "/plugins/bioinformatics/ngs/quality-control",
       interface: {
         displayName: "MultiQC Reports",
         shortDescription: "Aggregate FastQC and fqchk quality control summaries.",
@@ -1017,6 +1029,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const alignmentPlugin = pluginSummary({
       id: "alignment-bundle@omiga-curated",
       name: "alignment-bundle",
+      sourcePath: "/plugins/bioinformatics/ngs/alignment",
       interface: {
         displayName: "Alignment",
         shortDescription: "BWA, Bowtie2, STAR, and HISAT2 alignment",
@@ -1037,6 +1050,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const quantificationPlugin = pluginSummary({
       id: "salmon-quant@omiga-curated",
       name: "salmon-quant",
+      sourcePath: "/plugins/bioinformatics/ngs/quantification",
       interface: {
         displayName: "Salmon Quant",
         shortDescription: "Transcript abundance quantification with Salmon.",
@@ -1057,6 +1071,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const variantCallingPlugin = pluginSummary({
       id: "deepvariant-caller@omiga-curated",
       name: "deepvariant-caller",
+      sourcePath: "/plugins/bioinformatics/ngs/variant-calling",
       interface: {
         displayName: "DeepVariant Caller",
         shortDescription: null,
@@ -1077,6 +1092,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const fusionPlugin = pluginSummary({
       id: "star-fusion@omiga-curated",
       name: "star-fusion",
+      sourcePath: "/plugins/bioinformatics/ngs/fusion-sv",
       interface: {
         displayName: "STAR-Fusion",
         shortDescription: "Detect fusion transcripts and structural variants.",
@@ -1097,6 +1113,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const copyNumberVariationPlugin = pluginSummary({
       id: "somatic-workflow@omiga-curated",
       name: "somatic-workflow",
+      sourcePath: "/plugins/bioinformatics/ngs/copy-number-variation",
       interface: {
         displayName: "Somatic Workflow",
         shortDescription: "Somatic DNA analysis workflow.",
@@ -1125,6 +1142,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const assemblyAnnotationPlugin = pluginSummary({
       id: "assembly-annotation@omiga-curated",
       name: "assembly-annotation",
+      sourcePath: "/plugins/bioinformatics/ngs/assembly-annotation",
       interface: {
         displayName: "Assembly Annotation",
         shortDescription: null,
@@ -1143,26 +1161,27 @@ describe("PluginsPanel diagnostics helpers", () => {
       },
     });
 
-    expect(
-      groupPluginsByCatalogSection("bioinformatics", [
-        fusionPlugin,
-        assemblyAnnotationPlugin,
-        variantCallingPlugin,
-        quantificationPlugin,
-        sequenceProcessingPlugin,
-        copyNumberVariationPlugin,
-        alignmentPlugin,
-        qualityControlPlugin,
-      ]).map((section) => section.title),
-    ).toEqual([
-      "NGS · Sequence Processing",
-      "NGS · Quality Control",
-      "NGS · Alignment",
-      "NGS · Quantification",
-      "NGS · Variant Calling",
-      "NGS · Fusion / SV",
-      "NGS · Copy Number Variation",
-      "NGS · Assembly / Annotation",
+    const sections = groupPluginsByCatalogSection("bioinformatics", [
+      sequenceProcessingPlugin,
+      qualityControlPlugin,
+      alignmentPlugin,
+      quantificationPlugin,
+      variantCallingPlugin,
+      fusionPlugin,
+      copyNumberVariationPlugin,
+      assemblyAnnotationPlugin,
+    ]);
+
+    expect(sections.map((section) => section.title)).toEqual(["NGS"]);
+    expect(sections[0]?.plugins.map(displayName)).toEqual([
+      "Seqtk Convert",
+      "MultiQC Reports",
+      "Alignment",
+      "Salmon Quant",
+      "DeepVariant Caller",
+      "STAR-Fusion",
+      "Somatic Workflow",
+      "Assembly Annotation",
     ]);
   });
 

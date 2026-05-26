@@ -1732,20 +1732,27 @@ mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     fn repo_plugin_root(plugin_name: &str) -> PathBuf {
-        let plugins_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let marketplace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
             .parent()
             .expect("workspace root")
-            .join("omiga-plugins/plugins");
-        match plugin_name {
-            "visualization-r" => plugins_root.join("visualization/visualization-r"),
-            "transcriptomics"
-            | "ngs-alignment"
-            | "ngs-sequence-processing"
-            | "ngs-quality-control" => plugins_root.join("bioinformatics").join(plugin_name),
-            _ => plugins_root.join(plugin_name),
-        }
+            .join("omiga-plugins");
+        let raw = std::fs::read_to_string(marketplace_root.join("marketplace.json"))
+            .expect("marketplace manifest");
+        let manifest: serde_json::Value = serde_json::from_str(&raw).expect("marketplace json");
+        let source_path = manifest
+            .get("plugins")
+            .and_then(|plugins| plugins.as_array())
+            .and_then(|plugins| {
+                plugins.iter().find_map(|entry| {
+                    (entry.get("name").and_then(|name| name.as_str()) == Some(plugin_name))
+                        .then(|| entry.get("source")?.get("path")?.as_str())
+                        .flatten()
+                })
+            })
+            .unwrap_or_else(|| panic!("{plugin_name} marketplace plugin"));
+        marketplace_root.join(source_path.trim_start_matches("./"))
     }
 
     fn project_loaded_plugin(plugin_name: &str, display_name: &str) -> LoadedPlugin {

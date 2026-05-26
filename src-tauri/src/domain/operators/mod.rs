@@ -9486,13 +9486,28 @@ mod tests {
     }
 
     fn curated_operator_manifest_path(plugin_name: &str, operator_dir: &str) -> (PathBuf, PathBuf) {
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let marketplace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
             .parent()
             .expect("workspace root")
-            .join("omiga-plugins/plugins/bioinformatics")
-            .join(plugin_name);
+            .join("omiga-plugins");
+        let raw = std::fs::read_to_string(marketplace_root.join("marketplace.json"))
+            .expect("marketplace manifest");
+        let manifest_json: serde_json::Value =
+            serde_json::from_str(&raw).expect("marketplace json");
+        let source_path = manifest_json
+            .get("plugins")
+            .and_then(|plugins| plugins.as_array())
+            .and_then(|plugins| {
+                plugins.iter().find_map(|entry| {
+                    (entry.get("name").and_then(|name| name.as_str()) == Some(plugin_name))
+                        .then(|| entry.get("source")?.get("path")?.as_str())
+                        .flatten()
+                })
+            })
+            .unwrap_or_else(|| panic!("{plugin_name} marketplace plugin"));
+        let plugin_root = marketplace_root.join(source_path.trim_start_matches("./"));
         let manifest = plugin_root
             .join("operators")
             .join(operator_dir)
@@ -10265,12 +10280,7 @@ execution:
 
     #[test]
     fn transcriptomics_analysis_plugin_does_not_expose_operator_units() {
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .parent()
-            .expect("workspace root")
-            .join("omiga-plugins/plugins/bioinformatics/transcriptomics");
+        let (plugin_root, _) = curated_operator_manifest_path("transcriptomics", "unused");
         assert!(
             !plugin_root.join("operators").exists(),
             "transcriptomics keeps template-only public units"
