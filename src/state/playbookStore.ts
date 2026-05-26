@@ -21,7 +21,6 @@ export interface SavePlaybookFromChainArgs {
   title: string;
   steps: OperatorChainStep[];
   expectedOutputKeys: string[];
-  chainOk: boolean;
   projectRoot?: string;
   executionEnvironment?: string;
 }

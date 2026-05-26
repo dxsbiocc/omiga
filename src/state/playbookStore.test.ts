@@ -167,7 +167,6 @@ describe("usePlaybookStore", () => {
       title: "Saved chain",
       steps,
       expectedOutputKeys: ["report"],
-      chainOk: true,
       projectRoot: "/project",
       executionEnvironment: "local",
     };

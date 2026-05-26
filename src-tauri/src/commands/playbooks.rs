@@ -64,7 +64,6 @@ pub async fn save_playbook_from_chain(
     title: String,
     steps: Vec<ChainStep>,
     expected_output_keys: Vec<String>,
-    chain_ok: bool,
     project_root: Option<String>,
     execution_environment: Option<String>,
 ) -> CommandResult<Playbook> {
@@ -73,11 +72,8 @@ pub async fn save_playbook_from_chain(
             "a chain playbook requires at least two steps".to_string(),
         ));
     }
-    if !chain_ok {
-        return Err(AppError::Config(
-            "refusing to save a playbook from a chain that did not succeed".to_string(),
-        ));
-    }
+    // Quality is enforced at replay time (verification + auto-demote), not at save:
+    // the chain editor saves a definition; a bad chain is weeded out on replay.
     let versions = resolve_chain_versions(&steps)?;
     let root = resolve_project_root(project_root);
     let env_signature = execution_environment.filter(|value| !value.trim().is_empty());
