@@ -47,6 +47,8 @@ type OperatorChainEditorDialogProps = {
   onRun: (steps: OperatorChainStep[]) => Promise<void>;
   projectPath?: string;
   executionEnvironment?: string;
+  sshServer?: string;
+  sandboxBackend?: string;
 };
 
 type FieldGroup = "inputs" | "params";
@@ -324,6 +326,8 @@ export function OperatorChainEditorDialog({
   onRun,
   projectPath,
   executionEnvironment,
+  sshServer,
+  sandboxBackend,
 }: OperatorChainEditorDialogProps) {
   const theme = useTheme();
   const fieldRefs = useRef(new Map<string, HTMLInputElement>());
@@ -691,6 +695,8 @@ export function OperatorChainEditorDialog({
         expectedOutputKeys: [],
         projectRoot: projectPath,
         executionEnvironment,
+        sshServer,
+        sandboxBackend,
       });
       setSavePlaybookOpen(false);
       setPlaybookTitle("");

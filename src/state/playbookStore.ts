@@ -23,6 +23,8 @@ export interface SavePlaybookFromChainArgs {
   expectedOutputKeys: string[];
   projectRoot?: string;
   executionEnvironment?: string;
+  sshServer?: string;
+  sandboxBackend?: string;
 }
 
 export interface PlaybookState {

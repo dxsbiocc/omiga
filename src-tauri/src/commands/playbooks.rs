@@ -41,6 +41,36 @@ fn status_str(status: PlaybookStatus) -> String {
     .to_string()
 }
 
+/// Compose a deterministic env signature from the full execution surface
+/// (environment name + SSH server + sandbox backend). Any field changing alters
+/// the signature, so replay against a different target invalidates. Returns
+/// `None` when the whole surface is empty. Save and replay MUST call this
+/// identically so their fingerprints agree.
+fn compose_env_signature(
+    environment: Option<String>,
+    ssh_server: Option<String>,
+    sandbox_backend: Option<String>,
+) -> Option<String> {
+    let parts: Vec<String> = [
+        ("env", environment),
+        ("ssh", ssh_server),
+        ("sandbox", sandbox_backend),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| {
+        value
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(|v| format!("{key}={v}"))
+    })
+    .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(";"))
+    }
+}
+
 /// 解析链中每个唯一算子别名的当前版本(去重,保持首次出现顺序)。
 fn resolve_chain_versions(steps: &[ChainStep]) -> Result<Vec<(String, String)>, AppError> {
     let mut versions = Vec::new();
@@ -59,6 +89,7 @@ fn resolve_chain_versions(steps: &[ChainStep]) -> Result<Vec<(String, String)>, 
 
 /// 把一条链固化为 Playbook 并持久化到 `.omiga/playbooks/`。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn save_playbook_from_chain(
     playbook_id: String,
     title: String,
@@ -66,6 +97,8 @@ pub async fn save_playbook_from_chain(
     expected_output_keys: Vec<String>,
     project_root: Option<String>,
     execution_environment: Option<String>,
+    ssh_server: Option<String>,
+    sandbox_backend: Option<String>,
 ) -> CommandResult<Playbook> {
     if steps.len() < 2 {
         return Err(AppError::Config(
@@ -76,7 +109,10 @@ pub async fn save_playbook_from_chain(
     // the chain editor saves a definition; a bad chain is weeded out on replay.
     let versions = resolve_chain_versions(&steps)?;
     let root = resolve_project_root(project_root);
-    let env_signature = execution_environment.filter(|value| !value.trim().is_empty());
+    // Stamp the full execution surface so a later replay against a different
+    // environment / SSH server / sandbox backend invalidates instead of running
+    // the stored chain on the wrong target. Must match replay_playbook exactly.
+    let env_signature = compose_env_signature(execution_environment, ssh_server, sandbox_backend);
     let provenance = Provenance {
         distilled_from: Vec::new(),
         proposal_id: None,
@@ -131,9 +167,13 @@ pub async fn replay_playbook(
     ssh_server: Option<String>,
     sandbox_backend: Option<String>,
 ) -> CommandResult<ReplayPlaybookResponse> {
-    let env_signature = execution_environment
-        .clone()
-        .filter(|value| !value.trim().is_empty());
+    // Same full-surface signature as save_playbook_from_chain (clone before the
+    // fields are moved into build_operator_context).
+    let env_signature = compose_env_signature(
+        execution_environment.clone(),
+        ssh_server.clone(),
+        sandbox_backend.clone(),
+    );
     let ctx = build_operator_context(
         &state,
         project_root,

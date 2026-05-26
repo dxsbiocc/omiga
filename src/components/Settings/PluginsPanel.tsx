@@ -5138,6 +5138,10 @@ function OperatorCatalogSection({
   diagnostics,
   runs,
   registryPath,
+  projectPath,
+  executionEnvironment,
+  sshServer,
+  sandboxBackend,
   favoriteOperators,
   busy,
   environments,
@@ -5159,6 +5163,10 @@ function OperatorCatalogSection({
   diagnostics: OperatorManifestDiagnostic[];
   runs: OperatorRunSummary[];
   registryPath: string | null;
+  projectPath?: string;
+  executionEnvironment?: string;
+  sshServer?: string;
+  sandboxBackend?: string;
   favoriteOperators: string[];
   busy: boolean;
   environments?: PluginEnvironmentSummary[];
@@ -5223,6 +5231,12 @@ function OperatorCatalogSection({
   }, 0);
   const cacheHitCount = runs.filter(operatorRunIsCacheHit).length;
   const diagnosticIssueCount = diagnostics.filter((diagnostic) => diagnostic.severity !== "info").length;
+  const chainEditorExecutionContextProps = {
+    projectPath,
+    executionEnvironment: executionEnvironment ?? undefined,
+    sshServer: sshServer ?? undefined,
+    sandboxBackend: sandboxBackend ?? undefined,
+  };
 
   return (
     <>
@@ -5243,6 +5257,7 @@ function OperatorCatalogSection({
       <OperatorChainEditorDialog
         open={chainDialogOpen}
         operators={operators}
+        {...chainEditorExecutionContextProps}
         onClose={() => setChainDialogOpen(false)}
         onRun={async (steps) => {
           await onRunChain(steps);
@@ -7046,6 +7061,10 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         diagnostics={operatorDiagnostics}
         runs={operatorRuns}
         registryPath={operatorRegistryPath}
+        projectPath={projectPath}
+        executionEnvironment={executionEnvironment ?? undefined}
+        sshServer={sshServer ?? undefined}
+        sandboxBackend={sandboxBackend ?? undefined}
         favoriteOperators={favoriteOperators}
         busy={isMutating}
         environments={allPluginEnvironments}
@@ -7107,6 +7126,10 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           diagnostics={operatorDiagnostics}
           runs={operatorRuns}
           registryPath={operatorRegistryPath}
+          projectPath={projectPath}
+          executionEnvironment={executionEnvironment ?? undefined}
+          sshServer={sshServer ?? undefined}
+          sandboxBackend={sandboxBackend ?? undefined}
           favoriteOperators={favoriteOperators}
           busy={isMutating}
           environments={allPluginEnvironments}

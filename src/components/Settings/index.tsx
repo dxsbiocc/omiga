@@ -130,7 +130,7 @@ const SETTINGS_SECTIONS: {
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 15;
+const SETTINGS_TAB_MAX = 16;
 
 function clampSettingsTab(i: number): number {
   const clamped = Math.min(
