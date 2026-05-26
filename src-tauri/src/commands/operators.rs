@@ -1016,17 +1016,6 @@ pub async fn run_operator_chain(
         ));
     }
 
-    let steps = match prepare_chain_steps(steps) {
-        Ok(steps) => steps,
-        Err(error) => {
-            return Ok(OperatorChainResult {
-                steps: Vec::new(),
-                ok: false,
-                error: Some(error),
-            });
-        }
-    };
-
     let ctx = build_operator_context(
         &state,
         project_root,
@@ -1038,12 +1027,7 @@ pub async fn run_operator_chain(
     )
     .await;
 
-    let runner: ChainStepRunner = Arc::new(move |step, arguments| {
-        let ctx = ctx.clone();
-        Box::pin(async move { execute_prepared_operator_chain_step(ctx, step, arguments).await })
-    });
-
-    Ok(run_prepared_operator_chain(steps, runner).await)
+    Ok(run_chain_with_context(ctx, steps).await)
 }
 
 /// Run an operator chain from raw steps using an already-built [`ToolContext`].

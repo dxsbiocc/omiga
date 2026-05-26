@@ -14,7 +14,7 @@ use crate::commands::CommandResult;
 use crate::domain::operators::{self, ChainStep};
 use crate::domain::playbooks::{
     build_chain_playbook, execute_replay, JsonFilePlaybookStore, Playbook, PlaybookStatus,
-    PlaybookStore, Provenance, ReplayOutcome,
+    PlaybookStore, PlaybookVerification, Provenance, ReplayOutcome,
 };
 use crate::errors::AppError;
 use serde::Serialize;
@@ -64,12 +64,18 @@ pub async fn save_playbook_from_chain(
     title: String,
     steps: Vec<ChainStep>,
     expected_output_keys: Vec<String>,
+    chain_ok: bool,
     project_root: Option<String>,
     execution_environment: Option<String>,
 ) -> CommandResult<Playbook> {
     if steps.len() < 2 {
         return Err(AppError::Config(
             "a chain playbook requires at least two steps".to_string(),
+        ));
+    }
+    if !chain_ok {
+        return Err(AppError::Config(
+            "refusing to save a playbook from a chain that did not succeed".to_string(),
         ));
     }
     let versions = resolve_chain_versions(&steps)?;
@@ -129,6 +135,9 @@ pub async fn replay_playbook(
     ssh_server: Option<String>,
     sandbox_backend: Option<String>,
 ) -> CommandResult<ReplayPlaybookResponse> {
+    let env_signature = execution_environment
+        .clone()
+        .filter(|value| !value.trim().is_empty());
     let ctx = build_operator_context(
         &state,
         project_root,
@@ -160,9 +169,30 @@ pub async fn replay_playbook(
         &mut store,
         &playbook_id,
         &current_versions,
+        env_signature,
         &now,
         |chain_steps| run_chain_with_context(ctx, chain_steps),
-        |result: &OperatorChainResult| result.ok,
+        |result: &OperatorChainResult, v: &PlaybookVerification| {
+            if !result.ok {
+                return false;
+            }
+            if v.expected_output_keys.is_empty() {
+                return true;
+            }
+            let mut keys = std::collections::HashSet::new();
+            for step in &result.steps {
+                if let Some(obj) = step
+                    .result
+                    .get("outputs")
+                    .and_then(|outputs| outputs.as_object())
+                {
+                    for key in obj.keys() {
+                        keys.insert(key.clone());
+                    }
+                }
+            }
+            v.expected_output_keys.iter().all(|key| keys.contains(key))
+        },
     )
     .await
     .map_err(AppError::Config)?;
