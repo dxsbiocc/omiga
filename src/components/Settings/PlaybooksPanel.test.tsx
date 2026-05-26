@@ -46,6 +46,7 @@ vi.mock("react", async (importOriginal) => {
       hookRuntimeRef.current?.useEffect(effect, deps),
     useState: <T,>(initial: T | (() => T)) =>
       hookRuntimeRef.current?.useState(initial),
+    useMemo: <T,>(factory: () => T) => factory(),
   };
 });
 
@@ -74,7 +75,7 @@ vi.mock("@mui/material/styles", async () => {
 
 vi.mock("@mui/icons-material", async () => {
   const { createIconMock } = await import("../../test/__tests__/muiMocks");
-  return createIconMock(["PlayArrowRounded", "RefreshRounded"]);
+  return createIconMock(["AddRounded", "PlayArrowRounded", "RefreshRounded"]);
 });
 
 vi.mock("../../state/playbookStore", () => ({
@@ -85,6 +86,47 @@ vi.mock("../../state/playbookStore", () => ({
     listPlaybooks: playbookStoreMock.listPlaybooks,
     replayPlaybook: playbookStoreMock.replayPlaybook,
   }),
+}));
+
+const pluginStoreMock = vi.hoisted(() => ({
+  operators: [] as unknown[],
+  loadOperators: vi.fn<(projectRoot?: string) => Promise<void>>(),
+  runOperatorChain: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+}));
+
+vi.mock("../../state/pluginStore", () => ({
+  usePluginStore: <T,>(
+    selector: (state: {
+      operators: unknown[];
+      loadOperators: typeof pluginStoreMock.loadOperators;
+      runOperatorChain: typeof pluginStoreMock.runOperatorChain;
+    }) => T,
+  ): T =>
+    selector({
+      operators: pluginStoreMock.operators,
+      loadOperators: pluginStoreMock.loadOperators,
+      runOperatorChain: pluginStoreMock.runOperatorChain,
+    }),
+}));
+
+vi.mock("../../state/chatComposerStore", () => ({
+  useChatComposerStore: <T,>(
+    selector: (state: {
+      environment: string | null;
+      sshServer: string | null;
+      sandboxBackend: string | null;
+    }) => T,
+  ): T => selector({ environment: "local", sshServer: null, sandboxBackend: null }),
+}));
+
+vi.mock("../../state/sessionStore", () => ({
+  useSessionStore: <T,>(
+    selector: (state: { currentSession: { id: string } | null }) => T,
+  ): T => selector({ currentSession: null }),
+}));
+
+vi.mock("./OperatorChainEditorDialog", () => ({
+  OperatorChainEditorDialog: () => null,
 }));
 
 import { PlaybooksPanel } from "./PlaybooksPanel";
@@ -132,6 +174,9 @@ function resetPlaybookStoreMock() {
     outcome: "replayed",
     verified: true,
   });
+  pluginStoreMock.operators = [];
+  pluginStoreMock.loadOperators.mockReset().mockResolvedValue(undefined);
+  pluginStoreMock.runOperatorChain.mockReset().mockResolvedValue({ steps: [], ok: true });
 }
 
 function createPanelHarness() {
@@ -185,6 +230,13 @@ describe("PlaybooksPanel", () => {
     const harness = createPanelHarness();
 
     expect(textContent(harness.tree)).toContain("No playbooks yet");
+  });
+
+  it("renders a Compose Chain button and loads the operator catalog", () => {
+    const harness = createPanelHarness();
+
+    expect(() => getButtonByText(harness, "Compose Chain")).not.toThrow();
+    expect(pluginStoreMock.loadOperators).toHaveBeenCalledWith(PROJECT_PATH);
   });
 
   it("calls replayPlaybook with the selected playbook id", () => {

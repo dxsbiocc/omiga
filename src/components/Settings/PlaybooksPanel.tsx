@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -13,13 +13,17 @@ import {
   type ChipProps,
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
-import { PlayArrowRounded, RefreshRounded } from "@mui/icons-material";
+import { AddRounded, PlayArrowRounded, RefreshRounded } from "@mui/icons-material";
 import {
   type Playbook,
   type PlaybookStatus,
   type ReplayPlaybookResponse,
 } from "../../state/playbookTypes";
 import { usePlaybookStore } from "../../state/playbookStore";
+import { usePluginStore } from "../../state/pluginStore";
+import { useChatComposerStore } from "../../state/chatComposerStore";
+import { useSessionStore } from "../../state/sessionStore";
+import { OperatorChainEditorDialog } from "./OperatorChainEditorDialog";
 
 type ReplayNotice = {
   severity: AlertColor;
@@ -162,15 +166,38 @@ export function PlaybooksPanel({ projectPath }: { projectPath?: string }) {
     listPlaybooks,
     replayPlaybook,
   } = usePlaybookStore();
+  const operators = usePluginStore((state) => state.operators);
+  const loadOperators = usePluginStore((state) => state.loadOperators);
+  const runOperatorChain = usePluginStore((state) => state.runOperatorChain);
+  const sessionId = useSessionStore((state) => state.currentSession?.id ?? null);
+  const executionEnvironment = useChatComposerStore((state) => state.environment);
+  const sshServer = useChatComposerStore((state) => state.sshServer);
+  const sandboxBackend = useChatComposerStore((state) => state.sandboxBackend);
   const projectRoot = projectPath?.trim() || undefined;
   const [replayingId, setReplayingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<ReplayNotice | null>(null);
+  const [chainEditorOpen, setChainEditorOpen] = useState(false);
+
+  const exposedOperators = useMemo(
+    () => operators.filter((operator) => operator.exposed),
+    [operators],
+  );
+  const operatorSurface = useMemo(
+    () => ({ sessionId, executionEnvironment, sshServer, sandboxBackend }),
+    [executionEnvironment, sandboxBackend, sessionId, sshServer],
+  );
 
   useEffect(() => {
     void listPlaybooks(projectRoot).catch((err: unknown) => {
       setNotice({ severity: "error", message: errorMessage(err) });
     });
   }, [listPlaybooks, projectRoot]);
+
+  useEffect(() => {
+    void loadOperators(projectRoot).catch(() => {
+      // Operator catalog load is best-effort; chain composer simply shows fewer options.
+    });
+  }, [loadOperators, projectRoot]);
 
   const handleRefresh = () => {
     setNotice(null);
@@ -220,15 +247,25 @@ export function PlaybooksPanel({ projectPath }: { projectPath?: string }) {
                 Review distilled playbooks and replay them against the current project.
               </Typography>
             </Box>
-            <Button
-              variant="outlined"
-              startIcon={isLoading ? <CircularProgress size={16} /> : <RefreshRounded />}
-              disabled={isLoading}
-              onClick={handleRefresh}
-              sx={{ textTransform: "none", borderRadius: 2, minHeight: 40 }}
-            >
-              Refresh
-            </Button>
+            <Stack direction="row" spacing={1}>
+              <Button
+                variant="contained"
+                startIcon={<AddRounded />}
+                onClick={() => setChainEditorOpen(true)}
+                sx={{ textTransform: "none", borderRadius: 2, minHeight: 40 }}
+              >
+                Compose Chain
+              </Button>
+              <Button
+                variant="outlined"
+                startIcon={isLoading ? <CircularProgress size={16} /> : <RefreshRounded />}
+                disabled={isLoading}
+                onClick={handleRefresh}
+                sx={{ textTransform: "none", borderRadius: 2, minHeight: 40 }}
+              >
+                Refresh
+              </Button>
+            </Stack>
           </Stack>
         </Paper>
 
@@ -282,6 +319,16 @@ export function PlaybooksPanel({ projectPath }: { projectPath?: string }) {
           {notice?.message}
         </Alert>
       </Snackbar>
+
+      <OperatorChainEditorDialog
+        open={chainEditorOpen}
+        onClose={() => setChainEditorOpen(false)}
+        operators={exposedOperators}
+        projectPath={projectPath}
+        onRun={async (steps) => {
+          await runOperatorChain(steps, projectRoot, operatorSurface);
+        }}
+      />
     </>
   );
 }
