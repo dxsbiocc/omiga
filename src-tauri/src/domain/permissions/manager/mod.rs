@@ -541,6 +541,33 @@ impl PermissionManager {
                 };
                 format!("connector:{connector_id}:{operation}")
             }
+            "operator_execute" => {
+                let operator = context
+                    .arguments
+                    .get("operator")
+                    .or_else(|| context.arguments.get("program"))
+                    .or_else(|| context.arguments.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let operation = context
+                    .arguments
+                    .get("operation")
+                    .or_else(|| {
+                        context
+                            .arguments
+                            .get("params")
+                            .and_then(|params| params.get("operation"))
+                    })
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("run");
+                match operator {
+                    Some(operator) => format!("operator_execute:{operator}:{operation}"),
+                    None => base,
+                }
+            }
             "bash" | "shell" => Self::bash_approval_cache_key(&base, &context.arguments),
             _ => base,
         }

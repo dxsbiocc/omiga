@@ -358,15 +358,9 @@ function isVisualizationPlugin(plugin: PluginSummary): boolean {
 }
 
 function isRVisualizationPlugin(plugin: PluginSummary): boolean {
-  const haystack = [
-    plugin.id,
-    plugin.name,
-    plugin.interface?.displayName,
-  ]
-    .filter((value): value is string => Boolean(value?.trim()))
-    .join(" ")
-    .toLowerCase();
-  return haystack.includes("visualization-r") || haystack.includes("r visualization");
+  const taxonomy = pluginMarketplaceTaxonomySegments(plugin);
+  if (taxonomy[0] === "visualization" && taxonomy.includes("r")) return true;
+  return pluginHasTerm(plugin, ["r visualization", "rscript", "ggplot", "ggplot2", "base r"]);
 }
 
 function resourceCategoryFromTerms(plugin: PluginSummary): string | null {
@@ -434,7 +428,7 @@ function operatorIconKindFromHaystack(haystack: string): OperatorPluginIconKind 
   if (/\bc\+\+\b|\bcpp\b/.test(haystack)) return "cpp";
   if (/\brscript\b|\bbase r\b|\br\b/.test(haystack)) return "r";
   if (/\bpython\b|\bpython3\b|\bpy\b/.test(haystack)) return "python";
-  if (/\bseqtk\b|\bc\b/.test(haystack)) return "c";
+  if (/\bc\b/.test(haystack)) return "c";
   if (/\bshell\b|\bsh\b|\bbash\b|\bcontainer\b|\bsmoke\b/.test(haystack)) return "shell";
   return "operator";
 }
@@ -1170,7 +1164,7 @@ function selectVisualizationRQuickStarts(
 }
 
 export function visualizationRTemplatePrompt(template: VisualizationRTemplateSummary): string {
-  return `Use the visualization-r Template \`${template.id}\` (${template.name}) to generate an editable R/ggplot2 static figure from my CSV/TSV data. First confirm the required columns, then call template_execute with my data file and suitable params.`;
+  return `Use Template \`${template.id}\` (${template.name}) to generate an editable figure from my CSV/TSV data. First confirm the required columns, then call template_execute with my data file and suitable params.`;
 }
 
 export function visualizationRTemplateToolCall(template: VisualizationRTemplateSummary): string {

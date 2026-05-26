@@ -75,7 +75,7 @@ impl ToolImpl for UnitSearchTool {
             "stageFilters": stage_filters,
             "count": matches.len(),
             "units": matches,
-            "note": "Use unit_describe with canonicalId for the full manifest/spec after narrowing candidates. Prefer template_execute for Template units and operator__* for atomic Operator units."
+            "note": "Use unit_describe with canonicalId for the full manifest/spec after narrowing candidates. Prefer template_execute for Template units and operator_execute for Operator/Operation units."
         });
         Ok(stream_single(StreamOutputItem::Text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string()),
@@ -96,7 +96,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "kind": {
                     "type": "string",
-                    "enum": ["operator", "template", "skill"],
+                    "enum": ["operator", "operation", "template", "skill"],
                     "description": "Optional Unit kind filter."
                 },
                 "category": {
@@ -125,4 +125,40 @@ pub fn schema() -> ToolSchema {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::streaming::StreamOutputItem;
+    use futures::StreamExt;
+
+    async fn execute_to_json(ctx: &ToolContext, args: UnitSearchArgs) -> serde_json::Value {
+        let mut stream = UnitSearchTool::execute(ctx, args)
+            .await
+            .expect("execute unit_search");
+        while let Some(item) = stream.next().await {
+            if let StreamOutputItem::Text(text) = item {
+                return serde_json::from_str(&text).expect("unit_search json");
+            }
+        }
+        panic!("unit_search did not return text output");
+    }
+
+    #[tokio::test]
+    async fn unit_search_note_prefers_operator_execute_over_operator_compatibility_tools() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let output =
+            execute_to_json(&ToolContext::new(tmp.path()), UnitSearchArgs::default()).await;
+        let note = output["note"].as_str().expect("note");
+
+        assert!(
+            note.contains("operator_execute"),
+            "unit_search should guide callers toward generic operator_execute"
+        );
+        assert!(
+            !note.contains("operator__"),
+            "unit_search should not steer callers toward dynamic operator__* tools by default"
+        );
+    }
 }

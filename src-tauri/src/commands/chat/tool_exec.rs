@@ -727,6 +727,11 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                 tool_name,
                 &effective_arguments,
             )
+        } else if tool_name == crate::domain::operators::OPERATOR_EXECUTE_TOOL_NAME {
+            crate::domain::operators::operator_execute_preflight_question_with_project_preferences(
+                project_root,
+                &effective_arguments,
+            )
         } else if tool_name == "template_execute" {
             crate::domain::templates::template_preflight_question_with_project_preferences(
                 project_root,
@@ -820,6 +825,11 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             if tool_name.starts_with(crate::domain::operators::OPERATOR_TOOL_PREFIX) {
                 crate::domain::operators::apply_operator_preflight_answers(
                     tool_name,
+                    &effective_arguments,
+                    &ask_output_json,
+                )
+            } else if tool_name == crate::domain::operators::OPERATOR_EXECUTE_TOOL_NAME {
+                crate::domain::operators::apply_operator_execute_preflight_answers(
                     &effective_arguments,
                     &ask_output_json,
                 )

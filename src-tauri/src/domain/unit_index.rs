@@ -1,8 +1,8 @@
 //! Read-only Unit Index over installed Operator / Template / Skill entries.
 //!
-//! The Unit Index is a routing/catalog view. It deliberately does not create
-//! new execution tools or change existing `operator__*`, `skill`, or retrieval
-//! runtime behavior.
+//! The Unit Index is a routing/catalog view. It deliberately separates
+//! discovery from execution: callers narrow Operator/Operation/Template/Skill
+//! candidates here, then use the corresponding generic execution tool.
 
 use crate::domain::operators::OperatorCandidateSummary;
 use crate::domain::skills::{SkillEntry, SkillSource};
@@ -18,6 +18,7 @@ const STAGE_INFERENCE_READ_LIMIT_BYTES: u64 = 16 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum UnitKind {
     Operator,
+    Operation,
     Template,
     Skill,
 }
@@ -26,6 +27,7 @@ impl UnitKind {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "operator" | "operators" => Some(Self::Operator),
+            "operation" | "operations" => Some(Self::Operation),
             "template" | "templates" => Some(Self::Template),
             "skill" | "skills" => Some(Self::Skill),
             _ => None,
@@ -35,6 +37,7 @@ impl UnitKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Operator => "operator",
+            Self::Operation => "operation",
             Self::Template => "template",
             Self::Skill => "skill",
         }
@@ -619,6 +622,7 @@ pub fn describe_unit_by_entry(
 ) -> Option<UnitDescription> {
     match unit.kind {
         UnitKind::Operator => describe_operator_unit(unit),
+        UnitKind::Operation => describe_operation_unit(unit),
         UnitKind::Template => describe_template_unit(unit),
         UnitKind::Skill => describe_skill_unit(unit, skills),
     }
@@ -629,9 +633,10 @@ pub fn operator_units_from_summaries(
 ) -> Vec<UnitIndexEntry> {
     summaries
         .into_iter()
-        .map(|summary| {
+        .flat_map(|summary| {
             let mut tags = summary.tags.clone();
             push_unique(&mut tags, "operator");
+            push_unique(&mut tags, "program");
             let stage_input = summary
                 .interface
                 .inputs
@@ -644,7 +649,7 @@ pub fn operator_units_from_summaries(
                 .keys()
                 .cloned()
                 .collect::<Vec<String>>();
-            UnitIndexEntry {
+            let operator_unit = UnitIndexEntry {
                 canonical_id: canonical_unit_id(
                     &summary.source_plugin,
                     UnitKind::Operator,
@@ -652,8 +657,8 @@ pub fn operator_units_from_summaries(
                 ),
                 id: summary.id.clone(),
                 kind: UnitKind::Operator,
-                provider_plugin: summary.source_plugin,
-                aliases: summary.enabled_aliases,
+                provider_plugin: summary.source_plugin.clone(),
+                aliases: summary.enabled_aliases.clone(),
                 classification: UnitClassification {
                     category: infer_operator_category(&summary.tags),
                     tags,
@@ -663,17 +668,84 @@ pub fn operator_units_from_summaries(
                 exposure: UnitExposure {
                     expose_to_agent: summary.exposed,
                 },
-                source_path: summary.manifest_path,
+                source_path: summary.manifest_path.clone(),
                 migration_target: None,
                 status: if summary.exposed {
                     "available".to_string()
                 } else {
                     "installed".to_string()
                 },
-                name: summary.name,
-                version: Some(summary.version),
-                description: summary.description,
-            }
+                name: summary.name.clone(),
+                version: Some(summary.version.clone()),
+                description: summary.description.clone(),
+            };
+            let operation_units = summary
+                .operations
+                .iter()
+                .map(|operation| {
+                    let mut tags = summary.tags.clone();
+                    extend_unique(&mut tags, operation.tags.clone());
+                    push_unique(&mut tags, "operator");
+                    push_unique(&mut tags, "operation");
+                    let stage_input = operation
+                        .interface
+                        .inputs
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<String>>();
+                    let stage_output = operation
+                        .interface
+                        .outputs
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<String>>();
+                    UnitIndexEntry {
+                        canonical_id: canonical_unit_id(
+                            &summary.source_plugin,
+                            UnitKind::Operation,
+                            &format!("{}#{}", summary.id, operation.id),
+                        ),
+                        id: format!("{}.{}", summary.id, operation.id),
+                        kind: UnitKind::Operation,
+                        provider_plugin: summary.source_plugin.clone(),
+                        aliases: summary
+                            .enabled_aliases
+                            .iter()
+                            .map(|alias| format!("{alias}.{}", operation.id))
+                            .collect(),
+                        classification: UnitClassification {
+                            category: infer_operator_category(&tags),
+                            tags,
+                            stage_input,
+                            stage_output,
+                        },
+                        exposure: UnitExposure {
+                            expose_to_agent: operation.exposed,
+                        },
+                        source_path: summary.manifest_path.clone(),
+                        migration_target: None,
+                        status: if operation.exposed {
+                            "available".to_string()
+                        } else {
+                            "installed".to_string()
+                        },
+                        name: operation.name.clone().or_else(|| {
+                            summary
+                                .name
+                                .clone()
+                                .map(|name| format!("{name} {}", operation.id))
+                        }),
+                        version: Some(summary.version.clone()),
+                        description: operation
+                            .description
+                            .clone()
+                            .or_else(|| summary.description.clone()),
+                    }
+                })
+                .collect::<Vec<_>>();
+            std::iter::once(operator_unit)
+                .chain(operation_units)
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -803,9 +875,51 @@ fn describe_operator_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
         details: serde_json::json!({
             "schemaKind": "OperatorCandidateSummary",
             "operator": summary,
-            "note": "Read-only Unit Index description. Execute atomic operators with existing operator__* tools; prefer template_execute when a Template wraps this operator as a higher-level workflow."
+            "note": "Read-only Unit Index description. Use operator_describe for operation schemas, then execute with operator_execute. Prefer template_execute when a Template wraps this operator as a higher-level workflow."
         }),
     })
+}
+
+fn describe_operation_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
+    let (operator_id, operation_id) = split_operation_unit_id(&unit.id)?;
+    let summary = crate::domain::operators::list_operator_summaries()
+        .into_iter()
+        .find(|summary| {
+            summary.source_plugin == unit.provider_plugin && summary.id == operator_id
+        })?;
+    let operation = summary
+        .operations
+        .iter()
+        .find(|operation| operation.id == operation_id)?;
+    Some(UnitDescription {
+        unit,
+        details: serde_json::json!({
+            "schemaKind": "OperatorOperationSummary",
+            "operator": {
+                "id": summary.id,
+                "name": summary.name,
+                "description": summary.description,
+                "sourcePlugin": summary.source_plugin,
+            },
+            "operation": operation,
+            "execute": {
+                "tool": "operator_execute",
+                "arguments": {
+                    "operator": summary.enabled_aliases.first().cloned().unwrap_or(summary.id),
+                    "operation": operation.id,
+                    "inputs": {},
+                    "params": {},
+                    "resources": {}
+                }
+            },
+            "note": "Read-only Operation description. Execute with operator_execute by passing the Operator program id/alias and this operation name."
+        }),
+    })
+}
+
+fn split_operation_unit_id(id: &str) -> Option<(String, String)> {
+    id.split_once('.')
+        .map(|(operator, operation)| (operator.to_string(), operation.to_string()))
 }
 
 fn describe_template_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
@@ -967,8 +1081,9 @@ fn sort_units(units: &mut [UnitIndexEntry]) {
 fn unit_kind_order(kind: UnitKind) -> u8 {
     match kind {
         UnitKind::Operator => 0,
-        UnitKind::Template => 1,
-        UnitKind::Skill => 2,
+        UnitKind::Operation => 1,
+        UnitKind::Template => 2,
+        UnitKind::Skill => 3,
     }
 }
 
@@ -1280,6 +1395,55 @@ mod tests {
         assert_eq!(
             execute["arguments"]["params"]["title"],
             "Basic scatter plot"
+        );
+    }
+
+    #[test]
+    fn operator_unit_descriptions_prefer_operator_execute_over_dynamic_operator_tools() {
+        let summary = crate::domain::operators::list_operator_summaries()
+            .into_iter()
+            .next();
+        let Some(summary) = summary else {
+            // Minimal test environments may not have a plugin marketplace mounted.
+            return;
+        };
+        let unit = UnitIndexEntry {
+            canonical_id: canonical_unit_id(
+                &summary.source_plugin,
+                UnitKind::Operator,
+                &summary.id,
+            ),
+            id: summary.id.clone(),
+            kind: UnitKind::Operator,
+            provider_plugin: summary.source_plugin.clone(),
+            aliases: summary.enabled_aliases.clone(),
+            classification: UnitClassification {
+                category: Some("operator".to_string()),
+                tags: summary.tags.clone(),
+                stage_input: summary.interface.inputs.keys().cloned().collect(),
+                stage_output: summary.interface.outputs.keys().cloned().collect(),
+            },
+            exposure: UnitExposure {
+                expose_to_agent: summary.exposed,
+            },
+            source_path: summary.manifest_path.clone(),
+            migration_target: None,
+            status: "available".to_string(),
+            name: summary.name.clone(),
+            version: Some(summary.version.clone()),
+            description: summary.description.clone(),
+        };
+
+        let description = describe_operator_unit(unit).expect("operator description");
+        let note = description.details["note"].as_str().expect("note");
+
+        assert!(
+            note.contains("operator_execute"),
+            "unit_describe operator notes should prefer generic operator_execute guidance"
+        );
+        assert!(
+            !note.contains("operator__"),
+            "unit_describe operator notes should stop steering callers toward operator__* by default"
         );
     }
 }

@@ -1,9 +1,11 @@
 //! Omiga operator runtime.
 //!
-//! Operators are plugin-provided, declarative execution units exposed to the
-//! model as dynamic `operator__{id}` tools.  They are intentionally separate
-//! from MCP: Omiga owns the workspace, resource, validation, artifact, and
-//! provenance lifecycle.
+//! Operators are plugin-provided, declarative program adapters.  A single
+//! Operator represents one executable program; program subcommands or modes are
+//! modeled as Operation parameters and are executed through the generic
+//! `operator_execute` tool.  The legacy dynamic `operator__{id}` compatibility
+//! path remains available for existing callers, but it is no longer the primary
+//! model-facing discovery surface.
 //!
 //! The MVP keeps rich structured errors and explicit execution context in one
 //! module so UI/model responses can include actionable field/run/log metadata.
@@ -21,8 +23,10 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 
 pub const OPERATOR_API_VERSION_V1ALPHA1: &str = "omiga.ai/operator/v1alpha1";
+pub const OPERATOR_API_VERSION_V1ALPHA2: &str = "omiga.ai/operator/v1alpha2";
 pub const OPERATOR_KIND: &str = "Operator";
 pub const OPERATOR_TOOL_PREFIX: &str = "operator__";
+pub const OPERATOR_EXECUTE_TOOL_NAME: &str = "operator_execute";
 const OPERATOR_STATE_DIR_NAME: &str = ".omiga";
 const REGISTRY_RELATIVE_PATH: &str = "operators/registry.json";
 /// Directory for user-created script operators: `~/.omiga/user-operators/`
@@ -338,6 +342,34 @@ pub struct OperatorExecutionSpec {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OperatorOperationSpec {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub interface: OperatorInterfaceSpec,
+    #[serde(default)]
+    pub smoke_tests: Vec<OperatorSmokeTestSpec>,
+    pub execution: OperatorExecutionSpec,
+    #[serde(default)]
+    pub preflight: Option<OperatorPreflightSpec>,
+    #[serde(default)]
+    pub runtime: Option<JsonValue>,
+    #[serde(default)]
+    pub cache: Option<JsonValue>,
+    #[serde(default)]
+    pub resources: BTreeMap<String, OperatorResourceSpec>,
+    #[serde(default)]
+    pub bindings: Vec<OperatorBindingSpec>,
+    #[serde(default)]
+    pub permissions: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OperatorPreflightSpec {
     #[serde(default)]
     pub questions: Vec<OperatorPreflightQuestionSpec>,
@@ -411,6 +443,8 @@ pub struct OperatorSpec {
     pub metadata: OperatorMetadata,
     pub interface: OperatorInterfaceSpec,
     #[serde(default)]
+    pub operations: BTreeMap<String, OperatorOperationSpec>,
+    #[serde(default)]
     pub smoke_tests: Vec<OperatorSmokeTestSpec>,
     pub execution: OperatorExecutionSpec,
     #[serde(default)]
@@ -440,6 +474,8 @@ pub struct OperatorCandidateSummary {
     pub source_plugin: String,
     pub manifest_path: String,
     pub interface: OperatorInterfaceSpec,
+    #[serde(default)]
+    pub operations: Vec<OperatorOperationSummary>,
     pub execution: OperatorExecutionSpec,
     #[serde(default)]
     pub preflight: Option<OperatorPreflightSpec>,
@@ -452,6 +488,25 @@ pub struct OperatorCandidateSummary {
     pub enabled_aliases: Vec<String>,
     pub exposed: bool,
     pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorOperationSummary {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub interface: OperatorInterfaceSpec,
+    #[serde(default)]
+    pub runtime: Option<JsonValue>,
+    #[serde(default)]
+    pub resources: BTreeMap<String, OperatorResourceSpec>,
+    #[serde(default)]
+    pub exposed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -558,7 +613,39 @@ struct RawOperatorManifest {
     interface: RawOperatorInterface,
     #[serde(default, alias = "tests", alias = "smoke")]
     smoke_tests: Vec<RawOperatorSmokeTestSpec>,
-    execution: RawOperatorExecution,
+    #[serde(default)]
+    execution: Option<RawOperatorExecution>,
+    #[serde(default)]
+    operations: BTreeMap<String, RawOperatorOperationSpec>,
+    #[serde(default)]
+    preflight: Option<OperatorPreflightSpec>,
+    #[serde(default)]
+    runtime: Option<JsonValue>,
+    #[serde(default)]
+    cache: Option<JsonValue>,
+    #[serde(default)]
+    resources: BTreeMap<String, RawResourceSpec>,
+    #[serde(default)]
+    bindings: Vec<OperatorBindingSpec>,
+    #[serde(default)]
+    permissions: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawOperatorOperationSpec {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    interface: RawOperatorInterface,
+    #[serde(default, alias = "tests", alias = "smoke")]
+    smoke_tests: Vec<RawOperatorSmokeTestSpec>,
+    #[serde(default)]
+    execution: Option<RawOperatorExecution>,
     #[serde(default)]
     preflight: Option<OperatorPreflightSpec>,
     #[serde(default)]
@@ -756,7 +843,9 @@ pub fn load_operator_manifest(
         .map_err(|err| format!("read operator manifest {}: {err}", manifest_path.display()))?;
     let parsed: RawOperatorManifest = serde_yaml::from_str(&raw)
         .map_err(|err| format!("parse operator manifest {}: {err}", manifest_path.display()))?;
-    if parsed.api_version != OPERATOR_API_VERSION_V1ALPHA1 {
+    if parsed.api_version != OPERATOR_API_VERSION_V1ALPHA1
+        && parsed.api_version != OPERATOR_API_VERSION_V1ALPHA2
+    {
         return Err(format!(
             "unsupported operator apiVersion `{}` in {}",
             parsed.api_version,
@@ -774,69 +863,257 @@ pub fn load_operator_manifest(
     if parsed.metadata.version.trim().is_empty() {
         return Err("operator metadata.version must not be empty".to_string());
     }
-    let argv = parsed
-        .execution
-        .argv
-        .or_else(|| parsed.execution.command.and_then(|command| command.argv))
+    let source = OperatorSource {
+        source_plugin: source_plugin.into(),
+        plugin_root: plugin_root.into(),
+        manifest_path: manifest_path.to_path_buf(),
+    };
+    let metadata = OperatorMetadata {
+        id: parsed.metadata.id,
+        version: parsed.metadata.version,
+        name: parsed.metadata.name,
+        description: parsed.metadata.description,
+        tags: parsed.metadata.tags,
+    };
+    let top_interface = operator_interface_from_raw(parsed.interface);
+    let top_resources = resources_from_raw(parsed.resources);
+    let top_execution = parsed.execution.and_then(raw_execution_argv);
+    let top_smoke_tests = parsed
+        .smoke_tests
+        .into_iter()
+        .map(OperatorSmokeTestSpec::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let top_bindings = parsed.bindings;
+    let top_preflight = parsed.preflight;
+    let top_runtime = parsed.runtime;
+    let top_cache = parsed.cache;
+    let top_permissions = parsed.permissions;
+    let operations = normalize_operator_operations(
+        parsed.operations,
+        &metadata,
+        &top_interface,
+        &top_smoke_tests,
+        top_execution.clone(),
+        top_preflight.clone(),
+        top_runtime.clone(),
+        top_cache.clone(),
+        &top_resources,
+        &top_bindings,
+        top_permissions.clone(),
+    )?;
+    let interface = aggregate_operation_interfaces(&operations);
+    let resources = aggregate_operation_resources(&operations);
+    let execution = representative_operation(&operations)
+        .map(|operation| operation.execution.clone())
+        .or_else(|| {
+            top_execution
+                .clone()
+                .map(|argv| OperatorExecutionSpec { argv })
+        })
         .ok_or_else(|| "operator execution.argv is required".to_string())?;
-    if argv.is_empty() {
+    if execution.argv.is_empty() {
         return Err("operator execution.argv must not be empty".to_string());
     }
     let spec = OperatorSpec {
         api_version: parsed.api_version,
         kind: parsed.kind,
-        metadata: OperatorMetadata {
-            id: parsed.metadata.id,
-            version: parsed.metadata.version,
-            name: parsed.metadata.name,
-            description: parsed.metadata.description,
-            tags: parsed.metadata.tags,
-        },
-        interface: OperatorInterfaceSpec {
-            inputs: parsed
-                .interface
-                .inputs
-                .into_iter()
-                .map(|(key, value)| (key, value.into()))
-                .collect(),
-            params: parsed
-                .interface
-                .params
-                .into_iter()
-                .map(|(key, value)| (key, value.into()))
-                .collect(),
-            outputs: parsed
-                .interface
-                .outputs
-                .into_iter()
-                .map(|(key, value)| (key, value.into()))
-                .collect(),
-        },
-        smoke_tests: parsed
-            .smoke_tests
-            .into_iter()
-            .map(OperatorSmokeTestSpec::try_from)
-            .collect::<Result<Vec<_>, _>>()?,
-        execution: OperatorExecutionSpec { argv },
-        preflight: parsed.preflight,
-        runtime: parsed.runtime,
-        cache: parsed.cache,
-        resources: parsed
-            .resources
-            .into_iter()
-            .map(|(key, value)| (key, value.into()))
-            .collect(),
-        bindings: parsed.bindings,
-        permissions: parsed.permissions,
-        source: OperatorSource {
-            source_plugin: source_plugin.into(),
-            plugin_root: plugin_root.into(),
-            manifest_path: manifest_path.to_path_buf(),
-        },
+        metadata,
+        interface,
+        operations,
+        smoke_tests: top_smoke_tests,
+        execution,
+        preflight: top_preflight,
+        runtime: top_runtime,
+        cache: top_cache,
+        resources,
+        bindings: top_bindings,
+        permissions: top_permissions,
+        source,
     };
     validate_operator_preflight(&spec)?;
     validate_operator_smoke_tests(&spec)?;
+    validate_operator_operations(&spec)?;
     Ok(spec)
+}
+
+fn raw_execution_argv(execution: RawOperatorExecution) -> Option<Vec<String>> {
+    execution
+        .argv
+        .or_else(|| execution.command.and_then(|command| command.argv))
+}
+
+fn operator_interface_from_raw(raw: RawOperatorInterface) -> OperatorInterfaceSpec {
+    OperatorInterfaceSpec {
+        inputs: raw
+            .inputs
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect(),
+        params: raw
+            .params
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect(),
+        outputs: raw
+            .outputs
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect(),
+    }
+}
+
+fn resources_from_raw(
+    raw: BTreeMap<String, RawResourceSpec>,
+) -> BTreeMap<String, OperatorResourceSpec> {
+    raw.into_iter()
+        .map(|(key, value)| (key, value.into()))
+        .collect()
+}
+
+fn merge_operator_interfaces(
+    base: &OperatorInterfaceSpec,
+    overlay: OperatorInterfaceSpec,
+) -> OperatorInterfaceSpec {
+    let mut merged = base.clone();
+    merged.inputs.extend(overlay.inputs);
+    merged.params.extend(overlay.params);
+    merged.outputs.extend(overlay.outputs);
+    merged
+}
+
+fn normalize_operator_operations(
+    raw_operations: BTreeMap<String, RawOperatorOperationSpec>,
+    metadata: &OperatorMetadata,
+    top_interface: &OperatorInterfaceSpec,
+    top_smoke_tests: &[OperatorSmokeTestSpec],
+    top_execution: Option<Vec<String>>,
+    top_preflight: Option<OperatorPreflightSpec>,
+    top_runtime: Option<JsonValue>,
+    top_cache: Option<JsonValue>,
+    top_resources: &BTreeMap<String, OperatorResourceSpec>,
+    top_bindings: &[OperatorBindingSpec],
+    top_permissions: Option<JsonValue>,
+) -> Result<BTreeMap<String, OperatorOperationSpec>, String> {
+    if raw_operations.is_empty() {
+        let argv = top_execution
+            .clone()
+            .ok_or_else(|| "operator execution.argv is required".to_string())?;
+        if argv.is_empty() {
+            return Err("operator execution.argv must not be empty".to_string());
+        }
+        return Ok(BTreeMap::from([(
+            "run".to_string(),
+            OperatorOperationSpec {
+                name: metadata.name.clone(),
+                description: metadata.description.clone(),
+                tags: metadata.tags.clone(),
+                interface: top_interface.clone(),
+                smoke_tests: top_smoke_tests.to_vec(),
+                execution: OperatorExecutionSpec { argv },
+                preflight: top_preflight,
+                runtime: top_runtime,
+                cache: top_cache,
+                resources: top_resources.clone(),
+                bindings: top_bindings.to_vec(),
+                permissions: top_permissions,
+            },
+        )]));
+    }
+
+    let mut operations = BTreeMap::new();
+    for (id, raw) in raw_operations {
+        validate_operator_operation_id(&id)?;
+        let argv = raw
+            .execution
+            .and_then(raw_execution_argv)
+            .or_else(|| top_execution.clone())
+            .ok_or_else(|| format!("operator operations.{id}.execution.argv is required"))?;
+        if argv.is_empty() {
+            return Err(format!(
+                "operator operations.{id}.execution.argv must not be empty"
+            ));
+        }
+        let operation_interface =
+            merge_operator_interfaces(top_interface, operator_interface_from_raw(raw.interface));
+        let mut operation_resources = top_resources.clone();
+        operation_resources.extend(resources_from_raw(raw.resources));
+        let smoke_tests = if raw.smoke_tests.is_empty() {
+            top_smoke_tests.to_vec()
+        } else {
+            raw.smoke_tests
+                .into_iter()
+                .map(OperatorSmokeTestSpec::try_from)
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        operations.insert(
+            id,
+            OperatorOperationSpec {
+                name: raw.name,
+                description: raw.description,
+                tags: raw.tags,
+                interface: operation_interface,
+                smoke_tests,
+                execution: OperatorExecutionSpec { argv },
+                preflight: raw.preflight.or_else(|| top_preflight.clone()),
+                runtime: raw.runtime.or_else(|| top_runtime.clone()),
+                cache: raw.cache.or_else(|| top_cache.clone()),
+                resources: operation_resources,
+                bindings: if raw.bindings.is_empty() {
+                    top_bindings.to_vec()
+                } else {
+                    raw.bindings
+                },
+                permissions: raw.permissions.or_else(|| top_permissions.clone()),
+            },
+        );
+    }
+    Ok(operations)
+}
+
+fn validate_operator_operation_id(id: &str) -> Result<(), String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("operator operation id must not be empty".to_string());
+    }
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(format!(
+            "operator operation id `{id}` may contain only letters, numbers, `_`, or `-`"
+        ));
+    }
+    Ok(())
+}
+
+fn aggregate_operation_interfaces(
+    operations: &BTreeMap<String, OperatorOperationSpec>,
+) -> OperatorInterfaceSpec {
+    let mut aggregate = OperatorInterfaceSpec::default();
+    for operation in operations.values() {
+        aggregate.inputs.extend(operation.interface.inputs.clone());
+        aggregate.params.extend(operation.interface.params.clone());
+        aggregate
+            .outputs
+            .extend(operation.interface.outputs.clone());
+    }
+    aggregate
+}
+
+fn aggregate_operation_resources(
+    operations: &BTreeMap<String, OperatorOperationSpec>,
+) -> BTreeMap<String, OperatorResourceSpec> {
+    let mut aggregate = BTreeMap::new();
+    for operation in operations.values() {
+        aggregate.extend(operation.resources.clone());
+    }
+    aggregate
+}
+
+fn representative_operation(
+    operations: &BTreeMap<String, OperatorOperationSpec>,
+) -> Option<&OperatorOperationSpec> {
+    operations.get("run").or_else(|| operations.values().next())
 }
 
 fn validate_operator_preflight(spec: &OperatorSpec) -> Result<(), String> {
@@ -948,6 +1225,19 @@ fn validate_operator_smoke_tests(spec: &OperatorSpec) -> Result<(), String> {
                 .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
         apply_equal_bindings(spec, &mut effective_params, &effective_resources)
             .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
+    }
+    Ok(())
+}
+
+fn validate_operator_operations(spec: &OperatorSpec) -> Result<(), String> {
+    for operation_id in spec.operations.keys() {
+        validate_operator_operation_id(operation_id)?;
+        let operation_spec = operator_spec_for_operation(spec, operation_id)
+            .map_err(|error| format!("operator operation `{operation_id}`: {}", error.message))?;
+        validate_operator_preflight(&operation_spec)
+            .map_err(|error| format!("operator operation `{operation_id}`: {error}"))?;
+        validate_operator_smoke_tests(&operation_spec)
+            .map_err(|error| format!("operator operation `{operation_id}`: {error}"))?;
     }
     Ok(())
 }
@@ -2024,6 +2314,7 @@ fn operator_candidate_summary(
     enabled_aliases: Vec<String>,
 ) -> OperatorCandidateSummary {
     let exposed = !enabled_aliases.is_empty();
+    let operations = operator_operation_summaries(&candidate, exposed);
     OperatorCandidateSummary {
         id: candidate.metadata.id,
         version: candidate.metadata.version,
@@ -2037,6 +2328,7 @@ fn operator_candidate_summary(
             .to_string_lossy()
             .into_owned(),
         interface: candidate.interface,
+        operations,
         execution: candidate.execution,
         preflight: candidate.preflight,
         runtime: candidate.runtime,
@@ -2048,68 +2340,52 @@ fn operator_candidate_summary(
     }
 }
 
-pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
-    resolve_enabled_operators()
-        .into_iter()
-        .map(operator_tool_schema)
+fn operator_operation_summaries(
+    candidate: &OperatorSpec,
+    exposed: bool,
+) -> Vec<OperatorOperationSummary> {
+    candidate
+        .operations
+        .iter()
+        .map(|(id, operation)| OperatorOperationSummary {
+            id: id.clone(),
+            name: operation.name.clone(),
+            description: operation.description.clone(),
+            tags: operation.tags.clone(),
+            interface: operation.interface.clone(),
+            runtime: operation.runtime.clone(),
+            resources: operation.resources.clone(),
+            exposed,
+        })
         .collect()
 }
 
-fn operator_prompt_inline_text(raw: &str, max_chars: usize) -> String {
-    raw.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(max_chars)
-        .collect()
+pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
+    Vec::new()
 }
 
 fn format_enabled_operator_tools_system_section_from_resolved(
-    mut resolved: Vec<ResolvedOperator>,
+    resolved: Vec<ResolvedOperator>,
 ) -> Option<String> {
     if resolved.is_empty() {
         return None;
     }
 
-    resolved.sort_by(|left, right| left.alias.cmp(&right.alias));
-    let total = resolved.len();
+    let program_count = resolved.len();
+    let operation_count = resolved
+        .iter()
+        .map(|operator| operator_operation_names(&operator.spec).len().max(1))
+        .sum::<usize>();
     let mut lines = vec![
-        "## Plugin operator tools (auto-exposed)".to_string(),
-        "Active plugins dynamically expose atomic Operator tools as `operator__{id}`. When a user request matches one of these tools, prefer the matching `operator__...` tool over ad-hoc shell/code. Do not ask the user to manually register operator tools; enabling/disabling the owning plugin controls exposure.".to_string(),
+        "## Plugin operator execution".to_string(),
+        format!(
+            "Active plugins register {program_count} Operator programs with {operation_count} operations. Use `unit_search` / `unit_describe` or `operator_describe` to narrow candidates, then call `operator_execute` with `operator` and `operation`. Subcommands are operations, not separate tools; do not ask the user to manually register operator tools."
+        ),
         String::new(),
     ];
-
-    for operator in resolved.into_iter().take(40) {
-        let tool_name = format!("{OPERATOR_TOOL_PREFIX}{}", operator.alias);
-        let display = operator
-            .spec
-            .metadata
-            .name
-            .as_deref()
-            .unwrap_or(operator.spec.metadata.id.as_str());
-        let description = operator
-            .spec
-            .metadata
-            .description
-            .as_deref()
-            .map(|value| operator_prompt_inline_text(value, 150))
-            .filter(|value| !value.is_empty());
-        let description = description
-            .map(|value| format!(" — {value}"))
-            .unwrap_or_default();
-        lines.push(format!(
-            "- `{}`: {}{} (plugin: `{}`, operator id: `{}`)",
-            tool_name,
-            operator_prompt_inline_text(display, 80),
-            description,
-            operator_prompt_inline_text(&operator.spec.source.source_plugin, 96),
-            operator_prompt_inline_text(&operator.spec.metadata.id, 96),
-        ));
-    }
-
-    if total > 40 {
-        lines.push(format!("- …and {} more operator tools.", total - 40));
-    }
+    lines.push(
+        "Default routing flow: search/describe first, execute second. Legacy dynamic aliases remain available only for older callers and should not be used for new routing.".to_string(),
+    );
 
     Some(lines.join("\n"))
 }
@@ -2191,14 +2467,17 @@ fn operator_resource_profile_description(spec: &OperatorSpec) -> Option<String> 
 pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
     let mut properties = JsonMap::new();
     let preflight_questions = preflight_question_text_by_param(spec);
+    let operation_names = operator_operation_names(spec);
     properties.insert(
         "inputs".to_string(),
         fields_object_schema(&spec.interface.inputs, true, None),
     );
-    properties.insert(
-        "params".to_string(),
-        fields_object_schema(&spec.interface.params, true, Some(&preflight_questions)),
-    );
+    let mut params_schema =
+        fields_object_schema(&spec.interface.params, true, Some(&preflight_questions));
+    if operation_names.len() > 1 {
+        add_operation_to_params_schema(&mut params_schema, &operation_names);
+    }
+    properties.insert("params".to_string(), params_schema);
     properties.insert(
         "resources".to_string(),
         resources_object_schema(&spec.resources),
@@ -2213,6 +2492,132 @@ pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
         "required": required,
         "additionalProperties": false
     })
+}
+
+pub fn operator_operation_names(spec: &OperatorSpec) -> Vec<String> {
+    let mut names = spec.operations.keys().cloned().collect::<Vec<_>>();
+    if names.is_empty() && !spec.execution.argv.is_empty() {
+        names.push("run".to_string());
+    }
+    names
+}
+
+fn add_operation_to_params_schema(params_schema: &mut JsonValue, operation_names: &[String]) {
+    let JsonValue::Object(params) = params_schema else {
+        return;
+    };
+    let properties = params
+        .entry("properties".to_string())
+        .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+    if let JsonValue::Object(properties) = properties {
+        properties.insert(
+            "operation".to_string(),
+            json!({
+                "type": "string",
+                "enum": operation_names,
+                "description": "Operator operation/subcommand to run. Subcommands are operation parameters, not separate operator tools."
+            }),
+        );
+    }
+    let required = params
+        .entry("required".to_string())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    if let JsonValue::Array(required) = required {
+        if !required
+            .iter()
+            .any(|item| item.as_str() == Some("operation"))
+        {
+            required.push(JsonValue::String("operation".to_string()));
+        }
+    }
+}
+
+fn operator_spec_for_operation(
+    spec: &OperatorSpec,
+    operation_id: &str,
+) -> Result<OperatorSpec, OperatorToolError> {
+    let operation_id = operation_id.trim();
+    if spec.operations.is_empty() {
+        if operation_id.is_empty() || operation_id == "run" {
+            return Ok(spec.clone());
+        }
+        return Err(OperatorToolError::new(
+            "unknown_operation",
+            false,
+            format!(
+                "Operator `{}` does not declare operation `{operation_id}`.",
+                spec.metadata.id
+            ),
+        )
+        .with_suggested_action(
+            "Use operator_describe or unit_describe to inspect supported operations.",
+        ));
+    }
+    let operation = spec.operations.get(operation_id).ok_or_else(|| {
+        let supported = operator_operation_names(spec).join(", ");
+        OperatorToolError::new(
+            "unknown_operation",
+            false,
+            format!(
+                "Operator `{}` does not declare operation `{operation_id}`. Supported operations: {supported}.",
+                spec.metadata.id
+            ),
+        )
+        .with_suggested_action("Retry with one of the operation enum values from operator_describe/unit_describe.")
+    })?;
+    let mut effective = spec.clone();
+    if let Some(description) = operation.description.clone() {
+        effective.metadata.description = Some(description);
+    }
+    effective.interface = operation.interface.clone();
+    effective.smoke_tests = operation.smoke_tests.clone();
+    effective.execution = operation.execution.clone();
+    effective.preflight = operation.preflight.clone();
+    effective.runtime = operation.runtime.clone();
+    effective.cache = operation.cache.clone();
+    effective.resources = operation.resources.clone();
+    effective.bindings = operation.bindings.clone();
+    effective.permissions = operation.permissions.clone();
+    effective.operations = BTreeMap::from([(operation_id.to_string(), operation.clone())]);
+    Ok(effective)
+}
+
+fn operator_operation_from_invocation(
+    spec: &OperatorSpec,
+    invocation: &OperatorInvocation,
+) -> Result<String, OperatorToolError> {
+    let operation_from_param = invocation
+        .params
+        .get("operation")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let operation = invocation
+        .operation
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or(operation_from_param);
+    let names = operator_operation_names(spec);
+    match (operation, names.as_slice()) {
+        (Some(operation), _) => Ok(operation),
+        (None, [only]) => Ok(only.clone()),
+        (None, []) => Ok("run".to_string()),
+        (None, many) => Err(OperatorToolError::new(
+            "missing_operation",
+            false,
+            format!(
+                "Operator `{}` has multiple operations; choose one of: {}.",
+                spec.metadata.id,
+                many.join(", ")
+            ),
+        )
+        .with_suggested_action(
+            "Set `operation` on operator_execute, or `params.operation` for legacy compatibility.",
+        )),
+    }
 }
 
 fn preflight_question_text_by_param(spec: &OperatorSpec) -> BTreeMap<String, String> {
@@ -2381,11 +2786,31 @@ pub fn operator_preflight_question_with_project_preferences(
 ) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
     let resolved = resolve_operator_alias(tool_name).ok()?;
     let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
+    let invocation = serde_json::from_str::<OperatorInvocation>(arguments).ok()?;
+    let operation_id = operator_operation_from_invocation(&resolved.spec, &invocation).ok()?;
+    let operation_spec = operator_spec_for_operation(&resolved.spec, &operation_id).ok()?;
     let params = value.get("params").and_then(JsonValue::as_object);
-    let recommended_params = operator_project_preference_params(project_root, &resolved.spec);
+    let recommended_params = operator_project_preference_params(project_root, &operation_spec);
     operator_preflight_question_for_spec_with_recommended_params(
-        &resolved.spec,
+        &operation_spec,
         Some(resolved.alias.as_str()),
+        params,
+        recommended_params.as_ref(),
+    )
+}
+
+pub fn operator_execute_preflight_question_with_project_preferences(
+    project_root: &Path,
+    arguments: &str,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    let (alias, resolved, invocation, value) = operator_execute_parts(arguments).ok()?;
+    let operation_id = operator_operation_from_invocation(&resolved.spec, &invocation).ok()?;
+    let operation_spec = operator_spec_for_operation(&resolved.spec, &operation_id).ok()?;
+    let params = value.get("params").and_then(JsonValue::as_object);
+    let recommended_params = operator_project_preference_params(project_root, &operation_spec);
+    operator_preflight_question_for_spec_with_recommended_params(
+        &operation_spec,
+        Some(alias.as_str()),
         params,
         recommended_params.as_ref(),
     )
@@ -2460,10 +2885,99 @@ pub fn apply_operator_preflight_answers(
         Ok(resolved) => resolved,
         Err(_) => return Ok(arguments.to_string()),
     };
-    let Some(preflight) = resolved.spec.preflight.as_ref() else {
+    let invocation = match serde_json::from_str::<OperatorInvocation>(arguments) {
+        Ok(invocation) => invocation,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let operation_id = match operator_operation_from_invocation(&resolved.spec, &invocation) {
+        Ok(operation_id) => operation_id,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let operation_spec = match operator_spec_for_operation(&resolved.spec, &operation_id) {
+        Ok(spec) => spec,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let Some(preflight) = operation_spec.preflight.as_ref() else {
         return Ok(arguments.to_string());
     };
-    apply_operator_preflight_answers_for_spec(&resolved.spec, preflight, arguments, ask_user_output)
+    apply_operator_preflight_answers_for_spec(
+        &operation_spec,
+        preflight,
+        arguments,
+        ask_user_output,
+    )
+}
+
+pub fn apply_operator_execute_preflight_answers(
+    arguments: &str,
+    ask_user_output: &JsonValue,
+) -> Result<String, String> {
+    let (_alias, resolved, invocation, _value) = match operator_execute_parts(arguments) {
+        Ok(parts) => parts,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let operation_id = match operator_operation_from_invocation(&resolved.spec, &invocation) {
+        Ok(operation_id) => operation_id,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let operation_spec = match operator_spec_for_operation(&resolved.spec, &operation_id) {
+        Ok(spec) => spec,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let Some(preflight) = operation_spec.preflight.as_ref() else {
+        return Ok(arguments.to_string());
+    };
+    apply_operator_preflight_answers_for_spec(
+        &operation_spec,
+        preflight,
+        arguments,
+        ask_user_output,
+    )
+}
+
+fn operator_execute_parts(
+    arguments: &str,
+) -> Result<(String, ResolvedOperator, OperatorInvocation, JsonValue), String> {
+    let value = serde_json::from_str::<JsonValue>(arguments)
+        .map_err(|err| format!("Invalid operator_execute arguments JSON: {err}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "operator_execute arguments must be an object".to_string())?;
+    let alias = object
+        .get("operator")
+        .or_else(|| object.get("program"))
+        .or_else(|| object.get("id"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "operator_execute requires operator/program/id".to_string())?
+        .to_string();
+    let resolved = resolve_operator_alias(&alias).map_err(|error| error.message)?;
+    let invocation = OperatorInvocation {
+        operation: object
+            .get("operation")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        inputs: object_map_to_btree(object.get("inputs")),
+        params: object_map_to_btree(object.get("params")),
+        resources: object_map_to_btree(object.get("resources")),
+        metadata: object_map_to_btree(object.get("metadata")),
+    };
+    Ok((alias, resolved, invocation, value))
+}
+
+fn object_map_to_btree(value: Option<&JsonValue>) -> BTreeMap<String, JsonValue> {
+    value
+        .and_then(JsonValue::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn apply_operator_preflight_answers_for_spec(
@@ -2902,6 +3416,8 @@ fn resources_object_schema(resources: &BTreeMap<String, OperatorResourceSpec>) -
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorInvocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
     #[serde(default)]
     pub inputs: BTreeMap<String, JsonValue>,
     #[serde(default)]
@@ -3830,6 +4346,12 @@ async fn execute_resolved_operator(
     invocation: OperatorInvocation,
     run_context: Option<OperatorRunContext>,
 ) -> Result<OperatorRunResult, OperatorToolError> {
+    let operation_id = operator_operation_from_invocation(&resolved.spec, &invocation)?;
+    let mut resolved = resolved;
+    resolved.spec = operator_spec_for_operation(&resolved.spec, &operation_id)?;
+    let mut invocation = invocation;
+    invocation.params.remove("operation");
+
     if !runtime_supported(ctx, &resolved.spec) {
         return Err(OperatorToolError::new(
             "runtime_unsupported",
@@ -3866,6 +4388,7 @@ async fn execute_resolved_operator(
     let supplied_param_names = invocation.params.keys().cloned().collect::<BTreeSet<_>>();
     let mut effective_params = apply_param_defaults(&resolved.spec, invocation.params);
     validate_field_values("params", &resolved.spec.interface.params, &effective_params)?;
+    effective_params.insert("operation".to_string(), json!(operation_id));
     let effective_resources =
         apply_resource_defaults_and_overrides(&resolved.spec, invocation.resources)?;
     apply_equal_bindings(&resolved.spec, &mut effective_params, &effective_resources)?;
@@ -5921,7 +6444,7 @@ fn operator_uses_slurm_scheduler(
     spec: &OperatorSpec,
     ctx: &crate::domain::tools::ToolContext,
 ) -> bool {
-    if ctx.execution_environment.trim().to_ascii_lowercase() != "ssh" {
+    if !ctx.execution_environment.trim().eq_ignore_ascii_case("ssh") {
         return false;
     }
     let Some(runtime) = spec.runtime.as_ref() else {
@@ -6100,7 +6623,7 @@ fn sacct_suggested_action(
     match category {
         SacctFailureCategory::Oom => {
             let max_rss_kb = max_rss_kb?;
-            let suggested_mb = (((max_rss_kb as u128) * 3) + 2047) / 2048;
+            let suggested_mb = ((max_rss_kb as u128) * 3).div_ceil(2048);
             Some(format!("Re-run with --mem={}MB", suggested_mb.max(1)))
         }
         SacctFailureCategory::Timeout => {
@@ -9485,34 +10008,59 @@ mod tests {
         (plugin_root, manifest)
     }
 
-    fn curated_operator_manifest_path(plugin_name: &str, operator_dir: &str) -> (PathBuf, PathBuf) {
+    fn curated_marketplace_root() -> PathBuf {
         let marketplace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root")
             .parent()
             .expect("workspace root")
             .join("omiga-plugins");
+        marketplace_root
+    }
+
+    fn curated_marketplace_plugin_roots() -> Vec<(String, PathBuf)> {
+        let marketplace_root = curated_marketplace_root();
         let raw = std::fs::read_to_string(marketplace_root.join("marketplace.json"))
             .expect("marketplace manifest");
         let manifest_json: serde_json::Value =
             serde_json::from_str(&raw).expect("marketplace json");
-        let source_path = manifest_json
+        manifest_json
             .get("plugins")
             .and_then(|plugins| plugins.as_array())
-            .and_then(|plugins| {
-                plugins.iter().find_map(|entry| {
-                    (entry.get("name").and_then(|name| name.as_str()) == Some(plugin_name))
-                        .then(|| entry.get("source")?.get("path")?.as_str())
-                        .flatten()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.get("name")?.as_str()?.to_string();
+                let source_path = entry.get("source")?.get("path")?.as_str()?;
+                Some((
+                    name,
+                    marketplace_root.join(source_path.trim_start_matches("./")),
+                ))
+            })
+            .collect()
+    }
+
+    fn curated_operator_loaded_plugins() -> Vec<crate::domain::plugins::LoadedPlugin> {
+        curated_marketplace_plugin_roots()
+            .into_iter()
+            .filter_map(|(plugin_name, plugin_root)| {
+                let manifest = crate::domain::plugins::load_plugin_manifest(&plugin_root)?;
+                manifest.operators.as_ref()?;
+                Some(crate::domain::plugins::LoadedPlugin {
+                    id: format!("{plugin_name}@omiga-curated"),
+                    manifest_name: Some(plugin_name),
+                    display_name: None,
+                    description: None,
+                    root: plugin_root,
+                    enabled: true,
+                    skill_roots: Vec::new(),
+                    mcp_servers: HashMap::new(),
+                    apps: Vec::new(),
+                    retrieval: None,
+                    error: None,
                 })
             })
-            .unwrap_or_else(|| panic!("{plugin_name} marketplace plugin"));
-        let plugin_root = marketplace_root.join(source_path.trim_start_matches("./"));
-        let manifest = plugin_root
-            .join("operators")
-            .join(operator_dir)
-            .join("operator.yaml");
-        (plugin_root, manifest)
+            .collect()
     }
 
     const WRITE_TEXT_REPORT_OPERATOR: &str = r#"apiVersion: omiga.ai/operator/v1alpha1
@@ -9729,6 +10277,7 @@ printf 'wrote %s line(s) plus runtime marker to %s\n' "$repeat" "$report"
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec![
@@ -9772,6 +10321,7 @@ printf 'wrote %s line(s) plus runtime marker to %s\n' "$repeat" "$report"
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
@@ -9802,6 +10352,7 @@ printf 'wrote %s line(s) plus runtime marker to %s\n' "$repeat" "$report"
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: argv.iter().map(|value| value.to_string()).collect(),
@@ -9822,6 +10373,7 @@ printf 'wrote %s line(s) plus runtime marker to %s\n' "$repeat" "$report"
 
     fn input_file_invocation(input: &str) -> OperatorInvocation {
         OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::from([("input".to_string(), JsonValue::String(input.to_string()))]),
             params: BTreeMap::new(),
             resources: BTreeMap::new(),
@@ -10217,97 +10769,69 @@ execution:
     }
 
     #[test]
-    fn discovers_curated_ngs_operator_plugins() {
-        let cases = [
-            (
-                "ngs-sequence-processing",
-                "seqtk-sample",
-                "seqtk_sample_reads",
-                "/bin/sh",
-            ),
-            (
-                "ngs-quality-control",
-                "seqtk-fqchk",
-                "seqtk_fqchk",
-                "/bin/sh",
-            ),
-        ];
+    fn discovers_curated_operator_plugins_without_core_plugin_name_assumptions() {
+        let plugins = curated_operator_loaded_plugins();
+        assert!(
+            !plugins.is_empty(),
+            "external marketplace should provide operator plugins"
+        );
+        let plugin_refs = plugins.iter().collect::<Vec<_>>();
+        let candidates = discover_operator_candidates_from_plugins(plugin_refs);
+        assert!(
+            !candidates.is_empty(),
+            "operator plugins should expose operator candidates"
+        );
 
-        for (plugin_name, operator_dir, operator_id, first_argv) in cases {
-            let (plugin_root, manifest) = curated_operator_manifest_path(plugin_name, operator_dir);
-            assert!(manifest.is_file(), "{plugin_name} manifest should exist");
-
-            let plugin = crate::domain::plugins::LoadedPlugin {
-                id: format!("{plugin_name}@omiga-curated"),
-                manifest_name: Some(plugin_name.to_string()),
-                display_name: None,
-                description: None,
-                root: plugin_root,
-                enabled: true,
-                skill_roots: Vec::new(),
-                mcp_servers: HashMap::new(),
-                apps: Vec::new(),
-                retrieval: None,
-                error: None,
-            };
-
-            let candidates = discover_operator_candidates_from_plugins([&plugin]);
-            // Plugins may bundle multiple operators (e.g. NGS seqtk plugins ship
-            // several subcommand wrappers). Look up the one this test case targets.
-            let operator = candidates
-                .iter()
-                .find(|c| c.metadata.id == operator_id)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{plugin_name} should expose operator id {operator_id}, found: {:?}",
-                        candidates
-                            .iter()
-                            .map(|c| &c.metadata.id)
-                            .collect::<Vec<_>>()
-                    )
-                });
-            assert_eq!(operator.execution.argv[0], first_argv);
-            assert!(matches!(
-                operator.interface.outputs["summary"].kind,
-                OperatorFieldKind::Json
-            ));
-            assert_eq!(
-                operator.source.source_plugin,
-                format!("{plugin_name}@omiga-curated")
+        let mut aliases = HashSet::new();
+        let mut operation_count = 0usize;
+        for candidate in &candidates {
+            assert!(
+                aliases.insert(candidate.metadata.id.clone()),
+                "duplicate marketplace operator id `{}`",
+                candidate.metadata.id
             );
+            assert!(
+                candidate.source.source_plugin.ends_with("@omiga-curated"),
+                "candidate source should stay scoped to its plugin: {}",
+                candidate.source.source_plugin
+            );
+            assert!(
+                !candidate.operations.is_empty(),
+                "operator `{}` should expose at least one operation",
+                candidate.metadata.id
+            );
+            operation_count += candidate.operations.len();
         }
+        assert!(operation_count >= candidates.len());
     }
 
     #[test]
-    fn transcriptomics_analysis_plugin_does_not_expose_operator_units() {
-        let (plugin_root, _) = curated_operator_manifest_path("transcriptomics", "unused");
-        assert!(
-            !plugin_root.join("operators").exists(),
-            "transcriptomics keeps template-only public units"
-        );
-        assert!(
-            plugin_root.join("template_backing_operators").is_dir(),
-            "private backing specs preserve template validation without exposing operators"
-        );
-        let plugin = crate::domain::plugins::LoadedPlugin {
-            id: "transcriptomics@omiga-curated".to_string(),
-            manifest_name: Some("transcriptomics".to_string()),
-            display_name: Some("Transcriptomics".to_string()),
-            description: None,
-            root: plugin_root,
-            enabled: true,
-            skill_roots: Vec::new(),
-            mcp_servers: HashMap::new(),
-            apps: Vec::new(),
-            retrieval: None,
-            error: None,
-        };
+    fn marketplace_plugins_without_operator_roots_do_not_expose_operator_units() {
+        let plugin = curated_marketplace_plugin_roots()
+            .into_iter()
+            .find_map(|(plugin_name, plugin_root)| {
+                let manifest = crate::domain::plugins::load_plugin_manifest(&plugin_root)?;
+                if manifest.operators.is_some() {
+                    return None;
+                }
+                Some(crate::domain::plugins::LoadedPlugin {
+                    id: format!("{plugin_name}@omiga-curated"),
+                    manifest_name: Some(plugin_name),
+                    display_name: None,
+                    description: None,
+                    root: plugin_root,
+                    enabled: true,
+                    skill_roots: Vec::new(),
+                    mcp_servers: HashMap::new(),
+                    apps: Vec::new(),
+                    retrieval: None,
+                    error: None,
+                })
+            })
+            .expect("marketplace plugin without operators");
 
         let candidates = discover_operator_candidates_from_plugins([&plugin]);
-        assert!(
-            candidates.is_empty(),
-            "Transcriptomics should expose templates only; operator versions are private backing specs"
-        );
+        assert!(candidates.is_empty());
     }
 
     #[test]
@@ -10952,24 +11476,66 @@ execution:
     }
 
     #[test]
-    fn operator_system_section_tells_agents_to_use_auto_exposed_tools() {
+    fn operator_system_section_tells_agents_to_use_operator_execute() {
         let tmp = TempDir::new().unwrap();
         let section =
             format_enabled_operator_tools_system_section_from_resolved(vec![ResolvedOperator {
-                alias: "seqtk_comp".to_string(),
-                spec: simple_operator_spec(
-                    &tmp,
-                    "seqtk_comp",
-                    "1",
-                    "ngs-quality-control@omiga-curated",
-                ),
+                alias: "demo_program".to_string(),
+                spec: simple_operator_spec(&tmp, "demo_program", "1", "demo-plugin@test-market"),
             }])
             .expect("operator tools prompt section");
 
-        assert!(section.contains("Plugin operator tools (auto-exposed)"));
-        assert!(section.contains("`operator__seqtk_comp`"));
-        assert!(section.contains("prefer the matching `operator__...` tool"));
-        assert!(section.contains("Do not ask the user to manually register"));
+        assert!(section.contains("Plugin operator execution"));
+        assert!(section.contains("operator_execute"));
+        assert!(section.contains("Subcommands are operations, not separate tools"));
+        assert!(section.contains("do not ask the user to manually register"));
+    }
+
+    #[test]
+    fn operator_tool_schema_uses_dynamic_operator_prefix_for_compatibility() {
+        let tmp = TempDir::new().unwrap();
+        let schema = operator_tool_schema(ResolvedOperator {
+            alias: "fastqc".to_string(),
+            spec: simple_operator_spec(&tmp, "fastqc", "1", "bio@builtin"),
+        });
+
+        assert_eq!(schema.name, "operator__fastqc");
+    }
+
+    #[test]
+    fn operator_parameters_schema_adds_operation_enum_for_multi_operation_specs() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = tmp.path().join("operator.yaml");
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: demo_program
+  version: "1"
+operations:
+  sample:
+    description: Sample reads
+  comp:
+    description: Summarize composition
+interface:
+  inputs:
+    reads:
+      kind: file_array
+      required: true
+execution:
+  argv: ["demo-program", "${params.operation}", "${inputs.reads}"]
+"#,
+        )
+        .unwrap();
+
+        let spec = load_operator_manifest(&manifest, "p@m", tmp.path()).unwrap();
+        let schema = operator_parameters_schema(&spec);
+        let operation = &schema["properties"]["params"]["properties"]["operation"];
+
+        assert_eq!(operation["type"], "string");
+        assert_eq!(operation["enum"], json!(["comp", "sample"]));
     }
 
     #[test]
@@ -11124,6 +11690,7 @@ execution:
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
@@ -11188,6 +11755,7 @@ execution:
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
@@ -11341,6 +11909,7 @@ execution:
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["/bin/cat".to_string(), "${inputs.input}".to_string()],
@@ -11404,6 +11973,7 @@ execution:
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["/bin/true".to_string()],
@@ -11461,14 +12031,14 @@ runtime:
   type: conda
   condaEnvFile: ./conda.yaml
 diagnostics:
-  checkCommand: [bwa, --version]
+  checkCommand: [demoalign, --version]
 "#
             ),
         )
         .unwrap();
         fs::write(
             env_dir.join("conda.yaml"),
-            "channels:\n  - conda-forge\n  - bioconda\ndependencies:\n  - bwa =0.7.17\n",
+            "channels:\n  - conda-forge\n  - bioconda\ndependencies:\n  - demoalign =1.0\n",
         )
         .unwrap();
     }
@@ -11476,10 +12046,10 @@ diagnostics:
     #[test]
     fn local_operator_command_wraps_conda_environment_ref() {
         let tmp = TempDir::new().unwrap();
-        write_conda_environment_profile(tmp.path(), "ngs-bwa");
-        let mut spec = argv_operator_spec(&tmp, &["bwa", "index", "ref.fa"]);
+        write_conda_environment_profile(tmp.path(), "alignment-env");
+        let mut spec = argv_operator_spec(&tmp, &["demoalign", "index", "ref.fa"]);
         spec.runtime = Some(json!({
-            "envRef": "ngs-bwa",
+            "envRef": "alignment-env",
             "placement": { "supported": ["local"] },
             "container": { "supported": ["none"] }
         }));
@@ -11500,7 +12070,7 @@ diagnostics:
         assert!(command.contains("env create -y -p"));
         assert!(command.contains("run -p"));
         assert!(command.contains(".omiga/operator-envs/conda"));
-        assert!(command.contains("bwa"));
+        assert!(command.contains("demoalign"));
         assert!(command.contains("ref.fa"));
     }
 
@@ -11522,8 +12092,8 @@ runtime:
 "#,
         )
         .unwrap();
-        fs::write(env_dir.join("requirements.txt"), "bwa\n").unwrap();
-        let mut spec = argv_operator_spec(&tmp, &["bwa", "index", "ref.fa"]);
+        fs::write(env_dir.join("requirements.txt"), "demoalign\n").unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["demoalign", "index", "ref.fa"]);
         spec.runtime = Some(json!({
             "envRef": "bad-conda",
             "placement": { "supported": ["local"] }
@@ -11704,29 +12274,6 @@ runtime:
     }
 
     #[test]
-    fn ngs_alignment_wrapper_smoke_fixture_runs_with_mock_tools() {
-        let (plugin_root, _) = curated_operator_manifest_path("ngs-alignment", "bwa-index");
-        let script = plugin_root
-            .join("scripts")
-            .join("test_ngs_alignment_smoke.py");
-
-        let output = std::process::Command::new("python3")
-            .arg(&script)
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .current_dir(plugin_root)
-            .output()
-            .expect("run ngs alignment smoke test");
-
-        assert!(
-            output.status.success(),
-            "ngs alignment smoke failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("smoke fixture passed"));
-    }
-
-    #[test]
     fn local_runtime_prefers_no_container_when_manifest_allows_none() {
         let tmp = TempDir::new().unwrap();
         let spec = OperatorSpec {
@@ -11740,6 +12287,7 @@ runtime:
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["/bin/true".to_string()],
@@ -12356,6 +12904,7 @@ runtime:
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec![
@@ -12384,6 +12933,7 @@ runtime:
                 spec,
             },
             OperatorInvocation {
+                operation: None,
                 inputs: BTreeMap::from([(
                     "input".to_string(),
                     JsonValue::String("input.txt".to_string()),
@@ -12495,6 +13045,7 @@ runtime:
                 ]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
@@ -12581,6 +13132,7 @@ runtime:
                     )]),
                     ..OperatorInterfaceSpec::default()
                 },
+                operations: BTreeMap::new(),
                 smoke_tests: Vec::new(),
                 execution: OperatorExecutionSpec {
                     argv: vec!["true".to_string()],

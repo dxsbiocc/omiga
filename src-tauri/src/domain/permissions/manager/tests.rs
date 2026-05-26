@@ -166,6 +166,90 @@ async fn connector_write_approval_is_scoped_to_connector_operation() {
 }
 
 #[tokio::test]
+async fn operator_execute_approval_is_scoped_to_operator_operation() {
+    let mgr = PermissionManager::new();
+    let demo_sample = serde_json::json!({
+        "operator": "demo_tool",
+        "operation": "sample",
+        "inputs": {"reads": "reads.fq.gz"},
+        "params": {"fraction": 0.1}
+    });
+    let req = match mgr
+        .check_tool("s_operator_scope", "operator_execute", &demo_sample)
+        .await
+    {
+        PermissionDecision::RequireApproval(req) => req,
+        other => panic!("expected operator_execute approval, got {other:?}"),
+    };
+    mgr.approve_request("s_operator_scope", PermissionMode::Session, &req.context)
+        .await
+        .unwrap();
+    assert!(matches!(
+        mgr.check_tool("s_operator_scope", "operator_execute", &demo_sample)
+            .await,
+        PermissionDecision::Allow
+    ));
+
+    let demo_stats = serde_json::json!({
+        "operator": "demo_tool",
+        "operation": "stats",
+        "inputs": {"reads": "reads.fq.gz"}
+    });
+    assert!(matches!(
+        mgr.check_tool("s_operator_scope", "operator_execute", &demo_stats)
+            .await,
+        PermissionDecision::RequireApproval(_)
+    ));
+
+    let demo_legacy_param_stats = serde_json::json!({
+        "operator": "demo_tool",
+        "inputs": {"reads": "reads.fq.gz"},
+        "params": {"operation": "stats"}
+    });
+    let demo_legacy_param_sample = serde_json::json!({
+        "operator": "demo_tool",
+        "inputs": {"reads": "reads.fq.gz"},
+        "params": {"operation": "sample"}
+    });
+    let req = match mgr
+        .check_tool(
+            "s_operator_scope_params",
+            "operator_execute",
+            &demo_legacy_param_sample,
+        )
+        .await
+    {
+        PermissionDecision::RequireApproval(req) => req,
+        other => panic!("expected params.operation approval, got {other:?}"),
+    };
+    mgr.approve_request(
+        "s_operator_scope_params",
+        PermissionMode::Session,
+        &req.context,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        mgr.check_tool(
+            "s_operator_scope_params",
+            "operator_execute",
+            &demo_legacy_param_sample
+        )
+        .await,
+        PermissionDecision::Allow
+    ));
+    assert!(matches!(
+        mgr.check_tool(
+            "s_operator_scope_params",
+            "operator_execute",
+            &demo_legacy_param_stats
+        )
+        .await,
+        PermissionDecision::RequireApproval(_)
+    ));
+}
+
+#[tokio::test]
 async fn unconfirmed_connector_write_reaches_tool_level_guard_without_ui_prompt() {
     let mgr = PermissionManager::new();
     let dec = mgr

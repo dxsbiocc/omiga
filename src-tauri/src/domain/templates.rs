@@ -788,6 +788,7 @@ async fn execute_rendered_template(
             tags: template.spec.metadata.tags.clone(),
         },
         interface,
+        operations: BTreeMap::new(),
         smoke_tests: Vec::new(),
         execution: crate::domain::operators::OperatorExecutionSpec { argv },
         preflight: backing.as_ref().and_then(|spec| spec.preflight.clone()),
@@ -2153,6 +2154,7 @@ template:
         let input = tmp.path().join("scatter-basic-example.tsv");
         fs::copy(template_dir.join("example.tsv"), &input).expect("copy example");
         let invocation = crate::domain::operators::OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::from([("table".to_string(), json!(input.to_string_lossy()))]),
             params: BTreeMap::new(),
             resources: BTreeMap::new(),
@@ -2562,6 +2564,7 @@ execution:
         .expect("template");
         let ctx = crate::domain::tools::ToolContext::new(tmp.path());
         let invocation = crate::domain::operators::OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::new(),
             params: BTreeMap::from([("message".to_string(), json!("world"))]),
             resources: BTreeMap::new(),
@@ -2650,6 +2653,7 @@ execution:
         .expect("template");
         let example_path = template_dir.join("example.tsv");
         let invocation = crate::domain::operators::OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::from([("table".to_string(), json!(example_path.to_string_lossy()))]),
             params: BTreeMap::new(),
             resources: BTreeMap::new(),
@@ -2712,6 +2716,7 @@ execution:
         let (template, _operator) =
             transcriptomics_template_and_operator("pca-matrix", "pca-matrix");
         let invocation = crate::domain::operators::OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::from([
                 ("matrix".to_string(), json!(matrix.to_string_lossy())),
                 ("metadata".to_string(), json!(metadata.to_string_lossy())),
@@ -2802,6 +2807,7 @@ execution:
             "differential-expression-basic",
         );
         let invocation = crate::domain::operators::OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::from([
                 ("matrix".to_string(), json!(matrix.to_string_lossy())),
                 ("metadata".to_string(), json!(metadata.to_string_lossy())),
@@ -2900,6 +2906,7 @@ execution:
             "functional-enrichment-basic",
         );
         let invocation = crate::domain::operators::OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::from([
                 ("genes".to_string(), json!(genes.to_string_lossy())),
                 ("gene_sets".to_string(), json!(gene_sets.to_string_lossy())),
@@ -3090,6 +3097,7 @@ migrationTarget: local_fallback_report
         .expect("template");
         let ctx = crate::domain::tools::ToolContext::new(tmp.path());
         let invocation = crate::domain::operators::OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::new(),
             params: BTreeMap::from([("message".to_string(), json!("fallback ok"))]),
             resources: BTreeMap::new(),
@@ -3242,6 +3250,7 @@ done
         };
         let ctx = crate::domain::tools::ToolContext::new(tmp.path());
         let invocation = crate::domain::operators::OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::new(),
             params: BTreeMap::from([
                 ("message".to_string(), json!("delegated template")),
@@ -3320,6 +3329,7 @@ done
         let ctx = crate::domain::tools::ToolContext::new(tmp.path())
             .with_session_id(Some("session-template".to_string()));
         let invocation = crate::domain::operators::OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::new(),
             params: BTreeMap::from([("alpha".to_string(), json!(0.05))]),
             resources: BTreeMap::new(),
