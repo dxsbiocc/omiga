@@ -43,32 +43,33 @@ fn status_str(status: PlaybookStatus) -> String {
 
 /// Compose a deterministic env signature from the full execution surface
 /// (environment name + SSH server + sandbox backend). Any field changing alters
-/// the signature, so replay against a different target invalidates. Returns
-/// `None` when the whole surface is empty. Save and replay MUST call this
-/// identically so their fingerprints agree.
+/// the signature, so replay against a different target invalidates.
+///
+/// `environment` and `sandbox_backend` are normalized to the SAME defaults
+/// `build_operator_context` applies (`local` / `docker`) so an omitted surface
+/// fingerprints identically to an explicit default — otherwise a playbook saved
+/// with `env=local;sandbox=docker` would falsely invalidate when replayed without
+/// the optional args (which still run on the defaulted target). Save and replay
+/// MUST call this identically so their fingerprints agree.
 fn compose_env_signature(
     environment: Option<String>,
     ssh_server: Option<String>,
     sandbox_backend: Option<String>,
 ) -> Option<String> {
-    let parts: Vec<String> = [
-        ("env", environment),
-        ("ssh", ssh_server),
-        ("sandbox", sandbox_backend),
-    ]
-    .into_iter()
-    .filter_map(|(key, value)| {
+    let normalize = |value: Option<String>| {
         value
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
-            .map(|v| format!("{key}={v}"))
-    })
-    .collect();
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(";"))
+    };
+    let environment = normalize(environment).unwrap_or_else(|| "local".to_string());
+    let sandbox_backend = normalize(sandbox_backend).unwrap_or_else(|| "docker".to_string());
+
+    let mut parts = vec![format!("env={environment}")];
+    if let Some(ssh) = normalize(ssh_server) {
+        parts.push(format!("ssh={ssh}"));
     }
+    parts.push(format!("sandbox={sandbox_backend}"));
+    Some(parts.join(";"))
 }
 
 /// 解析链中每个唯一算子别名的当前版本(去重,保持首次出现顺序)。
