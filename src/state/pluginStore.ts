@@ -225,6 +225,7 @@ export interface OperatorSummary {
   sourcePlugin: string;
   manifestPath: string;
   interface?: OperatorInterfaceSpec;
+  operations?: OperatorOperationSummary[];
   execution?: OperatorExecutionSpec;
   runtime?: Record<string, unknown> | null;
   resources?: Record<string, OperatorResourceSpec>;
@@ -232,6 +233,20 @@ export interface OperatorSummary {
   enabledAliases: string[];
   exposed: boolean;
   unavailableReason?: string | null;
+}
+
+export interface OperatorOperationSummary {
+  id: string;
+  name?: string | null;
+  description?: string | null;
+  category?: string | null;
+  group?: string | null;
+  stage?: string | null;
+  tags?: string[];
+  interface?: OperatorInterfaceSpec;
+  runtime?: Record<string, unknown> | null;
+  resources?: Record<string, OperatorResourceSpec>;
+  exposed?: boolean;
 }
 
 export interface OperatorRuntimeResourceProfile {

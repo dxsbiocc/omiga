@@ -8,7 +8,7 @@ Operator plugins wrap deterministic workflows and expose them to agents as struc
 
 - **Analysis workflows** — wrap a script that runs PCA, differential expression, or statistical tests, and return structured outputs agents can reason about.
 - **MCP server wrapping** — expose an existing MCP server's capabilities with Omiga-native preflight dialogs and smoke tests.
-- **Data retrieval pipelines** — shell out to CLI tools (seqtk, bwa, samtools, etc.) over the active local or SSH workspace.
+- **Data retrieval pipelines** — shell out to domain CLIs over the active local or SSH workspace.
 - **Report generation** — write deterministic text or HTML artifacts to `${outdir}` and declare them as outputs.
 
 Plugins cannot run arbitrary JavaScript in the UI or escalate beyond the user's current execution surface. The operator runtime validates inputs, manages retry, caches deterministic runs, and keeps all artifacts under `.omiga/runs/`.
@@ -18,7 +18,7 @@ Plugins cannot run arbitrary JavaScript in the UI or escalate beyond the user's 
 Each operator is declared in a YAML file under `operators/<name>/operator.yaml`. The schema requires:
 
 ```yaml
-apiVersion: omiga.ai/operator/v1alpha1
+apiVersion: omiga.ai/operator/v1alpha2
 kind: Operator
 metadata:
   id: my_analysis           # stable, kebab/snake identifier
@@ -101,6 +101,11 @@ smokeTests:
 ```
 
 Supported `kind` values for `interface` fields: `string`, `integer`, `number`, `boolean`, `enum`, `json`, `file`, `file_array`, `directory`, `directory_array`.
+
+For CLIs with subcommands, keep one Operator per executable program and declare
+subcommands under `operations`. Add operation-level `category`, `group`, and
+`stage` metadata so Unit Index, `operator_describe`, and the plugin UI can
+progressively disclose the right operation without hardcoded core knowledge.
 
 ## Step-by-step: create your first plugin
 

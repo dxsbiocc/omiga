@@ -33,6 +33,10 @@ impl ToolImpl for OperatorDescribeTool {
                 }
             })?;
         let exposed = alias.is_some();
+        let operation_summaries =
+            crate::domain::operators::operator_operation_summaries_for_spec(&spec, exposed);
+        let operation_groups = crate::domain::operators::operator_operation_groups_for_spec(&spec);
+        let operation_names = crate::domain::operators::operator_operation_names(&spec);
         let output = serde_json::json!({
             "alias": alias,
             "executeTool": "operator_execute",
@@ -46,7 +50,15 @@ impl ToolImpl for OperatorDescribeTool {
                 "manifestPath": spec.source.manifest_path,
             },
             "schema": crate::domain::operators::operator_parameters_schema(&spec),
-            "operations": crate::domain::operators::operator_operation_names(&spec),
+            "operationNames": operation_names,
+            "operations": operation_names,
+            "operationSummaries": operation_summaries,
+            "operationGroups": operation_groups,
+            "progressiveDisclosure": {
+                "program": "Call operator_describe once for the Operator program.",
+                "group": "Use operationGroups/category/stage to narrow the workflow family.",
+                "operation": "Pass the selected operation name to operator_execute.operation; subcommands are not separate tools."
+            },
             "preflight": spec.preflight,
             "smokeTests": spec.smoke_tests,
             "runtime": spec.runtime,

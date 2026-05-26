@@ -1,11 +1,15 @@
-# Operator Plugin Manifest v1alpha1
+# Operator Plugin Manifest v1alpha2
 
-Operators are plugin-provided, declarative execution units exposed to agents as `operator__{alias}` tools. A plugin contributes operators by placing `operator.yaml` files under its `operators/` directory.
+Operators are plugin-provided, declarative program adapters. A single Operator
+represents one executable program; subcommands or modes are modeled as
+`operations` and executed through the generic `operator_execute` tool. A plugin
+contributes operators by placing `operator.yaml` files under its declared
+`operators/` directory.
 
 ## Required identity
 
 ```yaml
-apiVersion: omiga.ai/operator/v1alpha1
+apiVersion: omiga.ai/operator/v1alpha2
 kind: Operator
 metadata:
   id: write_text_report
@@ -14,9 +18,46 @@ metadata:
   description: Write a deterministic text artifact.
 ```
 
-- `apiVersion` must stay `omiga.ai/operator/v1alpha1`.
+- `apiVersion` should be `omiga.ai/operator/v1alpha2` for multi-operation
+  program adapters. `v1alpha1` remains accepted for legacy single-operation
+  manifests.
 - `kind` must be `Operator`.
-- `metadata.id` is the stable operator id. Enabled aliases become tool names as `operator__{alias}`.
+- `metadata.id` is the stable Operator program id. Enabled aliases are passed to
+  `operator_execute.operator`; callers choose the subcommand via
+  `operator_execute.operation`.
+
+## Operation taxonomy
+
+Use `operations` when one executable has multiple subcommands or modes. Do not
+split those subcommands into separate Operator manifests.
+
+```yaml
+operations:
+  sample:
+    name: Sample Reads
+    description: Subsample FASTQ/FASTA reads.
+    category: ngs/sequence-processing
+    group: Sequence Processing
+    stage: NGS / Sequence Processing
+    tags: [fastq, fasta, sampling]
+    execution:
+      argv: [seqtk, sample, "${inputs.reads}", "${params.sample_size}"]
+  fqchk:
+    name: FASTQ Quality Check
+    description: Summarize per-base quality and composition.
+    category: ngs/quality-control
+    group: Quality Control
+    stage: NGS / Quality Control
+    tags: [fastq, quality-control]
+    execution:
+      argv: [seqtk, fqchk, "${inputs.reads}"]
+```
+
+- `category` is the stable machine-facing route key.
+- `group` is the short UI bucket inside the Operator program.
+- `stage` is the human-facing progressive-disclosure label.
+- Omiga core treats these as manifest data. It does not hardcode plugin-specific
+  operation categories.
 
 ## Interface schema
 
@@ -170,22 +211,9 @@ Container selection rules:
 - Local/SSH direct container execution bind-mounts the isolated run directory read-write and path-like inputs read-only. Local execution also mounts the project root and plugin root read-only. SSH artifacts, logs, and provenance stay on the remote workspace.
 - Sandbox/remote backends remain responsible for their own container isolation; the operator runtime is validated and recorded rather than nested in another container command.
 
-Container validation coverage now comes from Rust tests that generate a temporary
-`operator-smoke` plugin at runtime. Omiga does not ship an app-local
-app-local bundled-plugins operator plugin.
-
-Curated operator plugins live in the external `../omiga-plugins` marketplace
-repository. Keep public operator plugins grouped by workflow capability:
-
-- `ngs-sequence-processing@omiga-curated` exposes FASTQ/FASTA seqtk
-  sampling/conversion/extraction operators.
-- `ngs-quality-control@omiga-curated` exposes seqtk count, composition, and
-  quality-summary operators.
-- `ngs-alignment@omiga-curated` exposes HPC-marked BWA/Bowtie2/STAR/HISAT2 and
-  samtools alignment/indexing operators.
-- `transcriptomics@omiga-curated` exposes template units only; private backing
-  operator specs live under `template_backing_operators/` for validation and
-  migration-target execution.
+Container validation coverage now comes from Rust tests that generate temporary
+operator plugins at runtime. Omiga core must not ship app-local bundled plugin
+content; curated plugin definitions belong in the external plugin marketplace.
 
 Manual Docker validation can be run with:
 

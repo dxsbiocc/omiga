@@ -347,6 +347,17 @@ pub struct OperatorOperationSpec {
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Manifest-declared operation taxonomy for progressive disclosure.
+    ///
+    /// This is intentionally generic metadata: plugins decide the vocabulary
+    /// (for example `ngs/sequence-processing`), while Omiga only parses and
+    /// surfaces it for routing/catalog UIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
@@ -492,12 +503,33 @@ pub struct OperatorCandidateSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OperatorOperationGroupSummary {
+    pub key: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub operations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OperatorOperationSummary {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     pub interface: OperatorInterfaceSpec,
@@ -638,6 +670,12 @@ struct RawOperatorOperationSpec {
     name: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    stage: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
@@ -1006,6 +1044,9 @@ fn normalize_operator_operations(
             OperatorOperationSpec {
                 name: metadata.name.clone(),
                 description: metadata.description.clone(),
+                category: None,
+                group: None,
+                stage: None,
                 tags: metadata.tags.clone(),
                 interface: top_interface.clone(),
                 smoke_tests: top_smoke_tests.to_vec(),
@@ -1048,8 +1089,11 @@ fn normalize_operator_operations(
         operations.insert(
             id,
             OperatorOperationSpec {
-                name: raw.name,
-                description: raw.description,
+                name: normalize_optional_string(raw.name),
+                description: normalize_optional_string(raw.description),
+                category: normalize_optional_string(raw.category),
+                group: normalize_optional_string(raw.group),
+                stage: normalize_optional_string(raw.stage),
                 tags: raw.tags,
                 interface: operation_interface,
                 smoke_tests,
@@ -2351,6 +2395,9 @@ fn operator_operation_summaries(
             id: id.clone(),
             name: operation.name.clone(),
             description: operation.description.clone(),
+            category: operation.category.clone(),
+            group: operation.group.clone(),
+            stage: operation.stage.clone(),
             tags: operation.tags.clone(),
             interface: operation.interface.clone(),
             runtime: operation.runtime.clone(),
@@ -2358,6 +2405,67 @@ fn operator_operation_summaries(
             exposed,
         })
         .collect()
+}
+
+pub fn operator_operation_summaries_for_spec(
+    spec: &OperatorSpec,
+    exposed: bool,
+) -> Vec<OperatorOperationSummary> {
+    operator_operation_summaries(spec, exposed)
+}
+
+pub fn operator_operation_groups_for_spec(
+    spec: &OperatorSpec,
+) -> Vec<OperatorOperationGroupSummary> {
+    let mut groups: BTreeMap<String, OperatorOperationGroupSummary> = BTreeMap::new();
+    for (operation_id, operation) in &spec.operations {
+        let (key, label) = operation_group_key(operation);
+        let entry = groups
+            .entry(key.clone())
+            .or_insert_with(|| OperatorOperationGroupSummary {
+                key,
+                label,
+                category: operation.category.clone(),
+                group: operation.group.clone(),
+                stage: operation.stage.clone(),
+                operations: Vec::new(),
+            });
+        entry.operations.push(operation_id.clone());
+    }
+    groups.into_values().collect()
+}
+
+fn operation_group_key(operation: &OperatorOperationSpec) -> (String, String) {
+    let label = operation
+        .stage
+        .as_ref()
+        .or(operation.group.as_ref())
+        .or(operation.category.as_ref())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Operations".to_string());
+    let key = label
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '/' || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    (
+        if key.is_empty() {
+            "operations".to_string()
+        } else {
+            key
+        },
+        label,
+    )
 }
 
 pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
@@ -11517,8 +11625,14 @@ metadata:
 operations:
   sample:
     description: Sample reads
+    category: ngs/sequence-processing
+    group: Sequence Processing
+    stage: NGS / Sequence Processing
   comp:
     description: Summarize composition
+    category: ngs/quality-control
+    group: Quality Control
+    stage: NGS / Quality Control
 interface:
   inputs:
     reads:
@@ -11536,6 +11650,17 @@ execution:
 
         assert_eq!(operation["type"], "string");
         assert_eq!(operation["enum"], json!(["comp", "sample"]));
+        assert_eq!(
+            spec.operations["sample"].category.as_deref(),
+            Some("ngs/sequence-processing")
+        );
+        assert_eq!(
+            operator_operation_groups_for_spec(&spec)
+                .iter()
+                .map(|group| group.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["NGS / Quality Control", "NGS / Sequence Processing"]
+        );
     }
 
     #[test]

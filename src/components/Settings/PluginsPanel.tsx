@@ -1286,11 +1286,12 @@ export function pluginContentOverview(
   }
 
   if (operators.length > 0) {
+    const operationCount = operatorPluginOperationCount(operators);
     items.push({
       id: "automation",
-      title: "Automation",
-      detail: previewList(operators.map(operatorDisplayName)) || "Operator tools agents can call.",
-      meta: `${operators.length}`,
+      title: "Operator programs",
+      detail: previewList(operators.map(operatorDisplayName)) || "Plugin-declared Operator programs agents can call.",
+      meta: `${operationCount} op${operationCount === 1 ? "" : "s"}`,
     });
   }
 
@@ -1338,6 +1339,55 @@ export function pluginContentOverview(
 
 export function operatorDisplayName(operator: OperatorSummary): string {
   return operator.name?.trim() || operator.id;
+}
+
+type OperatorOperationSummary = NonNullable<OperatorSummary["operations"]>[number];
+
+function operatorOperationDisplayName(operation: OperatorOperationSummary): string {
+  return operation.name?.trim() || operation.id;
+}
+
+function operatorOperationCount(operator: OperatorSummary): number {
+  return Math.max(operator.operations?.length ?? 0, 1);
+}
+
+function operatorExposedOperationCount(operator: OperatorSummary): number {
+  const operations = operator.operations ?? [];
+  if (operations.length === 0) return operator.exposed ? 1 : 0;
+  return operations.filter((operation) => operation.exposed !== false && operator.exposed).length;
+}
+
+function operatorPluginOperationCount(operators: OperatorSummary[]): number {
+  return operators.reduce((total, operator) => total + operatorOperationCount(operator), 0);
+}
+
+function operatorPluginExposedOperationCount(operators: OperatorSummary[]): number {
+  return operators.reduce((total, operator) => total + operatorExposedOperationCount(operator), 0);
+}
+
+function operationTaxonomyLabel(operation: OperatorOperationSummary): string {
+  return (
+    operation.stage?.trim()
+    || operation.group?.trim()
+    || operation.category?.trim()
+    || "Operations"
+  );
+}
+
+function operatorOperationGroups(operator: OperatorSummary): Array<{
+  key: string;
+  label: string;
+  operations: OperatorOperationSummary[];
+}> {
+  const grouped = new Map<string, { key: string; label: string; operations: OperatorOperationSummary[] }>();
+  for (const operation of operator.operations ?? []) {
+    const label = operationTaxonomyLabel(operation);
+    const key = label.trim().toLowerCase().replace(/[^a-z0-9/-]+/g, "-") || "operations";
+    const current = grouped.get(key) ?? { key, label, operations: [] };
+    current.operations.push(operation);
+    grouped.set(key, current);
+  }
+  return Array.from(grouped.values()).sort((left, right) => left.label.localeCompare(right.label));
 }
 
 function templateDisplayName(template: PluginTemplateSummary["groups"][number]["templates"][number]): string {
@@ -2188,11 +2238,12 @@ function PluginCard({
     (status) => status.quarantined || status.state === "degraded",
   );
   const subtitle = pluginCardSubtitle(plugin);
-  const exposedOperatorCount = operators.filter((operator) => operator.exposed).length;
+  const exposedOperatorCount = operatorPluginExposedOperationCount(operators);
+  const operationCount = operatorPluginOperationCount(operators);
   const operatorExposureLabel = operators.length > 0
     ? plugin.installed && plugin.enabled
-      ? `${exposedOperatorCount}/${operators.length} tools exposed`
-      : `${operators.length} tools available`
+      ? `${exposedOperatorCount}/${operationCount} operations exposed`
+      : `${operationCount} operations available`
     : null;
   const operatorIcon = operatorPluginIconSpec(plugin);
   const iconTone = operatorIcon?.color ?? tone;
@@ -2717,6 +2768,8 @@ function PluginUnitControls({
     })),
   ) ?? [];
   const environmentsByRef = pluginEnvironmentByRef(plugin.environments ?? []);
+  const operationCount = operatorPluginOperationCount(operators);
+  const exposedOperationCount = plugin.enabled ? operatorPluginExposedOperationCount(operators) : 0;
   const totalUnits = operators.length + templates.length + retrievalResources.length;
   if (totalUnits === 0) return null;
 
@@ -2733,7 +2786,16 @@ function PluginUnitControls({
             color={pluginUnitKindColor("operator")}
             variant="outlined"
             sx={pluginUnitKindChipSx("operator")}
-            label={`${operators.filter((operator) => operator.exposed).length}/${operators.length} exposed by plugin`}
+            label={`${operators.filter((operator) => operator.exposed).length}/${operators.length} Operator program${operators.length === 1 ? "" : "s"}`}
+          />
+        )}
+        {operators.length > 0 && (
+          <Chip
+            size="small"
+            color={pluginUnitKindColor("operator")}
+            variant="outlined"
+            sx={pluginUnitKindChipSx("operator")}
+            label={`${exposedOperationCount}/${operationCount} operations exposed`}
           />
         )}
         {templates.length > 0 && (
@@ -2755,7 +2817,8 @@ function PluginUnitControls({
       </Stack>
       {operators.length > 0 && (
         <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.45 }}>
-          Operator tools are exposed automatically while this plugin is enabled. Use the plugin switch to turn the whole bundle on or off; no per-tool registration is required.
+          Operator programs are exposed automatically while this plugin is enabled. Use the plugin switch to turn the whole bundle on or off; no per-tool registration is required.{" "}
+          Choose subcommands as <code>operator_execute.operation</code>; operation categories come from the plugin manifest.
         </Typography>
       )}
       <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: "hidden" }}>
@@ -2820,6 +2883,8 @@ function PluginUnitControls({
             const alias = operatorPrimaryAlias(operator);
             const envRef = operatorEnvironmentRef(operator);
             const environment = envRef ? environmentsByRef.get(envRef) : null;
+            const operationGroups = operatorOperationGroups(operator);
+            const opCount = operatorOperationCount(operator);
             return (
               <Stack
                 key={`operator:${operator.sourcePlugin}:${operator.id}:${operator.version}`}
@@ -2853,8 +2918,9 @@ function PluginUnitControls({
                       color={pluginUnitKindColor("operator")}
                       variant="outlined"
                       sx={pluginUnitKindChipSx("operator")}
-                      label="Operator"
+                      label="Operator program"
                     />
+                    <Chip size="small" variant="outlined" label={`${opCount} operation${opCount === 1 ? "" : "s"}`} />
                     {operatorResourceProfileChip(operator)}
                     {envRef && (
                       <Chip
@@ -2881,6 +2947,27 @@ function PluginUnitControls({
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, lineHeight: 1.45 }}>
                     {operator.description?.trim() || `Atomic operator ID: ${operator.id}`}
                   </Typography>
+                  {operationGroups.length > 0 && (
+                    <Stack spacing={0.5} sx={{ mt: 0.75 }}>
+                      {operationGroups.map((group) => (
+                        <Box key={`${operator.id}:${group.key}`}>
+                          <Typography variant="caption" color="text.secondary" fontWeight={800}>
+                            {group.label}
+                          </Typography>
+                          <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.35 }}>
+                            {group.operations.map((operation) => (
+                              <Chip
+                                key={`${operator.id}:${operation.id}`}
+                                size="small"
+                                variant="outlined"
+                                label={operatorOperationDisplayName(operation)}
+                              />
+                            ))}
+                          </Stack>
+                        </Box>
+                      ))}
+                    </Stack>
+                  )}
                 </Box>
               </Stack>
             );

@@ -171,12 +171,13 @@ describe("PluginsPanel diagnostics helpers", () => {
   it("keeps operator exposure plugin-owned instead of manually registered", () => {
     const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
 
-    expect(source).toContain("tools exposed");
+    expect(source).toContain("operations exposed");
     expect(source).toContain("Exposed by plugin");
     expect(source).toContain("Exposed");
     expect(source).toContain('plugin.enabled ? "Disable" : "Enable"');
     expect(source).toContain('plugin.enabled ? "Enabled" : "Disabled"');
-    expect(source).toContain("Operator tools are exposed automatically while this plugin is enabled");
+    expect(source).toContain("Operator programs are exposed automatically while this plugin is enabled");
+    expect(source).toContain("operation categories come from the plugin manifest");
     expect(source).not.toContain("Agent tools");
     expect(source).not.toContain("Register to run smoke test");
     expect(source).not.toContain("Register");
@@ -1659,14 +1660,14 @@ describe("PluginsPanel diagnostics helpers", () => {
     ).toContain("<path");
     expect(
       operatorPluginIconSpec(pluginSummary({
-        name: "ngs-sequence-processing",
+        name: "c-program-adapter",
         interface: {
-          displayName: "seqtk",
-          shortDescription: "FASTQ/FASTA subsampling with seqtk",
+          displayName: "C Program",
+          shortDescription: "Adapter for a C-based command-line program",
           longDescription: null,
           developerName: null,
           category: "Operator",
-          capabilities: ["Operator", "seqtk"],
+          capabilities: ["Operator", "C"],
           websiteUrl: null,
           privacyPolicyUrl: null,
           termsOfServiceUrl: null,

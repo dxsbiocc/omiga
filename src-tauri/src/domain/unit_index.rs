@@ -685,6 +685,16 @@ pub fn operator_units_from_summaries(
                 .map(|operation| {
                     let mut tags = summary.tags.clone();
                     extend_unique(&mut tags, operation.tags.clone());
+                    extend_unique(
+                        &mut tags,
+                        [
+                            operation.category.clone(),
+                            operation.group.clone(),
+                            operation.stage.clone(),
+                        ]
+                        .into_iter()
+                        .flatten(),
+                    );
                     push_unique(&mut tags, "operator");
                     push_unique(&mut tags, "operation");
                     let stage_input = operation
@@ -714,7 +724,12 @@ pub fn operator_units_from_summaries(
                             .map(|alias| format!("{alias}.{}", operation.id))
                             .collect(),
                         classification: UnitClassification {
-                            category: infer_operator_category(&tags),
+                            category: operation
+                                .category
+                                .clone()
+                                .or_else(|| operation.group.clone())
+                                .or_else(|| operation.stage.clone())
+                                .or_else(|| infer_operator_category(&tags)),
                             tags,
                             stage_input,
                             stage_output,
@@ -971,30 +986,21 @@ fn canonical_unit_id(provider: &str, kind: UnitKind, id: &str) -> String {
 }
 
 fn infer_operator_category(tags: &[String]) -> Option<String> {
-    let normalized = tags.iter().map(|tag| normalize(tag)).collect::<Vec<_>>();
-    if normalized
-        .iter()
-        .any(|tag| tag.contains("differential") || tag.contains("rnaseq") || tag.contains("rna"))
-    {
-        Some("omics/transcriptomics/differential".to_string())
-    } else if normalized
-        .iter()
-        .any(|tag| tag.contains("enrichment") || tag.contains("gsea") || tag.contains("pathway"))
-    {
-        Some("omics/enrichment".to_string())
-    } else if normalized
-        .iter()
-        .any(|tag| tag.contains("pca") || tag.contains("dimension"))
-    {
-        Some("omics/dimensionality_reduction".to_string())
-    } else if normalized
-        .iter()
-        .any(|tag| tag.contains("retrieval") || tag.contains("pubmed") || tag.contains("uniprot"))
-    {
-        Some("utility/data_retrieval".to_string())
-    } else {
-        Some("operator".to_string())
-    }
+    tags.iter()
+        .map(|tag| normalize(tag))
+        .find(|tag| {
+            !tag.is_empty()
+                && !matches!(
+                    tag.as_str(),
+                    "operator"
+                        | "operation"
+                        | "tool"
+                        | "tools"
+                        | "local-execution"
+                        | "ssh-execution"
+                )
+        })
+        .or_else(|| Some("operator".to_string()))
 }
 
 fn skill_plugin_providers() -> Vec<(std::path::PathBuf, String)> {
@@ -1161,7 +1167,7 @@ mod tests {
                 &["diff_results"],
             ),
             unit(
-                "seqtk_sample_reads",
+                "program_sample_reads",
                 UnitKind::Operator,
                 "operator",
                 &["fastq"],
@@ -1316,6 +1322,59 @@ mod tests {
             units[0].classification.category.as_deref(),
             Some("workflow/skill")
         );
+    }
+
+    #[test]
+    fn operation_units_use_manifest_operation_taxonomy() {
+        let summary = OperatorCandidateSummary {
+            id: "sequence_program".to_string(),
+            version: "0.2.0".to_string(),
+            name: Some("Sequence Program".to_string()),
+            description: Some("Program adapter".to_string()),
+            tags: vec!["bioinformatics".to_string(), "ngs".to_string()],
+            source_plugin: "sequence-plugin@example".to_string(),
+            manifest_path:
+                "/plugins/bioinformatics/ngs/sequence/operators/sequence_program/operator.yaml"
+                    .to_string(),
+            interface: Default::default(),
+            operations: vec![crate::domain::operators::OperatorOperationSummary {
+                id: "sample".to_string(),
+                name: Some("Sample Reads".to_string()),
+                description: Some("Subsample reads".to_string()),
+                category: Some("ngs/sequence-processing".to_string()),
+                group: Some("Sequence Processing".to_string()),
+                stage: Some("NGS / Sequence Processing".to_string()),
+                tags: vec!["sampling".to_string()],
+                interface: Default::default(),
+                runtime: None,
+                resources: Default::default(),
+                exposed: true,
+            }],
+            execution: Default::default(),
+            preflight: None,
+            runtime: None,
+            resources: Default::default(),
+            smoke_tests: Vec::new(),
+            enabled_aliases: vec!["sequence_program".to_string()],
+            exposed: true,
+            unavailable_reason: None,
+        };
+
+        let units = operator_units_from_summaries(vec![summary]);
+        let operation = units
+            .iter()
+            .find(|unit| unit.kind == UnitKind::Operation)
+            .expect("operation unit");
+
+        assert_eq!(
+            operation.classification.category.as_deref(),
+            Some("ngs/sequence-processing")
+        );
+        assert!(operation
+            .classification
+            .tags
+            .iter()
+            .any(|tag| tag == "NGS / Sequence Processing"));
     }
 
     #[test]
