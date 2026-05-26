@@ -112,6 +112,19 @@ pub async fn save_playbook_from_chain(
             "a chain playbook requires at least two steps".to_string(),
         ));
     }
+    // Reject ids that aren't filesystem-safe up front. The store sanitizes ids
+    // into file paths (defense-in-depth against traversal), but sanitization is
+    // not injective ("a/b" and "a_b" both map to "a_b.json"), so two distinct
+    // unsafe ids could collide and overwrite each other. UI-generated ids are
+    // slug + uuid (always safe); only direct IPC callers can hit this.
+    if !playbook_id
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::Config(format!(
+            "playbook id '{playbook_id}' must contain only alphanumeric, '-' or '_' characters"
+        )));
+    }
     // Quality is enforced at replay time (verification + auto-demote), not at save:
     // the chain editor saves a definition; a bad chain is weeded out on replay.
     let versions = resolve_chain_versions(&steps)?;
