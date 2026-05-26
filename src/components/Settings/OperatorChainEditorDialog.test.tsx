@@ -292,6 +292,8 @@ describe("OperatorChainEditorDialog", () => {
 
     harness.click(getButtonByText(harness, "Add step"));
     harness.change(getControlByLabel(harness, "reads"), "/data/sample.fastq");
+    harness.click(getButtonByText(harness, "Add step"));
+    harness.change(getLastControlByLabel(harness, "reads"), "/data/trimmed.fastq");
 
     harness.click(getButtonByText(harness, "Save as Playbook"));
     harness.change(getControlByLabel(harness, "Title"), "RNA seq QC");
@@ -310,6 +312,16 @@ describe("OperatorChainEditorDialog", () => {
             resources: {},
           },
           dependsOn: [],
+        },
+        {
+          alias: "align_reads",
+          label: "step_2",
+          arguments: {
+            inputs: { reads: "/data/trimmed.fastq" },
+            params: { threads: 4 },
+            resources: {},
+          },
+          dependsOn: ["step_1"],
         },
       ],
       expectedOutputKeys: [],

@@ -49,7 +49,11 @@ impl PlaybookStore for JsonFilePlaybookStore {
     }
 
     fn get(&self, playbook_id: &str) -> Option<Playbook> {
-        read_json_record(self.dir.join(format!("{}.json", playbook_id))).ok()
+        read_json_record(
+            self.dir
+                .join(format!("{}.json", sanitize_playbook_id(playbook_id))),
+        )
+        .ok()
     }
 
     fn find_by_fingerprint(&self, fingerprint: &Fingerprint) -> Option<Playbook> {
@@ -71,7 +75,9 @@ impl PlaybookStore for JsonFilePlaybookStore {
     }
 
     fn delete(&mut self, playbook_id: &str) -> Result<(), String> {
-        let path = self.dir.join(format!("{}.json", playbook_id));
+        let path = self
+            .dir
+            .join(format!("{}.json", sanitize_playbook_id(playbook_id)));
 
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -92,8 +98,20 @@ fn write_json_record<T: Serialize>(dir: &Path, id: &str, value: &T) -> Result<()
         .map_err(|err| format!("create playbook directory '{}': {}", dir.display(), err))?;
     let json = serde_json::to_string_pretty(value)
         .map_err(|err| format!("serialize playbook '{}': {}", id, err))?;
-    let path = dir.join(format!("{}.json", id));
+    let path = dir.join(format!("{}.json", sanitize_playbook_id(id)));
     fs::write(&path, json).map_err(|err| format!("write playbook '{}': {}", path.display(), err))
+}
+
+fn sanitize_playbook_id(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn read_json_record<T: DeserializeOwned>(path: PathBuf) -> Result<T, String> {
@@ -209,6 +227,44 @@ mod tests {
         store.save(playbook.clone()).expect("save playbook");
 
         assert_eq!(store.get("playbook-round-trip"), Some(playbook));
+    }
+
+    #[test]
+    fn save_get_delete_sanitize_playbook_id_only_for_file_paths() {
+        let temp = TestDir::new();
+        let mut store = JsonFilePlaybookStore::new(temp.path());
+        let unique = Uuid::new_v4();
+        let playbook_id = format!("../escape-{unique}");
+        let playbook = test_playbook(
+            &playbook_id,
+            test_fingerprint("1.0.0"),
+            PlaybookStatus::Active,
+        );
+        let escaped_path = temp
+            .path()
+            .parent()
+            .expect("temp path has parent")
+            .join(format!("escape-{unique}.json"));
+        let sanitized_path =
+            temp.path().join(format!("{}.json", super::sanitize_playbook_id(&playbook_id)));
+
+        let _ = fs::remove_file(&escaped_path);
+
+        store.save(playbook.clone()).expect("save playbook");
+
+        let sanitized_exists_after_save = sanitized_path.exists();
+        let escaped_exists_after_save = escaped_path.exists();
+        let saved_playbook = store.get(&playbook_id);
+        let _ = fs::remove_file(&escaped_path);
+
+        assert!(sanitized_exists_after_save);
+        assert!(!escaped_exists_after_save);
+        assert_eq!(saved_playbook, Some(playbook));
+
+        store.delete(&playbook_id).expect("delete playbook");
+
+        assert!(!sanitized_path.exists());
+        assert!(!escaped_path.exists());
     }
 
     #[test]

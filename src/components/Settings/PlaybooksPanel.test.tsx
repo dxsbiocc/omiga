@@ -252,6 +252,10 @@ describe("PlaybooksPanel", () => {
     expect(playbookStoreMock.replayPlaybook).toHaveBeenCalledWith({
       playbookId: "pb-selected",
       projectRoot: PROJECT_PATH,
+      sessionId: undefined,
+      executionEnvironment: "local",
+      sshServer: undefined,
+      sandboxBackend: undefined,
     });
   });
 

@@ -563,7 +563,7 @@ export function OperatorChainEditorDialog({
     && !submitting;
   const canSaveTemplate =
     steps.length > 0 && !chainGraphError && !submitting && !templateBusy && !playbookBusy;
-  const canSavePlaybook = canSaveTemplate;
+  const canSavePlaybook = canSaveTemplate && steps.length >= 2;
 
   const buildSteps = (): OperatorChainStep[] =>
     steps.map((step, index) => {

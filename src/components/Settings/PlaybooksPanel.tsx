@@ -213,6 +213,10 @@ export function PlaybooksPanel({ projectPath }: { projectPath?: string }) {
       const response = await replayPlaybook({
         playbookId: playbook.playbookId,
         projectRoot,
+        sessionId: sessionId ?? undefined,
+        executionEnvironment: executionEnvironment ?? undefined,
+        sshServer: sshServer ?? undefined,
+        sandboxBackend: sandboxBackend ?? undefined,
       });
       setNotice(replayNotice(response));
     } catch (err) {
