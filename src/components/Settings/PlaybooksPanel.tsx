@@ -329,6 +329,7 @@ export function PlaybooksPanel({ projectPath }: { projectPath?: string }) {
         onClose={() => setChainEditorOpen(false)}
         operators={exposedOperators}
         projectPath={projectPath}
+        executionEnvironment={executionEnvironment ?? undefined}
         onRun={async (steps) => {
           await runOperatorChain(steps, projectRoot, operatorSurface);
         }}

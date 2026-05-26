@@ -144,8 +144,11 @@ const operators: OperatorSummary[] = [
 ];
 
 const PROJECT_PATH = "/workspace/project";
+const EXECUTION_ENVIRONMENT = "test-composer-environment";
 
-const createDialogHarness = () => {
+const createDialogHarness = ({
+  executionEnvironment,
+}: { executionEnvironment?: string } = {}) => {
   installComponentTestWindow();
   const runtime = createHookRuntime();
   hookRuntimeRef.current = runtime;
@@ -160,6 +163,7 @@ const createDialogHarness = () => {
         operators={operators}
         onRun={onRun}
         projectPath={PROJECT_PATH}
+        executionEnvironment={executionEnvironment}
       />
     ),
   );
@@ -288,7 +292,9 @@ describe("OperatorChainEditorDialog", () => {
   });
 
   it("saves a valid chain as a playbook", () => {
-    const { harness } = createDialogHarness();
+    const { harness } = createDialogHarness({
+      executionEnvironment: EXECUTION_ENVIRONMENT,
+    });
 
     harness.click(getButtonByText(harness, "Add step"));
     harness.change(getControlByLabel(harness, "reads"), "/data/sample.fastq");
@@ -299,34 +305,37 @@ describe("OperatorChainEditorDialog", () => {
     harness.change(getControlByLabel(harness, "Title"), "RNA seq QC");
     harness.click(getButtonByExactText(harness, "Save"));
 
-    expect(playbookStoreMock.state.savePlaybookFromChain).toHaveBeenCalledWith({
-      playbookId: "rna-seq-qc",
-      title: "RNA seq QC",
-      steps: [
-        {
-          alias: "align_reads",
-          label: "step_1",
-          arguments: {
-            inputs: { reads: "/data/sample.fastq" },
-            params: { threads: 4 },
-            resources: {},
+    expect(playbookStoreMock.state.savePlaybookFromChain).toHaveBeenCalledWith(
+      expect.objectContaining({
+        playbookId: expect.stringMatching(/^rna-seq-qc-[0-9a-f]{8}$/),
+        title: "RNA seq QC",
+        steps: [
+          {
+            alias: "align_reads",
+            label: "step_1",
+            arguments: {
+              inputs: { reads: "/data/sample.fastq" },
+              params: { threads: 4 },
+              resources: {},
+            },
+            dependsOn: [],
           },
-          dependsOn: [],
-        },
-        {
-          alias: "align_reads",
-          label: "step_2",
-          arguments: {
-            inputs: { reads: "/data/trimmed.fastq" },
-            params: { threads: 4 },
-            resources: {},
+          {
+            alias: "align_reads",
+            label: "step_2",
+            arguments: {
+              inputs: { reads: "/data/trimmed.fastq" },
+              params: { threads: 4 },
+              resources: {},
+            },
+            dependsOn: ["step_1"],
           },
-          dependsOn: ["step_1"],
-        },
-      ],
-      expectedOutputKeys: [],
-      projectRoot: PROJECT_PATH,
-    });
+        ],
+        expectedOutputKeys: [],
+        projectRoot: PROJECT_PATH,
+        executionEnvironment: EXECUTION_ENVIRONMENT,
+      }),
+    );
   });
 
   it("adds and removes visible chain steps", () => {

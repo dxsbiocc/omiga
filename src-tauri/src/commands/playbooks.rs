@@ -158,7 +158,17 @@ pub async fn replay_playbook(
     };
     let steps: Vec<ChainStep> = serde_json::from_value(stored.params.clone())
         .map_err(|err| AppError::Config(format!("decode stored chain steps: {err}")))?;
-    let current_versions = resolve_chain_versions(&steps)?;
+    let current_versions = match resolve_chain_versions(&steps) {
+        Ok(versions) => versions,
+        Err(_) => {
+            return Ok(ReplayPlaybookResponse {
+                outcome: "invalidated".to_string(),
+                verified: None,
+                status: None,
+                result: None,
+            });
+        }
+    };
     let now = now_rfc3339();
 
     let outcome = execute_replay(

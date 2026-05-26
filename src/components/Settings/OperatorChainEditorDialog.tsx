@@ -46,6 +46,7 @@ type OperatorChainEditorDialogProps = {
   operators: OperatorSummary[];
   onRun: (steps: OperatorChainStep[]) => Promise<void>;
   projectPath?: string;
+  executionEnvironment?: string;
 };
 
 type FieldGroup = "inputs" | "params";
@@ -322,6 +323,7 @@ export function OperatorChainEditorDialog({
   operators,
   onRun,
   projectPath,
+  executionEnvironment,
 }: OperatorChainEditorDialogProps) {
   const theme = useTheme();
   const fieldRefs = useRef(new Map<string, HTMLInputElement>());
@@ -681,12 +683,14 @@ export function OperatorChainEditorDialog({
     setPlaybookBusy(true);
     setPlaybookError(null);
     try {
+      const playbookId = `${slugifyTemplateName(title)}-${crypto.randomUUID().slice(0, 8)}`;
       await savePlaybookFromChain({
-        playbookId: slugifyTemplateName(title),
+        playbookId,
         title,
         steps: chainSteps,
         expectedOutputKeys: [],
         projectRoot: projectPath,
+        executionEnvironment,
       });
       setSavePlaybookOpen(false);
       setPlaybookTitle("");
