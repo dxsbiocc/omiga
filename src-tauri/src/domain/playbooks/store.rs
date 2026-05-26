@@ -106,7 +106,10 @@ fn append_index_entry(
 ) {
     let playbook_ids = index.entry(index_key).or_default();
 
-    if !playbook_ids.iter().any(|indexed_id| indexed_id == &playbook_id) {
+    if !playbook_ids
+        .iter()
+        .any(|indexed_id| indexed_id == &playbook_id)
+    {
         playbook_ids.push(playbook_id);
     }
 }
@@ -270,8 +273,10 @@ mod tests {
             .parent()
             .expect("temp path has parent")
             .join(format!("escape-{unique}.json"));
-        let sanitized_path =
-            temp.path().join(format!("{}.json", super::sanitize_playbook_id(&playbook_id)));
+        let sanitized_path = temp.path().join(format!(
+            "{}.json",
+            super::sanitize_playbook_id(&playbook_id)
+        ));
 
         let _ = fs::remove_file(&escaped_path);
 
@@ -365,7 +370,10 @@ mod tests {
             .save(quarantined_playbook.clone())
             .expect("save quarantined duplicate");
 
-        assert_eq!(store.find_by_fingerprint(&fingerprint), Some(active_playbook));
+        assert_eq!(
+            store.find_by_fingerprint(&fingerprint),
+            Some(active_playbook)
+        );
         assert_eq!(
             store.get("playbook-quarantined-duplicate"),
             Some(quarantined_playbook)

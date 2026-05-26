@@ -59,7 +59,7 @@ where
     };
     let current_fingerprint = Fingerprint::from_invocation(
         &stored.canonical_id,
-        &chain_composite_version(current_operator_versions),
+        chain_composite_version(current_operator_versions),
         &stored.params,
         current_env_signature,
     );

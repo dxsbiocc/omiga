@@ -74,9 +74,9 @@ pub fn build_chain_playbook(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::store::JsonFilePlaybookStore;
     use super::super::types::PlaybookStore;
+    use super::*;
     use serde_json::{json, Value as JsonValue};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -88,8 +88,8 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("chain-playbook-store-test-{}", Uuid::new_v4()));
+            let path =
+                std::env::temp_dir().join(format!("chain-playbook-store-test-{}", Uuid::new_v4()));
             Self { path }
         }
 

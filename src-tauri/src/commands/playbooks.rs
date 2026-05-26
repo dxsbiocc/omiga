@@ -81,7 +81,10 @@ fn resolve_chain_versions(steps: &[ChainStep]) -> Result<Vec<(String, String)>, 
             continue;
         }
         let resolved = operators::resolve_operator_alias(&step.alias).map_err(|err| {
-            AppError::Config(format!("resolve operator '{}': {}", step.alias, err.message))
+            AppError::Config(format!(
+                "resolve operator '{}': {}",
+                step.alias, err.message
+            ))
         })?;
         let identity = format!(
             "{}/{}@{}",

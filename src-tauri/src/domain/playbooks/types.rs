@@ -157,6 +157,7 @@ pub struct Playbook {
 /// - 所有写操作返回 `Result`,失败给出可读错误,不 panic、不静默吞错。
 /// - 持久化布局参照 `research_system/stores.rs::JsonFileTaskGraphStore`
 ///   (每个 Playbook 一个 `<playbook_id>.json`)。
+///
 /// `Send` 超 trait:重放编排会在 `.await` 间隙持有 `&mut dyn PlaybookStore`,
 /// 故 trait 对象必须 `Send`(tauri 命令返回的 future 要求 `Send`)。
 pub trait PlaybookStore: Send {
@@ -181,7 +182,8 @@ pub trait PlaybookStore: Send {
 #[derive(Debug, Clone)]
 pub enum ReplayResolution {
     /// 仍 Active 且指纹与当前算子版本一致——可安全重放。
-    Ready(Playbook),
+    /// `Box` 装箱以避免枚举因单个大变体而整体变大(clippy::large_enum_variant)。
+    Ready(Box<Playbook>),
     /// 算子版本漂移(指纹不再匹配)——已失效,回退正常规划。
     Invalidated,
     /// 不存在该 playbook。

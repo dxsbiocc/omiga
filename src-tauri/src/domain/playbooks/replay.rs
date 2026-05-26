@@ -24,7 +24,7 @@ pub fn resolve_for_replay(
     }
 
     if playbook.fingerprint.matches(current_fingerprint) {
-        ReplayResolution::Ready(playbook)
+        ReplayResolution::Ready(Box::new(playbook))
     } else {
         ReplayResolution::Invalidated
     }
@@ -199,7 +199,7 @@ mod tests {
         let resolution = resolve_for_replay(&store, "playbook-ready", &fingerprint);
 
         match resolution {
-            ReplayResolution::Ready(resolved) => assert_eq!(resolved, playbook),
+            ReplayResolution::Ready(resolved) => assert_eq!(*resolved, playbook),
             _ => panic!("expected ready resolution"),
         }
     }
