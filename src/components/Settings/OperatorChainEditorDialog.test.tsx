@@ -33,6 +33,14 @@ const pluginStoreMock = vi.hoisted(() => ({
   },
 }));
 
+const playbookStoreMock = vi.hoisted(() => ({
+  state: {
+    savePlaybookFromChain: vi.fn().mockResolvedValue({
+      playbookId: "saved-playbook",
+    }),
+  },
+}));
+
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
@@ -55,6 +63,11 @@ vi.mock("../../state/pluginStore", async (importOriginal) => {
       selector(pluginStoreMock.state),
   };
 });
+
+vi.mock("../../state/playbookStore", () => ({
+  usePlaybookStore: <T,>(selector: (state: typeof playbookStoreMock.state) => T): T =>
+    selector(playbookStoreMock.state),
+}));
 
 vi.mock("@mui/material", async () => {
   const { createMuiMaterialMock } = await import("../../test/__tests__/muiMocks");
@@ -130,7 +143,12 @@ const operators: OperatorSummary[] = [
   },
 ];
 
-const createDialogHarness = () => {
+const PROJECT_PATH = "/workspace/project";
+const EXECUTION_ENVIRONMENT = "test-composer-environment";
+
+const createDialogHarness = ({
+  executionEnvironment,
+}: { executionEnvironment?: string } = {}) => {
   installComponentTestWindow();
   const runtime = createHookRuntime();
   hookRuntimeRef.current = runtime;
@@ -144,6 +162,8 @@ const createDialogHarness = () => {
         onClose={onClose}
         operators={operators}
         onRun={onRun}
+        projectPath={PROJECT_PATH}
+        executionEnvironment={executionEnvironment}
       />
     ),
   );
@@ -160,6 +180,15 @@ const buttons = (harness: ComponentHarness): RenderedNode[] =>
 const getButtonByText = (harness: ComponentHarness, label: string): RenderedNode => {
   const button = buttons(harness).find((node) => textContent(node).includes(label));
   if (!button) throw new Error(`Unable to find button containing "${label}".`);
+  return button;
+};
+
+const getButtonByExactText = (
+  harness: ComponentHarness,
+  label: string,
+): RenderedNode => {
+  const button = buttons(harness).find((node) => textContent(node) === label);
+  if (!button) throw new Error(`Unable to find button exactly matching "${label}".`);
   return button;
 };
 
@@ -217,8 +246,15 @@ const resetPluginStoreMock = () => {
   pluginStoreMock.state.deleteChainTemplate = vi.fn().mockResolvedValue(undefined);
 };
 
+const resetPlaybookStoreMock = () => {
+  playbookStoreMock.state.savePlaybookFromChain = vi.fn().mockResolvedValue({
+    playbookId: "saved-playbook",
+  });
+};
+
 beforeEach(() => {
   resetPluginStoreMock();
+  resetPlaybookStoreMock();
   const originalError = console.error;
   consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((message, ...args) => {
     if (
@@ -253,6 +289,53 @@ describe("OperatorChainEditorDialog", () => {
     expect(stepChips(harness)).toHaveLength(0);
     expect(getButtonByText(harness, "Add step").props.disabled).toBeFalsy();
     expect(getButtonByText(harness, "Run chain").props.disabled).toBe(true);
+  });
+
+  it("saves a valid chain as a playbook", () => {
+    const { harness } = createDialogHarness({
+      executionEnvironment: EXECUTION_ENVIRONMENT,
+    });
+
+    harness.click(getButtonByText(harness, "Add step"));
+    harness.change(getControlByLabel(harness, "reads"), "/data/sample.fastq");
+    harness.click(getButtonByText(harness, "Add step"));
+    harness.change(getLastControlByLabel(harness, "reads"), "/data/trimmed.fastq");
+
+    harness.click(getButtonByText(harness, "Save as Playbook"));
+    harness.change(getControlByLabel(harness, "Title"), "RNA seq QC");
+    harness.click(getButtonByExactText(harness, "Save"));
+
+    expect(playbookStoreMock.state.savePlaybookFromChain).toHaveBeenCalledWith(
+      expect.objectContaining({
+        playbookId: expect.stringMatching(/^rna-seq-qc-[0-9a-f]{8}$/),
+        title: "RNA seq QC",
+        steps: [
+          {
+            alias: "align_reads",
+            label: "step_1",
+            arguments: {
+              inputs: { reads: "/data/sample.fastq" },
+              params: { threads: 4 },
+              resources: {},
+            },
+            dependsOn: [],
+          },
+          {
+            alias: "align_reads",
+            label: "step_2",
+            arguments: {
+              inputs: { reads: "/data/trimmed.fastq" },
+              params: { threads: 4 },
+              resources: {},
+            },
+            dependsOn: ["step_1"],
+          },
+        ],
+        expectedOutputKeys: [],
+        projectRoot: PROJECT_PATH,
+        executionEnvironment: EXECUTION_ENVIRONMENT,
+      }),
+    );
   });
 
   it("adds and removes visible chain steps", () => {

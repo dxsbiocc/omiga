@@ -28,6 +28,7 @@ pub mod memory;
 pub mod notebook;
 pub mod operators;
 pub mod permissions;
+pub mod playbooks;
 pub mod plugins;
 pub mod ralph;
 pub mod sandbox_fs;

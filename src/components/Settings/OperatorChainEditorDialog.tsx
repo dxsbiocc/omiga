@@ -38,12 +38,17 @@ import {
   type OperatorInvocationArguments,
   type OperatorSummary,
 } from "../../state/pluginStore";
+import { usePlaybookStore } from "../../state/playbookStore";
 
 type OperatorChainEditorDialogProps = {
   open: boolean;
   onClose: () => void;
   operators: OperatorSummary[];
   onRun: (steps: OperatorChainStep[]) => Promise<void>;
+  projectPath?: string;
+  executionEnvironment?: string;
+  sshServer?: string;
+  sandboxBackend?: string;
 };
 
 type FieldGroup = "inputs" | "params";
@@ -319,6 +324,10 @@ export function OperatorChainEditorDialog({
   onClose,
   operators,
   onRun,
+  projectPath,
+  executionEnvironment,
+  sshServer,
+  sandboxBackend,
 }: OperatorChainEditorDialogProps) {
   const theme = useTheme();
   const fieldRefs = useRef(new Map<string, HTMLInputElement>());
@@ -332,10 +341,15 @@ export function OperatorChainEditorDialog({
   const [templateDescription, setTemplateDescription] = useState("");
   const [templateBusy, setTemplateBusy] = useState(false);
   const [templateError, setTemplateError] = useState<string | null>(null);
+  const [savePlaybookOpen, setSavePlaybookOpen] = useState(false);
+  const [playbookTitle, setPlaybookTitle] = useState("");
+  const [playbookBusy, setPlaybookBusy] = useState(false);
+  const [playbookError, setPlaybookError] = useState<string | null>(null);
   const chainTemplates = usePluginStore((state) => state.chainTemplates);
   const loadChainTemplates = usePluginStore((state) => state.loadChainTemplates);
   const saveChainTemplate = usePluginStore((state) => state.saveChainTemplate);
   const deleteChainTemplate = usePluginStore((state) => state.deleteChainTemplate);
+  const savePlaybookFromChain = usePlaybookStore((state) => state.savePlaybookFromChain);
 
   const exposedOperators = useMemo(
     () =>
@@ -388,7 +402,9 @@ export function OperatorChainEditorDialog({
     setFocusedField(null);
     setLocalError(null);
     setTemplateError(null);
+    setPlaybookError(null);
     setSaveTemplateOpen(false);
+    setSavePlaybookOpen(false);
     setLoadTemplateOpen(false);
   }, [open]);
 
@@ -552,7 +568,8 @@ export function OperatorChainEditorDialog({
     && !chainGraphError
     && !submitting;
   const canSaveTemplate =
-    steps.length > 0 && !chainGraphError && !submitting && !templateBusy;
+    steps.length > 0 && !chainGraphError && !submitting && !templateBusy && !playbookBusy;
+  const canSavePlaybook = canSaveTemplate && steps.length >= 2;
 
   const buildSteps = (): OperatorChainStep[] =>
     steps.map((step, index) => {
@@ -634,6 +651,59 @@ export function OperatorChainEditorDialog({
       setTemplateError(error instanceof Error ? error.message : String(error));
     } finally {
       setTemplateBusy(false);
+    }
+  };
+
+  const handleOpenSavePlaybook = () => {
+    if (steps.length === 0) return;
+    setPlaybookTitle("");
+    setPlaybookError(null);
+    setSavePlaybookOpen(true);
+  };
+
+  const handleSavePlaybook = async () => {
+    const title = playbookTitle.trim();
+    if (title.length === 0) {
+      setPlaybookError("Playbook title is required.");
+      return;
+    }
+    if (!steps.every(stepIsValid)) {
+      setPlaybookError("Complete all required step fields before saving.");
+      return;
+    }
+    if (chainGraphError) {
+      setPlaybookError(chainGraphError);
+      return;
+    }
+
+    let chainSteps: OperatorChainStep[];
+    try {
+      chainSteps = buildSteps();
+    } catch (error) {
+      setPlaybookError(error instanceof Error ? error.message : String(error));
+      return;
+    }
+
+    setPlaybookBusy(true);
+    setPlaybookError(null);
+    try {
+      const playbookId = `${slugifyTemplateName(title)}-${crypto.randomUUID().slice(0, 8)}`;
+      await savePlaybookFromChain({
+        playbookId,
+        title,
+        steps: chainSteps,
+        expectedOutputKeys: [],
+        projectRoot: projectPath,
+        executionEnvironment,
+        sshServer,
+        sandboxBackend,
+      });
+      setSavePlaybookOpen(false);
+      setPlaybookTitle("");
+    } catch (error) {
+      setPlaybookError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPlaybookBusy(false);
     }
   };
 
@@ -814,6 +884,16 @@ export function OperatorChainEditorDialog({
             sx={{ textTransform: "none", borderRadius: 1.5 }}
           >
             Save as template
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<SaveRounded />}
+            disabled={!canSavePlaybook}
+            onClick={handleOpenSavePlaybook}
+            sx={{ textTransform: "none", borderRadius: 1.5 }}
+          >
+            Save as Playbook
           </Button>
         </Stack>
         <IconButton
@@ -1150,6 +1230,51 @@ export function OperatorChainEditorDialog({
             startIcon={templateBusy ? <CircularProgress size={18} color="inherit" /> : <SaveRounded />}
             disabled={templateBusy || templateName.trim().length === 0}
             onClick={() => void handleSaveTemplate()}
+            sx={{ textTransform: "none", borderRadius: 1.5 }}
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={savePlaybookOpen}
+        onClose={playbookBusy ? undefined : () => setSavePlaybookOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Save as Playbook</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5} sx={{ pt: 1 }}>
+            <TextField
+              label="Title"
+              required
+              autoFocus
+              value={playbookTitle}
+              disabled={playbookBusy}
+              onChange={(event) => setPlaybookTitle(event.target.value)}
+              fullWidth
+            />
+            {playbookError && (
+              <Alert severity="error" sx={{ borderRadius: 2 }}>
+                {playbookError}
+              </Alert>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setSavePlaybookOpen(false)}
+            disabled={playbookBusy}
+            sx={{ textTransform: "none", borderRadius: 1.5 }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={playbookBusy ? <CircularProgress size={18} color="inherit" /> : <SaveRounded />}
+            disabled={playbookBusy || playbookTitle.trim().length === 0}
+            onClick={() => void handleSavePlaybook()}
             sx={{ textTransform: "none", borderRadius: 1.5 }}
           >
             Save

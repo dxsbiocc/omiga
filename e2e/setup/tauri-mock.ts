@@ -228,6 +228,10 @@ export const TAURI_MOCK_SCRIPT = `
     set_operator_enabled: () => null,
     run_operator: () => null,
     run_operator_chain: () => ({ ok: true, steps: [] }),
+    // Playbooks (crystallization)
+    list_playbooks: () => ([]),
+    save_playbook_from_chain: () => ({}),
+    replay_playbook: () => ({ outcome: "replayed", verified: true, status: "active" }),
     list_operator_runs: () => ([]),
     list_active_operator_tasks: () => ([]),
     read_operator_run: () => null,

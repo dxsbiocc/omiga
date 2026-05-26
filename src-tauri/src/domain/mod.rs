@@ -26,6 +26,7 @@ pub mod orchestration;
 pub mod pageindex;
 pub mod permissions;
 pub mod persistence;
+pub mod playbooks;
 pub mod plugin_runtime;
 pub mod plugins;
 pub mod post_turn_settings;

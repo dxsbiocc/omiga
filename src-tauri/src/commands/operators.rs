@@ -107,7 +107,7 @@ pub struct OperatorChainResult {
     pub error: Option<String>,
 }
 
-fn resolve_project_root(project_root: Option<String>) -> PathBuf {
+pub(crate) fn resolve_project_root(project_root: Option<String>) -> PathBuf {
     let raw = project_root.unwrap_or_default();
     let trimmed = raw.trim();
     let path = if trimmed.is_empty() || trimmed == "." {
@@ -129,7 +129,7 @@ async fn env_store_for_session(state: &OmigaAppState, session_id: Option<&str>) 
         .unwrap_or_else(EnvStore::new)
 }
 
-async fn build_operator_context(
+pub(crate) async fn build_operator_context(
     state: &OmigaAppState,
     project_root: Option<String>,
     session_id: Option<String>,
@@ -1016,17 +1016,6 @@ pub async fn run_operator_chain(
         ));
     }
 
-    let steps = match prepare_chain_steps(steps) {
-        Ok(steps) => steps,
-        Err(error) => {
-            return Ok(OperatorChainResult {
-                steps: Vec::new(),
-                ok: false,
-                error: Some(error),
-            });
-        }
-    };
-
     let ctx = build_operator_context(
         &state,
         project_root,
@@ -1038,12 +1027,36 @@ pub async fn run_operator_chain(
     )
     .await;
 
+    Ok(run_chain_with_context(ctx, steps).await)
+}
+
+/// Run an operator chain from raw steps using an already-built [`ToolContext`].
+///
+/// Shared by the interactive `run_operator_chain` command and Playbook replay
+/// (`commands::playbooks`). Encapsulates step preparation + per-step runner wiring
+/// so callers that already hold a context (e.g. replay) need not depend on the
+/// chain executor internals.
+pub(crate) async fn run_chain_with_context(
+    ctx: ToolContext,
+    raw_steps: Vec<operators::ChainStep>,
+) -> OperatorChainResult {
+    let prepared = match prepare_chain_steps(raw_steps) {
+        Ok(steps) => steps,
+        Err(error) => {
+            return OperatorChainResult {
+                steps: Vec::new(),
+                ok: false,
+                error: Some(error),
+            };
+        }
+    };
+
     let runner: ChainStepRunner = Arc::new(move |step, arguments| {
         let ctx = ctx.clone();
         Box::pin(async move { execute_prepared_operator_chain_step(ctx, step, arguments).await })
     });
 
-    Ok(run_prepared_operator_chain(steps, runner).await)
+    run_prepared_operator_chain(prepared, runner).await
 }
 
 /// Cancel an in-progress async operator task by its `task_id`.
