@@ -3,7 +3,7 @@
 //! 任务规格见 `docs/PLAYBOOK_CRYSTALLIZATION_DESIGN.md` 与 orchestrator 下发的提示。
 //! 需实现:`JsonFilePlaybookStore`(每 Playbook 一个 `<id>.json`,参照
 //! `research_system/stores.rs::JsonFileTaskGraphStore`)+ `PlaybookStore` trait 全部方法。
-//! 硬性要求:`find_by_fingerprint` 必须经内存索引 `index_key -> playbook_id` 做 O(1) 查表,
+//! 硬性要求:`find_by_fingerprint` 必须经内存索引 `index_key -> playbook_id 列表` 做 O(1) 查表,
 //! 禁止线性扫描;仅返回 `status == Active`。附完整单元测试(含 round-trip、索引命中、
 //! 版本变更失配、delete 清索引)。
 
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct JsonFilePlaybookStore {
     dir: PathBuf,
-    index: HashMap<String, String>,
+    index: HashMap<String, Vec<String>>,
 }
 
 impl JsonFilePlaybookStore {
@@ -27,7 +27,11 @@ impl JsonFilePlaybookStore {
         let mut index = HashMap::new();
 
         for playbook in read_json_dir_lossy(&dir) {
-            index.insert(playbook.fingerprint.index_key(), playbook.playbook_id);
+            append_index_entry(
+                &mut index,
+                playbook.fingerprint.index_key(),
+                playbook.playbook_id,
+            );
         }
 
         Self { dir, index }
@@ -38,9 +42,9 @@ impl PlaybookStore for JsonFilePlaybookStore {
     fn save(&mut self, playbook: Playbook) -> Result<(), String> {
         write_json_record(&self.dir, &playbook.playbook_id, &playbook)?;
 
-        self.index
-            .retain(|_, indexed_id| indexed_id != &playbook.playbook_id);
-        self.index.insert(
+        remove_playbook_from_index(&mut self.index, &playbook.playbook_id);
+        append_index_entry(
+            &mut self.index,
             playbook.fingerprint.index_key(),
             playbook.playbook_id.clone(),
         );
@@ -58,16 +62,19 @@ impl PlaybookStore for JsonFilePlaybookStore {
 
     fn find_by_fingerprint(&self, fingerprint: &Fingerprint) -> Option<Playbook> {
         let index_key = fingerprint.index_key();
-        let playbook_id = self.index.get(&index_key)?;
-        let playbook = self.get(playbook_id)?;
+        let playbook_ids = self.index.get(&index_key)?;
 
-        if playbook.fingerprint.index_key() == index_key
-            && playbook.health.status == PlaybookStatus::Active
-        {
-            Some(playbook)
-        } else {
-            None
-        }
+        playbook_ids.iter().find_map(|playbook_id| {
+            let playbook = self.get(playbook_id)?;
+
+            if playbook.fingerprint.index_key() == index_key
+                && playbook.health.status == PlaybookStatus::Active
+            {
+                Some(playbook)
+            } else {
+                None
+            }
+        })
     }
 
     fn list(&self) -> Vec<Playbook> {
@@ -87,10 +94,28 @@ impl PlaybookStore for JsonFilePlaybookStore {
             }
         }
 
-        self.index
-            .retain(|_, indexed_id| indexed_id.as_str() != playbook_id);
+        remove_playbook_from_index(&mut self.index, playbook_id);
         Ok(())
     }
+}
+
+fn append_index_entry(
+    index: &mut HashMap<String, Vec<String>>,
+    index_key: String,
+    playbook_id: String,
+) {
+    let playbook_ids = index.entry(index_key).or_default();
+
+    if !playbook_ids.iter().any(|indexed_id| indexed_id == &playbook_id) {
+        playbook_ids.push(playbook_id);
+    }
+}
+
+fn remove_playbook_from_index(index: &mut HashMap<String, Vec<String>>, playbook_id: &str) {
+    index.retain(|_, playbook_ids| {
+        playbook_ids.retain(|indexed_id| indexed_id != playbook_id);
+        !playbook_ids.is_empty()
+    });
 }
 
 fn write_json_record<T: Serialize>(dir: &Path, id: &str, value: &T) -> Result<(), String> {
@@ -315,6 +340,36 @@ mod tests {
 
         assert_eq!(store.find_by_fingerprint(&fingerprint), None);
         assert_eq!(store.get("playbook-quarantined"), Some(playbook));
+    }
+
+    #[test]
+    fn find_by_fingerprint_returns_active_when_quarantined_duplicate_exists() {
+        let temp = TestDir::new();
+        let mut store = JsonFilePlaybookStore::new(temp.path());
+        let fingerprint = test_fingerprint("1.0.0");
+        let active_playbook = test_playbook(
+            "playbook-active-duplicate",
+            fingerprint.clone(),
+            PlaybookStatus::Active,
+        );
+        let quarantined_playbook = test_playbook(
+            "playbook-quarantined-duplicate",
+            fingerprint.clone(),
+            PlaybookStatus::Quarantined,
+        );
+
+        store
+            .save(active_playbook.clone())
+            .expect("save active duplicate");
+        store
+            .save(quarantined_playbook.clone())
+            .expect("save quarantined duplicate");
+
+        assert_eq!(store.find_by_fingerprint(&fingerprint), Some(active_playbook));
+        assert_eq!(
+            store.get("playbook-quarantined-duplicate"),
+            Some(quarantined_playbook)
+        );
     }
 
     #[test]

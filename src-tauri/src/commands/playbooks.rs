@@ -72,7 +72,7 @@ fn compose_env_signature(
     Some(parts.join(";"))
 }
 
-/// 解析链中每个唯一算子别名的当前版本(去重,保持首次出现顺序)。
+/// 解析链中每个唯一算子别名的当前算子身份(source/id@version,去重,保持首次出现顺序)。
 fn resolve_chain_versions(steps: &[ChainStep]) -> Result<Vec<(String, String)>, AppError> {
     let mut versions = Vec::new();
     let mut seen = HashSet::new();
@@ -83,7 +83,13 @@ fn resolve_chain_versions(steps: &[ChainStep]) -> Result<Vec<(String, String)>, 
         let resolved = operators::resolve_operator_alias(&step.alias).map_err(|err| {
             AppError::Config(format!("resolve operator '{}': {}", step.alias, err.message))
         })?;
-        versions.push((step.alias.clone(), resolved.spec.metadata.version.clone()));
+        let identity = format!(
+            "{}/{}@{}",
+            resolved.spec.source.source_plugin,
+            resolved.spec.metadata.id,
+            resolved.spec.metadata.version,
+        );
+        versions.push((step.alias.clone(), identity));
     }
     Ok(versions)
 }
