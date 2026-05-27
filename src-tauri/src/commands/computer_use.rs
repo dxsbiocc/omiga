@@ -2,7 +2,7 @@
 
 use crate::commands::CommandResult;
 use crate::domain::computer_use::{ComputerUseAuditSummary, ComputerUseStopStatus};
-use crate::domain::plugins::{active_plugin_root, PluginId};
+use crate::domain::plugins::active_plugin_root_by_name;
 use crate::errors::AppError;
 use serde::Serialize;
 use serde_json::json;
@@ -145,9 +145,7 @@ fn read_backend_status() -> ComputerUseBackendStatus {
 }
 
 fn installed_computer_use_plugin_root() -> PathBuf {
-    PluginId::new("computer-use", "omiga-curated")
-        .ok()
-        .and_then(|plugin_id| active_plugin_root(&plugin_id))
+    active_plugin_root_by_name("computer-use")
         .unwrap_or_else(|| plugin_store_placeholder_root("computer-use"))
 }
 

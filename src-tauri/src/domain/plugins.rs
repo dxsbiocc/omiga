@@ -1619,6 +1619,23 @@ fn is_plugin_enabled(config: &PluginConfigFile, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn configured_plugin_ids(config: &PluginConfigFile) -> Vec<PluginId> {
+    let mut ids = config
+        .plugins
+        .keys()
+        .filter_map(|key| match PluginId::parse(key) {
+            Ok(plugin_id) => Some(plugin_id),
+            Err(err) => {
+                tracing::warn!(plugin = key, "ignoring invalid plugin config entry: {err}");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    ids.sort_by_key(PluginId::key);
+    ids.dedup_by(|a, b| a.key() == b.key());
+    ids
+}
+
 fn normalize_id(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('-', "_")
 }
@@ -1700,14 +1717,10 @@ pub fn environment_profile_enabled(source_plugin: &str, environment_id: &str) ->
 
 #[cfg(test)]
 fn enabled_plugin_ids(config: &PluginConfigFile) -> Vec<PluginId> {
-    let mut ids = config
-        .plugins
-        .iter()
-        .filter(|(_, entry)| entry.enabled)
-        .filter_map(|(key, _)| PluginId::parse(key).ok())
-        .collect::<Vec<_>>();
-    ids.sort_by_key(PluginId::key);
-    ids
+    configured_plugin_ids(config)
+        .into_iter()
+        .filter(|plugin_id| is_plugin_enabled(config, &plugin_id.key()))
+        .collect()
 }
 
 fn plugin_base_root_in_cache(cache_root: &Path, plugin_id: &PluginId) -> PathBuf {
@@ -1830,6 +1843,28 @@ fn active_plugin_root_from_roots(cache_root: &Path, plugin_id: &PluginId) -> Opt
 
 pub fn active_plugin_root(plugin_id: &PluginId) -> Option<PathBuf> {
     active_plugin_root_from_roots(&plugin_cache_root(), plugin_id)
+}
+
+pub fn active_plugin_root_by_name(plugin_name: &str) -> Option<PathBuf> {
+    let plugin_name = plugin_name.trim();
+    let config = read_config();
+    let cache_root = plugin_cache_root();
+    migrate_legacy_plugin_cache_best_effort(&cache_root);
+    let mut candidates = configured_plugin_ids(&config)
+        .into_iter()
+        .filter(|plugin_id| plugin_id.name.as_str() == plugin_name)
+        .filter(|plugin_id| active_plugin_root_from_roots(&cache_root, plugin_id).is_some())
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        let left_enabled = is_plugin_enabled(&config, &left.key());
+        let right_enabled = is_plugin_enabled(&config, &right.key());
+        right_enabled
+            .cmp(&left_enabled)
+            .then_with(|| left.marketplace.cmp(&right.marketplace))
+    });
+    candidates
+        .into_iter()
+        .find_map(|plugin_id| active_plugin_root(&plugin_id))
 }
 
 fn prompt_safe_description(description: Option<&str>) -> Option<String> {
@@ -3131,15 +3166,8 @@ fn unlisted_installed_plugin_summaries(
     cache_root: &Path,
 ) -> Vec<PluginSummary> {
     migrate_legacy_plugin_cache_best_effort(cache_root);
-    let mut ids = config
-        .plugins
-        .keys()
-        .filter_map(|key| PluginId::parse(key).ok())
-        .collect::<Vec<_>>();
-    ids.sort_by_key(PluginId::key);
-    ids.dedup_by(|a, b| a.key() == b.key());
-
-    ids.into_iter()
+    configured_plugin_ids(config)
+        .into_iter()
         .filter_map(|plugin_id| {
             let key = plugin_id.key();
             if listed_ids.contains(&key) {
@@ -4435,6 +4463,31 @@ pub fn uninstall_plugin(plugin_id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::{OsStr, OsString};
+
+    static PLUGIN_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ScopedEnv {
+        key: &'static str,
+        old: Option<OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn curated_marketplace_path() -> PathBuf {
         dev_builtin_marketplace_path()
@@ -4609,6 +4662,58 @@ mod tests {
             .unwrap();
         }
         plugin_root
+    }
+
+    #[test]
+    fn test_active_plugin_root_by_name_non_curated_computer_use_marketplace() {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("HOME", tmp.path());
+        let _user_profile = ScopedEnv::set("USERPROFILE", tmp.path());
+
+        let marketplace_root = tmp.path().join("marketplace");
+        let plugin_source = marketplace_root.join("plugins").join("computer-use");
+        fs::create_dir_all(&plugin_source).expect("plugin source");
+        fs::write(
+            plugin_source.join(PLUGIN_MANIFEST_FILE),
+            r#"{
+              "name": "computer-use",
+              "version": "0.1.0",
+              "interface": { "category": "Tool" }
+            }"#,
+        )
+        .expect("plugin manifest");
+        let marketplace_path = marketplace_root.join(MARKETPLACE_FILE_NAME);
+        fs::write(
+            &marketplace_path,
+            r#"{
+              "name": "my-marketplace",
+              "plugins": [
+                {
+                  "name": "computer-use",
+                  "source": { "source": "local", "path": "./plugins/computer-use" },
+                  "policy": { "installation": "AVAILABLE", "authentication": "ON_USE" },
+                  "category": "Tool"
+                }
+              ]
+            }"#,
+        )
+        .expect("marketplace manifest");
+
+        let installed = install_plugin(&marketplace_path, "computer-use").expect("install plugin");
+        let expected_path = tmp
+            .path()
+            .join(".omiga")
+            .join("plugins")
+            .join("tools")
+            .join("computer-use");
+
+        assert_eq!(installed.plugin_id, "computer-use@my-marketplace");
+        assert_eq!(PathBuf::from(installed.installed_path), expected_path);
+        assert_eq!(
+            active_plugin_root_by_name("computer-use").as_deref(),
+            Some(expected_path.as_path())
+        );
     }
 
     #[test]
