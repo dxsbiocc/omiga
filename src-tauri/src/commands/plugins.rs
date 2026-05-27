@@ -7,7 +7,8 @@ use crate::domain::plugin_runtime::retrieval::validation::{
     validate_retrieval_plugin_root, PluginRetrievalValidationReport,
 };
 use crate::domain::plugins::{
-    self, PluginDetail, PluginEnvironmentCheckResult, PluginInstallResult, PluginMarketplaceEntry,
+    self, MarketplaceSourceKind, MarketplaceSourceView, PluginDetail, PluginEnvironmentCheckResult,
+    PluginInstallResult, PluginMarketplaceEntry, RefreshResult, UserMarketplaceSource,
 };
 use crate::domain::retrieval::providers::plugin_provider::{
     clear_global_plugin_process_pool, global_plugin_process_pool_statuses,
@@ -25,6 +26,10 @@ fn resolve_optional_project_root(project_root: Option<String>) -> Option<PathBuf
     }
     let path = PathBuf::from(trimmed);
     Some(path.canonicalize().unwrap_or(path))
+}
+
+fn default_project_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 async fn invalidate_plugin_dependent_caches(app_state: &OmigaAppState) {
@@ -71,6 +76,47 @@ pub async fn list_omiga_plugin_marketplaces(
         root.as_deref(),
         resource_dir.as_deref(),
     ))
+}
+
+#[tauri::command]
+pub fn list_omiga_plugin_marketplace_sources() -> Vec<UserMarketplaceSource> {
+    plugins::list_user_marketplace_sources()
+}
+
+#[tauri::command]
+pub fn list_omiga_plugin_marketplace_source_views() -> Vec<MarketplaceSourceView> {
+    plugins::list_marketplace_source_views()
+}
+
+#[tauri::command]
+pub fn add_omiga_plugin_marketplace_source(
+    kind: MarketplaceSourceKind,
+    location: String,
+    label: Option<String>,
+) -> Result<UserMarketplaceSource, String> {
+    plugins::add_user_marketplace_source(kind, location, label)
+}
+
+#[tauri::command]
+pub fn remove_omiga_plugin_marketplace_source(id: String) -> Result<(), String> {
+    plugins::remove_user_marketplace_source(&id)
+}
+
+#[tauri::command]
+pub async fn refresh_omiga_plugin_marketplace_source(
+    id: String,
+    project_root: Option<String>,
+) -> CommandResult<RefreshResult> {
+    let root = resolve_optional_project_root(project_root).unwrap_or_else(default_project_root);
+    plugins::refresh_user_marketplace_source_with_project_root(&id, &root).map_err(plugin_error)
+}
+
+#[tauri::command]
+pub fn set_omiga_plugin_marketplace_source_enabled(
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    plugins::set_user_marketplace_source_enabled(&id, enabled)
 }
 
 #[tauri::command]
