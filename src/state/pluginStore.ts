@@ -1385,13 +1385,6 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           projectRoot: projectRoot ?? "",
         },
       );
-      if (!result.ok) {
-        const marketplaceSourceViews = await invoke<MarketplaceSourceView[]>(
-          "list_omiga_plugin_marketplace_source_views",
-        );
-        set({ marketplaceSourceViews: [...marketplaceSourceViews], isMutating: false });
-        return result;
-      }
       const [marketplaceSourceViews, marketplaces] = await Promise.all([
         invoke<MarketplaceSourceView[]>(
           "list_omiga_plugin_marketplace_source_views",

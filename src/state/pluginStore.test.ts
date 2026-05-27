@@ -745,6 +745,36 @@ describe("usePluginStore operator actions", () => {
     expect(usePluginStore.getState().isMutating).toBe(false);
   });
 
+  it("refreshes marketplace sources and reloads the plugin catalog on failure", async () => {
+    const sourceViews = [marketplaceSourceView()];
+    const refreshResult: RefreshResult = {
+      id: "source-1",
+      ok: false,
+      message: "invalid remote marketplace cache",
+      marketplaceName: null,
+      pluginCount: null,
+    };
+    const catalog = [marketplace("/cache/marketplace.json", [])];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "refresh_omiga_plugin_marketplace_source") return refreshResult;
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    const result = await usePluginStore
+      .getState()
+      .refreshMarketplaceSource("source-1", "/project");
+
+    expect(result).toEqual(refreshResult);
+    expect(invokeMock).toHaveBeenCalledWith("list_omiga_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
   it("ensures the built-in marketplace and reloads sources plus catalog on success", async () => {
     const status: BuiltinMarketplaceStatus = {
       ok: true,

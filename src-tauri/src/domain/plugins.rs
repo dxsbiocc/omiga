@@ -21,7 +21,7 @@ use crate::domain::plugin_runtime::retrieval::manifest::PluginRetrievalRuntime;
 use crate::domain::plugin_runtime::retrieval::manifest::{
     load_plugin_retrieval_manifest, PluginRetrievalManifest, PluginRetrievalResource,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -516,6 +516,8 @@ pub struct PluginCapabilitySummary {
     pub mcp_servers: Vec<String>,
     pub apps: Vec<String>,
     pub retrieval_routes: Vec<String>,
+    pub operator_count: usize,
+    pub operation_count: usize,
     pub template_count: usize,
     pub template_groups: Vec<String>,
 }
@@ -660,6 +662,12 @@ fn plugin_capability_parts(plugin: &PluginCapabilitySummary) -> Vec<String> {
             backtick_list(&plugin.retrieval_routes)
         ));
     }
+    if plugin.operator_count > 0 {
+        capabilities.push(format!(
+            "operators: {} programs / {} operations via `unit_search` / `operator_describe` / `operator_execute`",
+            plugin.operator_count, plugin.operation_count
+        ));
+    }
     if plugin.template_count > 0 {
         let groups = if plugin.template_groups.is_empty() {
             String::new()
@@ -701,7 +709,7 @@ pub fn format_plugins_system_section(outcome: &PluginLoadOutcome) -> Option<Stri
 
     let mut lines = vec![
         "## Plugins (available)".to_string(),
-        "Omiga plugins are native capability bundles: skills, MCP server configs, app connector references, and UI metadata. They do not run VS Code extension code or require a VS Code Extension Host.".to_string(),
+        "Omiga plugins are native capability bundles: skills, MCP server configs, app connector references, Operator/Template units, retrieval routes, environments, and UI metadata. They do not run VS Code extension code or require a VS Code Extension Host.".to_string(),
         String::new(),
         "### Available plugins".to_string(),
     ];
@@ -774,8 +782,35 @@ pub fn format_selected_plugins_system_section(
 struct PluginConfigFile {
     #[serde(default)]
     plugins: HashMap<String, PluginConfigEntry>,
-    #[serde(default)]
+    // Preserve the rest of config.json when a single user marketplace entry is malformed.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_marketplace_sources_leniently"
+    )]
     marketplaces: Vec<UserMarketplaceSource>,
+}
+
+fn deserialize_marketplace_sources_leniently<'de, D>(
+    deserializer: D,
+) -> Result<Vec<UserMarketplaceSource>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let entries = Vec::<JsonValue>::deserialize(deserializer)?;
+    Ok(entries
+        .into_iter()
+        .filter_map(
+            |entry| match serde_json::from_value::<UserMarketplaceSource>(entry) {
+                Ok(source) => Some(source),
+                Err(err) => {
+                    tracing::warn!(
+                        "skipping invalid plugin marketplace source config entry: {err}"
+                    );
+                    None
+                }
+            },
+        )
+        .collect())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1654,10 +1689,8 @@ fn removed_builtin_plugin(plugin_name: &str) -> bool {
 }
 
 fn migrate_superseded_builtin_plugin_config(config: &mut PluginConfigFile) -> bool {
-    migrate_superseded_builtin_plugin_config_with_marketplaces(
-        config,
-        &[dev_builtin_marketplace_path()],
-    )
+    let marketplace_paths = builtin_marketplace_path().into_iter().collect::<Vec<_>>();
+    migrate_superseded_builtin_plugin_config_with_marketplaces(config, &marketplace_paths)
 }
 
 fn migrate_superseded_builtin_plugin_config_with_marketplaces(
@@ -1956,6 +1989,10 @@ fn run_git_command(command: &mut Command, action: &str) -> Result<(), String> {
 }
 
 fn clone_or_update_marketplace_repo(remote_url: &str, dest: &Path) -> Result<(), String> {
+    if dest.exists() && !valid_git_work_tree(dest)? {
+        remove_marketplace_cache_dest(dest)?;
+    }
+
     if !dest.exists() {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
@@ -1982,6 +2019,44 @@ fn clone_or_update_marketplace_repo(remote_url: &str, dest: &Path) -> Result<(),
     run_git_command(&mut command, "pull")
 }
 
+fn valid_git_work_tree(dest: &Path) -> Result<bool, String> {
+    if !dest.is_dir() || !dest.join(".git").exists() {
+        return Ok(false);
+    }
+
+    let output = match Command::new("git")
+        .arg("-C")
+        .arg(dest)
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(GIT_REQUIRED_MESSAGE.to_string());
+        }
+        Err(err) => return Err(format!("run git rev-parse: {err}")),
+    };
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+fn remove_marketplace_cache_dest(dest: &Path) -> Result<(), String> {
+    if dest.is_dir() {
+        fs::remove_dir_all(dest)
+    } else {
+        fs::remove_file(dest)
+    }
+    .map_err(|err| {
+        format!(
+            "remove invalid marketplace cache `{}`: {err}",
+            dest.display()
+        )
+    })
+}
+
 fn builtin_marketplace_status(
     ok: bool,
     source: &str,
@@ -1999,6 +2074,17 @@ fn builtin_marketplace_status(
 pub fn ensure_builtin_marketplace() -> Result<BuiltinMarketplaceStatus, String> {
     if let Some(raw_env_path) = builtin_env_override_path() {
         if let Some(path) = resolve_marketplace_json_override(raw_env_path.clone()) {
+            if let Err(err) = read_marketplace(&path) {
+                return Ok(builtin_marketplace_status(
+                    false,
+                    "env",
+                    Some(&path),
+                    format!(
+                        "OMIGA_PLUGINS_DIR built-in marketplace override `{}` is invalid: {err}",
+                        path.display()
+                    ),
+                ));
+            }
             return Ok(builtin_marketplace_status(
                 true,
                 "env",
@@ -2014,6 +2100,17 @@ pub fn ensure_builtin_marketplace() -> Result<BuiltinMarketplaceStatus, String> 
 
     let dev_path = dev_builtin_marketplace_path();
     if dev_path.is_file() {
+        if let Err(err) = read_marketplace(&dev_path) {
+            return Ok(builtin_marketplace_status(
+                false,
+                "dev",
+                Some(&dev_path),
+                format!(
+                    "Development built-in marketplace `{}` is invalid: {err}",
+                    dev_path.display()
+                ),
+            ));
+        }
         return Ok(builtin_marketplace_status(
             true,
             "dev",
@@ -2113,13 +2210,13 @@ fn refresh_builtin_local_result(id: &str, source: &str, path: &Path) -> RefreshR
                 path = %path.display(),
                 "built-in marketplace source does not require refresh, but metadata could not be read: {err}"
             );
-            RefreshResult {
-                id: id.to_string(),
-                ok: true,
-                message: format!("Built-in marketplace source `{source}` does not require refresh"),
-                marketplace_name: None,
-                plugin_count: None,
-            }
+            refresh_error_result(
+                id,
+                format!(
+                    "Built-in marketplace source `{source}` at `{}` is invalid: {err}",
+                    path.display()
+                ),
+            )
         }
     }
 }
@@ -3581,6 +3678,13 @@ fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<Plugin
     let mut mcp_servers = plugin.mcp_servers.keys().cloned().collect::<Vec<_>>();
     mcp_servers.sort();
     let retrieval_routes = plugin_retrieval_route_names(plugin.retrieval.as_ref());
+    let operators =
+        crate::domain::operators::list_operator_summaries_for_plugin_root(&plugin.id, &plugin.root);
+    let operator_count = operators.len();
+    let operation_count = operators
+        .iter()
+        .map(|operator| operator.operations.len())
+        .sum();
     let (template_count, template_groups) = plugin_template_capability_summary(plugin);
     let summary = PluginCapabilitySummary {
         id: plugin.id.clone(),
@@ -3594,6 +3698,8 @@ fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<Plugin
         mcp_servers,
         apps: plugin.apps.clone(),
         retrieval_routes,
+        operator_count,
+        operation_count,
         template_count,
         template_groups,
     };
@@ -3602,6 +3708,7 @@ fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<Plugin
         || !summary.mcp_servers.is_empty()
         || !summary.apps.is_empty()
         || !summary.retrieval_routes.is_empty()
+        || summary.operator_count > 0
         || summary.template_count > 0)
         .then_some(summary)
 }
@@ -3742,8 +3849,6 @@ fn filter_retrieval_manifest_for_config(
 
 fn load_plugins_from_config(config: &PluginConfigFile, cache_root: &Path) -> PluginLoadOutcome {
     migrate_legacy_plugin_cache_best_effort(cache_root);
-    refresh_configured_builtin_plugins_best_effort(config, cache_root);
-    repair_configured_builtin_resource_runner_assets(config, cache_root);
     let mut configured = config.plugins.iter().collect::<Vec<_>>();
     configured.sort_by(|(left, _), (right, _)| left.cmp(right));
     let plugins = configured
@@ -3955,7 +4060,9 @@ fn refresh_configured_builtin_plugins(
     config: &PluginConfigFile,
     cache_root: &Path,
 ) -> Result<usize, String> {
-    let marketplace_path = dev_builtin_marketplace_path();
+    let Some(marketplace_path) = builtin_marketplace_path() else {
+        return Ok(0);
+    };
     let marketplace = read_marketplace(&marketplace_path)?;
     let store_root = plugin_store_root_from_cache_root(cache_root);
     let mut refreshed = 0;
@@ -3977,29 +4084,48 @@ fn refresh_configured_builtin_plugins(
         }
         let kind = plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest);
         let target_base = plugin_base_root_for_kind(&store_root, kind, &plugin_id);
-        let has_stale_typed_root = typed_plugin_base_roots(&store_root, &plugin_id)
-            .into_iter()
-            .any(|candidate| candidate != target_base && candidate.exists());
-        if !has_stale_typed_root {
-            continue;
+        if migrate_stale_typed_plugin_root(&store_root, &plugin_id, &target_base)? {
+            refreshed += 1;
         }
-        remove_other_typed_plugin_roots(&store_root, &plugin_id, &target_base)?;
-        replace_plugin_root_atomically(&source_path, &target_base)?;
-        refreshed += 1;
     }
 
     Ok(refreshed)
 }
 
-fn refresh_configured_builtin_plugins_best_effort(config: &PluginConfigFile, cache_root: &Path) {
-    match refresh_configured_builtin_plugins(config, cache_root) {
-        Ok(refreshed) if refreshed > 0 => tracing::info!(
-            count = refreshed,
-            "refreshed configured curated plugin installs"
-        ),
-        Ok(_) => {}
-        Err(err) => tracing::warn!("failed to refresh configured curated plugin installs: {err}"),
+fn migrate_stale_typed_plugin_root(
+    store_root: &Path,
+    plugin_id: &PluginId,
+    target_base: &Path,
+) -> Result<bool, String> {
+    // This is a typed-root migration only. It intentionally moves the user's
+    // existing installed plugin tree instead of copying marketplace source
+    // content, so read/list paths never bypass explicit sync conflict checks.
+    if target_base.exists() {
+        return Ok(false);
     }
+    let Some(stale_base) = typed_plugin_base_roots(store_root, plugin_id)
+        .into_iter()
+        .filter(|candidate| candidate != target_base && candidate.exists())
+        .find(|candidate| active_plugin_root_in_base(candidate).is_some())
+    else {
+        return Ok(false);
+    };
+    let parent = target_base.parent().ok_or_else(|| {
+        format!(
+            "plugin install path has no parent: {}",
+            target_base.display()
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|err| format!("create plugin install dir: {err}"))?;
+    fs::rename(&stale_base, target_base).map_err(|err| {
+        format!(
+            "move configured plugin `{}` from {} to {}: {err}",
+            plugin_id.key(),
+            stale_base.display(),
+            target_base.display()
+        )
+    })?;
+    Ok(true)
 }
 
 fn unlisted_installed_plugin_summaries(
@@ -4032,7 +4158,6 @@ pub fn list_plugin_marketplaces(
     let cache_root = plugin_cache_root();
     migrate_legacy_plugin_cache_best_effort(&cache_root);
     let config = read_config();
-    refresh_configured_builtin_plugins_best_effort(&config, &cache_root);
     let mut out = Vec::new();
     let mut listed_ids = HashSet::new();
     for path in marketplace_paths(project_root, resource_dir) {
@@ -4043,15 +4168,6 @@ pub fn list_plugin_marketplaces(
                 continue;
             }
         };
-        if let Err(err) =
-            copy_marketplace_shared_resource_assets(&path, &marketplace.name, &cache_root)
-        {
-            tracing::warn!(
-                path = %path.display(),
-                marketplace = %marketplace.name,
-                "failed to copy plugin resource runner assets: {err}"
-            );
-        }
         let mut plugins = Vec::new();
         for entry in &marketplace.plugins {
             match plugin_summary_from_marketplace_entry(&path, &marketplace.name, entry, &config) {
@@ -5009,30 +5125,6 @@ fn copy_marketplace_shared_resource_assets(
     Ok(copied_legacy || copied_utils)
 }
 
-fn repair_configured_builtin_resource_runner_assets(config: &PluginConfigFile, cache_root: &Path) {
-    let marketplace_path = dev_builtin_marketplace_path();
-    let Ok(marketplace) = read_marketplace(&marketplace_path) else {
-        return;
-    };
-    let has_configured_plugin = config.plugins.keys().any(|key| {
-        PluginId::parse(key)
-            .map(|plugin_id| plugin_id.marketplace == marketplace.name)
-            .unwrap_or(false)
-    });
-    if !has_configured_plugin {
-        return;
-    }
-    if let Err(err) =
-        copy_marketplace_shared_resource_assets(&marketplace_path, &marketplace.name, cache_root)
-    {
-        tracing::warn!(
-            marketplace = %marketplace.name,
-            path = %marketplace_path.display(),
-            "failed to repair plugin resource runner assets: {err}"
-        );
-    }
-}
-
 fn remove_path_if_exists(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -5044,7 +5136,13 @@ fn remove_path_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
-fn replace_plugin_root_atomically(source: &Path, target_base: &Path) -> Result<PathBuf, String> {
+fn prepare_plugin_root_install(
+    source: &Path,
+    target_base: &Path,
+    plugin_id: &PluginId,
+    version: Option<String>,
+    installed_at: Option<String>,
+) -> Result<PathBuf, String> {
     let parent = target_base.parent().ok_or_else(|| {
         format!(
             "plugin install path has no parent: {}",
@@ -5054,13 +5152,87 @@ fn replace_plugin_root_atomically(source: &Path, target_base: &Path) -> Result<P
     fs::create_dir_all(parent).map_err(|err| format!("create plugin install dir: {err}"))?;
     let staged_base = parent.join(format!(".install-{}", uuid::Uuid::new_v4()));
     copy_dir_recursive(source, &staged_base)?;
+    record_plugin_install_state(&staged_base, plugin_id, version, installed_at).inspect_err(
+        |_| {
+            let _ = remove_path_if_exists(&staged_base);
+        },
+    )?;
+    Ok(staged_base)
+}
 
+fn activate_staged_plugin_root(
+    staged_base: &Path,
+    target_base: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let parent = target_base.parent().ok_or_else(|| {
+        format!(
+            "plugin install path has no parent: {}",
+            target_base.display()
+        )
+    })?;
+    let backup_base = parent.join(format!(".install-backup-{}", uuid::Uuid::new_v4()));
     if target_base.exists() {
-        remove_path_if_exists(target_base)?;
+        fs::rename(target_base, &backup_base).map_err(|err| {
+            let _ = remove_path_if_exists(&staged_base);
+            format!(
+                "stage existing plugin install {} for replacement: {err}",
+                target_base.display()
+            )
+        })?;
     }
-    fs::rename(&staged_base, target_base)
-        .map_err(|err| format!("activate plugin install entry: {err}"))?;
-    Ok(target_base.to_path_buf())
+    if let Err(err) = fs::rename(&staged_base, target_base) {
+        let rollback = if backup_base.exists() {
+            match fs::rename(&backup_base, target_base) {
+                Ok(()) => "existing install restored".to_string(),
+                Err(rollback_err) => format!("restore failed: {rollback_err}"),
+            }
+        } else {
+            "no existing install to restore".to_string()
+        };
+        let _ = remove_path_if_exists(&staged_base);
+        return Err(format!("activate plugin install entry: {err}; {rollback}"));
+    }
+    Ok(backup_base.exists().then_some(backup_base))
+}
+
+fn rollback_activated_plugin_root(
+    target_base: &Path,
+    backup_base: Option<&Path>,
+) -> Result<(), String> {
+    remove_path_if_exists(target_base)?;
+    if let Some(backup_base) = backup_base {
+        if backup_base.exists() {
+            fs::rename(backup_base, target_base)
+                .map_err(|err| format!("restore plugin install backup: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_plugin_root_backup_best_effort(backup_base: Option<PathBuf>) {
+    let Some(backup_base) = backup_base else {
+        return;
+    };
+    if let Err(err) = remove_path_if_exists(&backup_base) {
+        tracing::warn!(
+            path = %backup_base.display(),
+            "failed to remove plugin install backup after successful activation: {err}"
+        );
+    }
+}
+
+fn remove_other_typed_plugin_roots_best_effort(
+    store_root: &Path,
+    plugin_id: &PluginId,
+    keep_base: &Path,
+) {
+    if let Err(err) = remove_other_typed_plugin_roots(store_root, plugin_id, keep_base) {
+        tracing::warn!(
+            plugin_id = %plugin_id.key(),
+            keep = %keep_base.display(),
+            "failed to remove stale typed plugin roots after activation: {err}"
+        );
+    }
 }
 
 fn remove_other_typed_plugin_roots(
@@ -5111,18 +5283,28 @@ pub fn install_plugin(
     let kind = plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest);
     let store_root = plugin_store_root();
     let target_base = plugin_base_root_for_kind(&store_root, kind, &plugin_id);
-    remove_other_typed_plugin_roots(&store_root, &plugin_id, &target_base)?;
     copy_marketplace_shared_resource_assets(
         marketplace_path,
         &marketplace.name,
         &plugin_cache_root(),
     )?;
-    let installed_path = replace_plugin_root_atomically(&source_path, &target_base)?;
-    record_plugin_install_state(&installed_path, &plugin_id, manifest.version.clone(), None)?;
-    set_plugin_enabled(&plugin_id.key(), true)?;
+    let staged_path = prepare_plugin_root_install(
+        &source_path,
+        &target_base,
+        &plugin_id,
+        manifest.version.clone(),
+        None,
+    )?;
+    let backup_path = activate_staged_plugin_root(&staged_path, &target_base)?;
+    if let Err(err) = set_plugin_enabled(&plugin_id.key(), true) {
+        let _ = rollback_activated_plugin_root(&target_base, backup_path.as_deref());
+        return Err(err);
+    }
+    cleanup_plugin_root_backup_best_effort(backup_path);
+    remove_other_typed_plugin_roots_best_effort(&store_root, &plugin_id, &target_base);
     Ok(PluginInstallResult {
         plugin_id: plugin_id.key(),
-        installed_path: installed_path.to_string_lossy().into_owned(),
+        installed_path: target_base.to_string_lossy().into_owned(),
         auth_policy: entry.policy.authentication.clone(),
     })
 }
@@ -5187,26 +5369,28 @@ pub fn sync_plugin(
         let kind = plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest);
         let store_root = plugin_store_root();
         let target_base = plugin_base_root_for_kind(&store_root, kind, &plugin_id);
-        remove_other_typed_plugin_roots(&store_root, &plugin_id, &target_base)?;
         copy_marketplace_shared_resource_assets(
             marketplace_path,
             &marketplace.name,
             &plugin_cache_root(),
         )?;
-        let installed_path = replace_plugin_root_atomically(&source_path, &target_base)?;
         let installed_at = install_state
             .as_ref()
             .map(|state| state.installed_at.clone());
-        record_plugin_install_state(
-            &installed_path,
+        let staged_path = prepare_plugin_root_install(
+            &source_path,
+            &target_base,
             &plugin_id,
             manifest.version.clone(),
             installed_at,
         )?;
+        let backup_path = activate_staged_plugin_root(&staged_path, &target_base)?;
+        cleanup_plugin_root_backup_best_effort(backup_path);
+        remove_other_typed_plugin_roots_best_effort(&store_root, &plugin_id, &target_base);
         return Ok(PluginSyncResult {
             plugin_id: plugin_id.key(),
             status: "forceSynced".to_string(),
-            installed_path: installed_path.to_string_lossy().into_owned(),
+            installed_path: target_base.to_string_lossy().into_owned(),
             updated: force_plan.updated,
             added: force_plan.added,
             removed: force_plan.removed,
@@ -5474,6 +5658,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ensure_builtin_marketplace_reports_malformed_env_override() {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let marketplace_root = tmp.path().join("env-marketplace");
+        fs::create_dir_all(&marketplace_root).expect("marketplace root");
+        fs::write(
+            marketplace_root.join(MARKETPLACE_FILE_NAME),
+            "{not valid json",
+        )
+        .expect("malformed marketplace");
+        let _home = ScopedEnv::set("HOME", &home);
+        let _user_profile = ScopedEnv::set("USERPROFILE", &home);
+        let _plugins_dir = ScopedEnv::set("OMIGA_PLUGINS_DIR", &marketplace_root);
+
+        let status = ensure_builtin_marketplace().expect("built-in status");
+
+        assert!(!status.ok, "malformed env marketplace must be unhealthy");
+        assert_eq!(status.source, "env");
+        assert!(
+            status.message.contains("parse marketplace"),
+            "unexpected status message: {}",
+            status.message
+        );
+    }
+
+    #[test]
+    fn refresh_builtin_local_result_reports_malformed_dev_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let marketplace_path = tmp.path().join(MARKETPLACE_FILE_NAME);
+        fs::write(&marketplace_path, "{not valid json").expect("malformed marketplace");
+
+        let result = refresh_builtin_local_result("builtin", "dev", &marketplace_path);
+
+        assert!(!result.ok, "malformed dev marketplace refresh must fail");
+        assert!(
+            result.message.contains("parse marketplace"),
+            "unexpected refresh message: {}",
+            result.message
+        );
+        assert_eq!(result.marketplace_name, None);
+        assert_eq!(result.plugin_count, None);
+    }
+
     fn git_available() -> bool {
         Command::new("git").arg("--version").output().is_ok()
     }
@@ -5507,6 +5736,47 @@ mod tests {
                 message,
             ],
         );
+    }
+
+    fn write_superseding_marketplace(
+        root: &Path,
+        marketplace_name: &str,
+        plugin_name: &str,
+        superseded_plugin_name: &str,
+        category: &str,
+    ) -> PathBuf {
+        let plugin_root = root.join("plugins").join(plugin_name);
+        fs::create_dir_all(&plugin_root).expect("plugin root");
+        fs::write(
+            plugin_root.join(PLUGIN_MANIFEST_FILE),
+            format!(
+                r#"{{
+                  "name":"{plugin_name}",
+                  "version":"0.1.0",
+                  "compatibility": {{ "supersedesPlugins": ["{superseded_plugin_name}"] }},
+                  "interface": {{ "category":"{category}" }}
+                }}"#
+            ),
+        )
+        .expect("plugin manifest");
+        fs::write(
+            root.join(MARKETPLACE_FILE_NAME),
+            format!(
+                r#"{{
+                  "name":"{marketplace_name}",
+                  "plugins":[
+                    {{
+                      "name":"{plugin_name}",
+                      "source":{{"source":"local","path":"./plugins/{plugin_name}"}},
+                      "policy":{{"installation":"AVAILABLE","authentication":"ON_USE"}},
+                      "category":"{category}"
+                    }}
+                  ]
+                }}"#
+            ),
+        )
+        .expect("marketplace manifest");
+        root.join(MARKETPLACE_FILE_NAME)
     }
 
     #[test]
@@ -5543,6 +5813,42 @@ mod tests {
                 .expect("updated marketplace")
                 .name,
             "git-marketplace-updated"
+        );
+    }
+
+    #[test]
+    fn clone_or_update_marketplace_repo_reclones_non_git_cache_dir() {
+        if !git_available() {
+            eprintln!(
+                "skipping clone_or_update_marketplace_repo_reclones_non_git_cache_dir test: git is not available"
+            );
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("source");
+        let cache = tmp.path().join("cache");
+        fs::create_dir_all(&source).expect("source repo");
+        run_git(&source, &["init"]);
+        commit_marketplace(&source, "recovered-marketplace", "initial marketplace");
+        fs::create_dir_all(&cache).expect("partial cache dir");
+        fs::write(cache.join("partial.txt"), "left by failed clone").expect("partial cache file");
+
+        let source_url = reqwest::Url::from_directory_path(
+            fs::canonicalize(&source).expect("canonical source repo"),
+        )
+        .expect("file url")
+        .to_string();
+        clone_or_update_marketplace_repo(&source_url, &cache)
+            .expect("reclone marketplace from non-git cache");
+
+        assert!(cache.join(".git").exists());
+        assert!(!cache.join("partial.txt").exists());
+        assert_eq!(
+            read_marketplace(&cache.join(MARKETPLACE_FILE_NAME))
+                .expect("recloned marketplace")
+                .name,
+            "recovered-marketplace"
         );
     }
 
@@ -5925,6 +6231,51 @@ mod tests {
     }
 
     #[test]
+    fn read_config_drops_only_malformed_marketplace_entries() {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let _home = ScopedEnv::set("HOME", &home);
+        let _user_profile = ScopedEnv::set("USERPROFILE", &home);
+        let _plugins_dir = ScopedEnv::remove("OMIGA_PLUGINS_DIR");
+        let config_file = config_path();
+        fs::create_dir_all(config_file.parent().expect("config parent")).expect("config dir");
+        fs::write(
+            &config_file,
+            r#"{
+  "plugins": {
+    "analysis-tool@custom-market": { "enabled": true }
+  },
+  "marketplaces": [
+    {
+      "id": "source-valid",
+      "kind": "local",
+      "location": "/tmp/omiga-plugins",
+      "label": "Valid",
+      "enabled": true,
+      "addedAt": "2026-05-27T00:00:00Z"
+    },
+    {
+      "id": "source-bad",
+      "kind": "remote"
+    }
+  ]
+}
+"#,
+        )
+        .expect("plugin config");
+
+        let config = read_config();
+
+        assert!(config
+            .plugins
+            .get("analysis-tool@custom-market")
+            .is_some_and(|entry| entry.enabled));
+        assert_eq!(config.marketplaces.len(), 1);
+        assert_eq!(config.marketplaces[0].id, "source-valid");
+    }
+
+    #[test]
     fn removing_remote_user_marketplace_source_deletes_cache_dir() {
         let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -6304,6 +6655,47 @@ mod tests {
     }
 
     #[test]
+    fn read_config_migrates_superseded_plugins_using_resolved_builtin_marketplace_path() {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let marketplace_root = tmp.path().join("resolved-marketplace");
+        write_superseding_marketplace(
+            &marketplace_root,
+            "resolved-market",
+            "analysis-bundle",
+            "legacy-analysis-tool",
+            "Workflow",
+        );
+        let _home = ScopedEnv::set("HOME", &home);
+        let _user_profile = ScopedEnv::set("USERPROFILE", &home);
+        let _plugins_dir = ScopedEnv::set("OMIGA_PLUGINS_DIR", &marketplace_root);
+        let config_file = config_path();
+        fs::create_dir_all(config_file.parent().expect("config parent")).expect("config dir");
+        fs::write(
+            &config_file,
+            r#"{
+  "plugins": {
+    "legacy-analysis-tool@resolved-market": { "enabled": true }
+  },
+  "marketplaces": []
+}
+"#,
+        )
+        .expect("plugin config");
+
+        let config = read_config();
+
+        assert!(config
+            .plugins
+            .get("analysis-bundle@resolved-market")
+            .is_some_and(|entry| entry.enabled));
+        assert!(!config
+            .plugins
+            .contains_key("legacy-analysis-tool@resolved-market"));
+    }
+
+    #[test]
     fn superseded_plugin_config_migrates_from_marketplace_manifest_metadata() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let marketplace_root = tmp.path().join("marketplace");
@@ -6646,35 +7038,36 @@ mod tests {
     }
 
     #[test]
-    fn configured_curated_plugins_refresh_updates_stale_typed_roots() {
+    fn configured_builtin_plugins_refresh_moves_stale_typed_roots_without_overwriting_local_edits()
+    {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
         let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let marketplace_root = tmp.path().join("resolved-marketplace");
+        write_superseding_marketplace(
+            &marketplace_root,
+            "resolved-market",
+            "analysis-bundle",
+            "legacy-analysis-tool",
+            "Workflow",
+        );
+        let _home = ScopedEnv::set("HOME", &home);
+        let _user_profile = ScopedEnv::set("USERPROFILE", &home);
+        let _plugins_dir = ScopedEnv::set("OMIGA_PLUGINS_DIR", &marketplace_root);
         let store_root = tmp.path().join("plugins");
         let cache_root = store_root.join("cache");
-        let marketplace_path = curated_marketplace_path();
-        let marketplace = read_marketplace(&marketplace_path).expect("marketplace");
-        let (entry, source_path, manifest, install_kind) = marketplace
-            .plugins
-            .iter()
-            .filter_map(|entry| {
-                let source_path =
-                    resolve_marketplace_source_path(&marketplace_path, &entry.source).ok()?;
-                let manifest = load_plugin_manifest(&source_path)?;
-                let kind =
-                    plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest);
-                (kind != PluginKind::Operator).then_some((entry, source_path, manifest, kind))
-            })
-            .next()
-            .expect("non-operator marketplace plugin");
         let old_operator_root = write_typed_plugin(
             &store_root,
             PluginKind::Operator,
-            &entry.name,
+            "analysis-bundle",
             r#"{"displayName":"Stale Install","category":"Operator"}"#,
             false,
         );
+        let local_marker = old_operator_root.join("local-edit.txt");
+        fs::write(&local_marker, "keep me").expect("local marker");
         let mut config = PluginConfigFile::default();
         config.plugins.insert(
-            format!("{}@{}", entry.name, marketplace.name),
+            "analysis-bundle@resolved-market".to_string(),
             PluginConfigEntry {
                 enabled: true,
                 ..Default::default()
@@ -6684,12 +7077,114 @@ mod tests {
         let refreshed = refresh_configured_builtin_plugins(&config, &cache_root)
             .expect("refresh curated plugin");
 
-        let expected_root = store_root.join(install_kind.dir_name()).join(&entry.name);
-        assert_eq!(manifest.name, entry.name);
-        assert!(source_path.is_dir());
+        let expected_root = store_root
+            .join(PluginKind::Workflow.dir_name())
+            .join("analysis-bundle");
         assert_eq!(refreshed, 1);
         assert!(!old_operator_root.exists());
         assert!(expected_root.exists());
+        assert_eq!(
+            fs::read_to_string(expected_root.join("local-edit.txt")).expect("local marker"),
+            "keep me"
+        );
+    }
+
+    #[test]
+    fn configured_builtin_plugins_refresh_uses_resolved_builtin_marketplace_path() {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let marketplace_root = tmp.path().join("resolved-marketplace");
+        write_superseding_marketplace(
+            &marketplace_root,
+            "resolved-market",
+            "analysis-bundle",
+            "legacy-analysis-tool",
+            "Workflow",
+        );
+        let _home = ScopedEnv::set("HOME", &home);
+        let _user_profile = ScopedEnv::set("USERPROFILE", &home);
+        let _plugins_dir = ScopedEnv::set("OMIGA_PLUGINS_DIR", &marketplace_root);
+        let store_root = tmp.path().join("plugins");
+        let cache_root = store_root.join("cache");
+        let old_operator_root = write_typed_plugin(
+            &store_root,
+            PluginKind::Operator,
+            "analysis-bundle",
+            r#"{"displayName":"Stale Install","category":"Operator"}"#,
+            false,
+        );
+        let mut config = PluginConfigFile::default();
+        config.plugins.insert(
+            "analysis-bundle@resolved-market".to_string(),
+            PluginConfigEntry {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+
+        let refreshed = refresh_configured_builtin_plugins(&config, &cache_root)
+            .expect("refresh resolved built-in plugin");
+
+        let expected_root = store_root
+            .join(PluginKind::Workflow.dir_name())
+            .join("analysis-bundle");
+        assert_eq!(refreshed, 1);
+        assert!(!old_operator_root.exists());
+        assert!(expected_root.exists());
+    }
+
+    #[test]
+    fn listing_marketplaces_does_not_migrate_or_sync_installed_plugin_roots() {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let marketplace_root = tmp.path().join("resolved-marketplace");
+        write_superseding_marketplace(
+            &marketplace_root,
+            "resolved-market",
+            "analysis-bundle",
+            "legacy-analysis-tool",
+            "Workflow",
+        );
+        let _home = ScopedEnv::set("HOME", &home);
+        let _user_profile = ScopedEnv::set("USERPROFILE", &home);
+        let _plugins_dir = ScopedEnv::set("OMIGA_PLUGINS_DIR", &marketplace_root);
+        let config_file = config_path();
+        fs::create_dir_all(config_file.parent().expect("config parent")).expect("config dir");
+        fs::write(
+            &config_file,
+            r#"{
+              "plugins": {
+                "analysis-bundle@resolved-market": { "enabled": true }
+              }
+            }"#,
+        )
+        .expect("plugin config");
+        let old_operator_root = write_typed_plugin(
+            &plugin_store_root(),
+            PluginKind::Operator,
+            "analysis-bundle",
+            r#"{"displayName":"Locally Edited Install","category":"Operator"}"#,
+            false,
+        );
+        fs::write(old_operator_root.join("local-edit.txt"), "must remain").expect("local marker");
+        let workflow_root = plugin_store_root()
+            .join(PluginKind::Workflow.dir_name())
+            .join("analysis-bundle");
+
+        let marketplaces = list_plugin_marketplaces(None, None);
+
+        assert!(marketplaces
+            .iter()
+            .flat_map(|marketplace| marketplace.plugins.iter())
+            .any(|plugin| plugin.id == "analysis-bundle@resolved-market"));
+        assert!(old_operator_root.exists());
+        assert_eq!(
+            fs::read_to_string(old_operator_root.join("local-edit.txt")).expect("local marker"),
+            "must remain"
+        );
+        assert!(!workflow_root.exists());
     }
 
     #[test]
@@ -7130,6 +7625,69 @@ template:
             .contains("templates: 1 via `unit_search` / `unit_describe` / `template_execute`"));
         assert!(section.contains("groups: `scatter`"));
         assert!(section.contains("Template plugins expose Template units"));
+    }
+
+    #[test]
+    fn operator_plugins_are_visible_as_operator_execute_capabilities() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("operator-plugin");
+        let operator_dir = plugin_root.join("operators").join("demo-program");
+        fs::create_dir_all(&operator_dir).expect("operator dir");
+        fs::write(
+            plugin_root.join("plugin.json"),
+            r#"{
+              "name": "operator-plugin",
+              "version": "0.1.0",
+              "description": "Operator-only analysis plugin",
+              "operators": "./operators"
+            }"#,
+        )
+        .expect("plugin manifest");
+        fs::write(
+            operator_dir.join("operator.yaml"),
+            r#"apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: demo_program
+  version: "1"
+  name: Demo Program
+operations:
+  sample:
+    description: Sample reads
+  summarize:
+    description: Summarize results
+interface:
+  params:
+    message:
+      kind: string
+      default: hello
+execution:
+  argv: ["demo-program", "${params.operation}", "${params.message}"]
+"#,
+        )
+        .expect("operator manifest");
+        let manifest = load_plugin_manifest(&plugin_root).expect("plugin manifest");
+        let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
+            id: "operator-plugin@market".to_string(),
+            manifest_name: Some(manifest.name.clone()),
+            display_name: Some("Operator Plugin".to_string()),
+            description: manifest.description.clone(),
+            root: plugin_root,
+            enabled: true,
+            skill_roots: vec![],
+            mcp_servers: HashMap::new(),
+            apps: vec![],
+            retrieval: None,
+            error: None,
+        }]);
+
+        let section = format_plugins_system_section(&outcome).expect("plugins section");
+
+        assert!(section.contains("- `Operator Plugin`: Operator-only analysis plugin"));
+        assert!(section.contains(
+            "operators: 1 programs / 2 operations via `unit_search` / `operator_describe` / `operator_execute`"
+        ));
+        assert!(section.contains("Operator plugins expose Operator programs"));
     }
 
     #[test]

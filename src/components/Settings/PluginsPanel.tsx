@@ -4526,6 +4526,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const feedbackSeverity = error ? "error" : "success";
   const feedbackKey = feedbackText ? `${feedbackSeverity}:${feedbackText}` : null;
   const feedbackOpen = Boolean(feedbackText && feedbackKey !== dismissedFeedbackKey);
+  const marketplaceSourceMutationDisabled = isMutating || isLoading || bootstrapInProgress;
 
   useEffect(() => {
     setDismissedFeedbackKey(null);
@@ -5399,7 +5400,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                     size="small"
                     variant="outlined"
                     startIcon={bootstrapInProgress ? <CircularProgress size={14} /> : <RefreshRounded />}
-                    disabled={bootstrapInProgress}
+                    disabled={isLoading || bootstrapInProgress}
                     onClick={() => void handleRefreshBuiltinMarketplace()}
                     sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
                   >
@@ -5471,7 +5472,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                               <>
                                 <Switch
                                   checked={source.enabled}
-                                  disabled={isMutating}
+                                  disabled={marketplaceSourceMutationDisabled}
                                   onChange={(event) =>
                                     void handleToggleMarketplaceSource(source, event.target.checked)
                                   }
@@ -5488,7 +5489,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                                         ? <CircularProgress size={16} />
                                         : <RefreshRounded />
                                     }
-                                    disabled={isMutating}
+                                    disabled={marketplaceSourceMutationDisabled}
                                     onClick={() => void handleRefreshMarketplaceSource(source)}
                                     aria-label={`Refresh marketplace source ${label}`}
                                     sx={{ textTransform: "none", borderRadius: 1.5 }}
@@ -5499,7 +5500,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                                 <IconButton
                                   size="small"
                                   color="error"
-                                  disabled={isMutating}
+                                  disabled={marketplaceSourceMutationDisabled}
                                   onClick={() => void handleRemoveMarketplaceSource(source)}
                                   aria-label={`Remove marketplace source ${label}`}
                                 >
@@ -5517,7 +5518,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                                     size="small"
                                     variant="outlined"
                                     startIcon={bootstrapInProgress ? <CircularProgress size={16} /> : <RefreshRounded />}
-                                    disabled={bootstrapInProgress}
+                                    disabled={isLoading || bootstrapInProgress}
                                     onClick={() => void handleRefreshBuiltinMarketplace()}
                                     aria-label={`Refresh marketplace source ${label}`}
                                     sx={{ textTransform: "none", borderRadius: 1.5 }}
@@ -5588,7 +5589,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                     size="small"
                     variant="contained"
                     startIcon={marketplaceSourceActionKey === "add" ? <CircularProgress size={16} /> : <AddRounded />}
-                    disabled={isMutating || marketplaceSourceActionKey === "add"}
+                    disabled={marketplaceSourceMutationDisabled || marketplaceSourceActionKey === "add"}
                     onClick={() => void handleAddMarketplaceSource()}
                     aria-label="Add marketplace source"
                     sx={{

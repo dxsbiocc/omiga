@@ -491,6 +491,37 @@ describe("PluginsPanel marketplace sources UI", () => {
     );
   });
 
+  it("disables marketplace source mutations while initial loading is active", () => {
+    pluginStoreMock.state.isLoading = true;
+    pluginStoreMock.state.marketplaceSourceViews = [
+      {
+        id: "source-remote",
+        kind: "remote",
+        location: "https://example.com/omiga-plugins.git",
+        label: "Remote Marketplace",
+        enabled: true,
+        removable: true,
+        addedAt: "2026-05-27T00:00:00Z",
+      },
+    ];
+
+    const harness = createPanelHarness();
+
+    expect(getButtonByText(harness, "Add").props.disabled).toBe(true);
+    expect(
+      getNodeByAriaLabel(
+        harness,
+        "Refresh marketplace source Remote Marketplace",
+      ).props.disabled,
+    ).toBe(true);
+    expect(
+      getNodeByAriaLabel(
+        harness,
+        "Remove marketplace source Remote Marketplace",
+      ).props.disabled,
+    ).toBe(true);
+  });
+
   it("renders a built-in source without remove controls", () => {
     pluginStoreMock.state.marketplaceSourceViews = [
       {
@@ -574,6 +605,7 @@ describe("PluginsPanel marketplace sources UI", () => {
     );
 
     expect(refreshButton.props.disabled).toBe(true);
+    expect(getButtonByText(harness, "Add").props.disabled).toBe(true);
     expect(textContent(harness.tree)).toContain("Refreshing built-in marketplace");
   });
 });
