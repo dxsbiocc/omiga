@@ -91,6 +91,38 @@ fn canonical_maps_tool_enum_display_names() {
     );
 }
 
+#[test]
+fn canonical_maps_browser_operator_aliases() {
+    for (alias, canonical) in [
+        ("BrowserOpen", "browser_open"),
+        ("browserOpen", "browser_open"),
+        ("BrowserFill", "browser_fill"),
+        ("browserFill", "browser_fill"),
+        ("BrowserSnapshot", "browser_snapshot"),
+        ("BrowserClose", "browser_close"),
+    ] {
+        assert_eq!(
+            canonical_permission_tool_name(alias),
+            canonical,
+            "{alias} should canonicalize to {canonical}"
+        );
+    }
+}
+
+#[test]
+fn browser_operator_alias_deny_rules_match_snake_case_tools() {
+    for (alias, tool_name) in [
+        ("BrowserOpen", "browser_open"),
+        ("BrowserFill", "browser_fill"),
+    ] {
+        let rule = permission_rule_value_from_string(alias);
+        assert!(
+            blanket_deny_rule_matches(&rule, tool_name),
+            "{alias} should deny {tool_name}"
+        );
+    }
+}
+
 // File-backed loader tests (unique rule markers so real `~/.claude` merge does not break assertions).
 
 #[test]

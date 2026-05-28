@@ -1983,6 +1983,8 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "learning_proposal_list" => (1, 16),
         "learning_preference_candidate_list" => (1, 17),
         "environment_profile_check" => (1, 18),
+        "browser_snapshot" => (1, 19),
+        "browser_screenshot" => (1, 20),
 
         // Mutating tools.
         "file_edit" => (2, 0),
@@ -1999,6 +2001,10 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "learning_self_evolution_report" => (2, 10),
         "learning_self_evolution_draft_write" => (2, 11),
         "learning_self_evolution_creator" => (2, 12),
+        "browser_open" => (2, 13),
+        "browser_click" => (2, 14),
+        "browser_fill" => (2, 15),
+        "browser_close" => (2, 16),
 
         // Orchestration and app-specific tools.
         "agent" | "Agent" => (3, 0),

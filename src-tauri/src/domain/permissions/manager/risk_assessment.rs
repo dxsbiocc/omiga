@@ -59,6 +59,20 @@ impl super::PermissionManager {
             categories.push(RiskCategory::Privacy);
         }
 
+        if super::PermissionManager::approval_cache_key(&context.tool_name) == "browser_fill"
+            && crate::domain::computer_use::value_contains_probable_secret(&context.arguments)
+        {
+            detected_risks.push(DetectedRisk {
+                category: RiskCategory::Privacy,
+                severity: RiskLevel::Critical,
+                description: "Browser Operator 将输入疑似 secret/token/password".to_string(),
+                mitigation: Some(
+                    "确认目标网页可信；该输入只允许单次批准，Omiga 会脱敏保存。".to_string(),
+                ),
+            });
+            categories.push(RiskCategory::Privacy);
+        }
+
         // 2. 参数级别风险（bash/shell 危险命令检测）
         if context.tool_name == "bash" || context.tool_name == "shell" {
             if let Some(cmd) = context.arguments.get("command").and_then(|v| v.as_str()) {
@@ -360,6 +374,80 @@ impl super::PermissionManager {
                 level: RiskLevel::Safe,
                 categories: vec![],
                 description: "停止 Computer Use 运行".to_string(),
+                recommendations: vec![],
+                detected_risks: vec![],
+            },
+            "browser_open" => RiskAssessment {
+                level: RiskLevel::Medium,
+                categories: vec![RiskCategory::Network, RiskCategory::Privacy],
+                description: "打开网页并启动受控浏览器会话".to_string(),
+                recommendations: vec!["确认目标域名可信".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::Network,
+                    severity: RiskLevel::Medium,
+                    description: "将访问网页并可能暴露网络元数据".to_string(),
+                    mitigation: Some("Browser Operator 只在用户显式启用后暴露".to_string()),
+                }],
+            },
+            "browser_snapshot" => RiskAssessment {
+                level: RiskLevel::Medium,
+                categories: vec![RiskCategory::Privacy],
+                description: "读取当前网页内容和交互元素".to_string(),
+                recommendations: vec!["确认页面未显示不应共享的敏感内容".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::Privacy,
+                    severity: RiskLevel::Medium,
+                    description: "可能读取页面文本、标题、URL 和表单结构".to_string(),
+                    mitigation: Some("密码/输入值不应回传给模型".to_string()),
+                }],
+            },
+            "browser_click" => RiskAssessment {
+                level: RiskLevel::High,
+                categories: vec![RiskCategory::System, RiskCategory::Network],
+                description: "在网页中执行点击".to_string(),
+                recommendations: vec!["确认最近 browser_snapshot 与当前页面一致".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::System,
+                    severity: RiskLevel::High,
+                    description: "点击可能触发提交、发布、购买或删除等副作用".to_string(),
+                    mitigation: Some(
+                        "优先使用 snapshot 返回的 index/selector，避免模糊目标".to_string(),
+                    ),
+                }],
+            },
+            "browser_fill" => RiskAssessment {
+                level: RiskLevel::High,
+                categories: vec![RiskCategory::Privacy, RiskCategory::System],
+                description: "向网页表单输入文本".to_string(),
+                recommendations: vec![
+                    "确认目标网页可信".to_string(),
+                    "不要输入 secret/token/password，除非用户明确要求".to_string(),
+                ],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::Privacy,
+                    severity: RiskLevel::High,
+                    description: "将向网页输入可能包含隐私的数据".to_string(),
+                    mitigation: Some("Browser Operator 会脱敏保存输入值".to_string()),
+                }],
+            },
+            "browser_screenshot" => RiskAssessment {
+                level: RiskLevel::Medium,
+                categories: vec![RiskCategory::Privacy],
+                description: "截取当前网页画面".to_string(),
+                recommendations: vec!["确认页面未显示不应共享的敏感内容".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::Privacy,
+                    severity: RiskLevel::Medium,
+                    description: "截图可能包含账号、页面内容或个人信息".to_string(),
+                    mitigation: Some(
+                        "截图只返回本地 artifact 路径，不直接塞入模型全文".to_string(),
+                    ),
+                }],
+            },
+            "browser_close" => RiskAssessment {
+                level: RiskLevel::Safe,
+                categories: vec![],
+                description: "关闭 Browser Operator 会话".to_string(),
                 recommendations: vec![],
                 detected_risks: vec![],
             },

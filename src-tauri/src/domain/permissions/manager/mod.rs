@@ -568,9 +568,59 @@ impl PermissionManager {
                     None => base,
                 }
             }
+            "browser_open" => Self::browser_open_approval_cache_key(&base, &context.arguments),
+            "browser_click" | "browser_fill" => {
+                Self::browser_action_approval_cache_key(&base, &context.arguments)
+            }
             "bash" | "shell" => Self::bash_approval_cache_key(&base, &context.arguments),
             _ => base,
         }
+    }
+
+    fn browser_open_approval_cache_key(base: &str, arguments: &serde_json::Value) -> String {
+        let Some(host) = arguments
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .and_then(Self::browser_host_from_url)
+        else {
+            return base.to_string();
+        };
+        format!("{base}:{host}")
+    }
+
+    fn browser_action_approval_cache_key(base: &str, arguments: &serde_json::Value) -> String {
+        let target = arguments
+            .get("index")
+            .map(|value| format!("index:{value}"))
+            .or_else(|| {
+                arguments
+                    .get("selector")
+                    .or_else(|| arguments.get("target"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(Self::short_hash)
+                    .map(|hash| format!("target:{hash}"))
+            });
+        match target {
+            Some(target) => format!("{base}:{target}"),
+            None => base.to_string(),
+        }
+    }
+
+    fn browser_host_from_url(url: &str) -> Option<String> {
+        let trimmed = url.trim();
+        let after_scheme = trimmed
+            .strip_prefix("https://")
+            .or_else(|| trimmed.strip_prefix("http://"))
+            .or_else(|| trimmed.strip_prefix("HTTPS://"))
+            .or_else(|| trimmed.strip_prefix("HTTP://"))?;
+        after_scheme
+            .split(['/', '?', '#'])
+            .next()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(|host| host.to_ascii_lowercase())
     }
 
     fn bash_approval_cache_key(base: &str, arguments: &serde_json::Value) -> String {
@@ -589,7 +639,7 @@ impl PermissionManager {
 
     fn approval_must_be_single_use(context: &PermissionContext) -> bool {
         let base = Self::approval_cache_key(&context.tool_name);
-        if base == "computer_type" {
+        if base == "computer_type" || base == "browser_fill" {
             return true;
         }
         if base != "bash" && base != "shell" {
