@@ -902,6 +902,8 @@ export function updatePluginInstalledInMarketplaces(
 }
 
 function pluginDeclaresOperator(plugin: PluginSummary): boolean {
+  if ((plugin.operators?.length ?? 0) > 0) return true;
+
   const terms = [
     plugin.interface?.category,
     ...(plugin.interface?.capabilities ?? []),
@@ -1291,6 +1293,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           kind,
           location,
           label: label ?? null,
+          projectRoot,
         },
       );
       const [marketplaceSources, marketplaceSourceViews, marketplaces] = await Promise.all([
@@ -1409,7 +1412,6 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   loadPlugins: async (projectRoot?: string, surface?: OperatorExecutionSurfaceArgs) => {
     set({ isLoading: true, error: null });
     try {
-      await get().ensureBuiltinMarketplace(projectRoot);
       const [
         marketplaceSources,
         marketplaceSourceViews,

@@ -93,8 +93,10 @@ pub fn add_omiga_plugin_marketplace_source(
     kind: MarketplaceSourceKind,
     location: String,
     label: Option<String>,
+    project_root: Option<String>,
 ) -> Result<UserMarketplaceSource, String> {
-    plugins::add_user_marketplace_source(kind, location, label)
+    let root = resolve_optional_project_root(project_root);
+    plugins::add_user_marketplace_source_with_project_root(kind, location, label, root.as_deref())
 }
 
 #[tauri::command]

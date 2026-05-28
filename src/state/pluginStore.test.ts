@@ -425,24 +425,25 @@ describe("usePluginStore operator actions", () => {
   });
 
   it("refreshes dynamic operator exposure when toggling a plugin", async () => {
-    const target = plugin({
-      id: "operator-pca-r@omiga-curated",
-      name: "operator-pca-r",
-      installed: true,
-      enabled: false,
-    });
     const exposedOperator: OperatorSummary = {
       id: "pca_matrix",
       version: "0.1.0",
       name: "PCA Matrix",
       description: null,
-      sourcePlugin: "operator-pca-r@omiga-curated",
-      manifestPath: "/plugins/operator-pca-r/operators/pca-matrix/operator.yaml",
+      sourcePlugin: "stats-bundle@omiga-curated",
+      manifestPath: "/plugins/stats-bundle/operators/pca-matrix/operator.yaml",
       smokeTests: [],
       enabledAliases: ["pca_matrix"],
       exposed: true,
       unavailableReason: null,
     };
+    const target = plugin({
+      id: "stats-bundle@omiga-curated",
+      name: "stats-bundle",
+      installed: true,
+      enabled: false,
+      operators: [exposedOperator],
+    });
     usePluginStore.setState({
       marketplaces: [marketplace("/marketplace.json", [target])],
     });
@@ -601,6 +602,7 @@ describe("usePluginStore operator actions", () => {
         kind: "remote",
         location: source.location,
         label: source.label,
+        projectRoot: "/project",
       },
     );
     expect(invokeMock).toHaveBeenCalledWith(
@@ -890,14 +892,6 @@ describe("usePluginStore operator actions", () => {
     ];
     const catalog = [marketplace("/marketplace.json", [plugin()])];
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "ensure_builtin_marketplace_source") {
-        return {
-          ok: false,
-          source: "github",
-          path: null,
-          message: "Offline.",
-        } satisfies BuiltinMarketplaceStatus;
-      }
       if (command === "list_omiga_plugin_marketplace_sources") return [source];
       if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
       if (command === "list_omiga_plugin_marketplaces") return catalog;
@@ -912,16 +906,15 @@ describe("usePluginStore operator actions", () => {
 
     await usePluginStore.getState().loadPlugins("/project");
 
-    expect(invokeMock).toHaveBeenNthCalledWith(
-      1,
-      "ensure_builtin_marketplace_source",
-      { projectRoot: "/project" },
-    );
     expect(invokeMock).toHaveBeenCalledWith(
       "list_omiga_plugin_marketplace_sources",
     );
     expect(invokeMock).toHaveBeenCalledWith(
       "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "ensure_builtin_marketplace_source",
+      expect.anything(),
     );
     expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
     expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
@@ -929,16 +922,17 @@ describe("usePluginStore operator actions", () => {
     expect(usePluginStore.getState().isLoading).toBe(false);
   });
 
-  it("triggers built-in marketplace bootstrap when loading plugins", async () => {
+  it("does not trigger built-in marketplace bootstrap when loading plugins", async () => {
+    usePluginStore.setState({
+      builtinMarketplaceStatus: {
+        ok: false,
+        source: "github",
+        path: null,
+        message: "Previous bootstrap failure.",
+      },
+    });
+
     invokeMock.mockImplementation(async (command: string) => {
-      if (command === "ensure_builtin_marketplace_source") {
-        return {
-          ok: false,
-          source: "github",
-          path: null,
-          message: "Offline.",
-        } satisfies BuiltinMarketplaceStatus;
-      }
       if (command === "list_omiga_plugin_marketplace_sources") return [];
       if (command === "list_omiga_plugin_marketplace_source_views") return [];
       if (command === "list_omiga_plugin_marketplaces") return [];
@@ -953,14 +947,13 @@ describe("usePluginStore operator actions", () => {
 
     await usePluginStore.getState().loadPlugins("/project");
 
-    expect(invokeMock).toHaveBeenNthCalledWith(
-      1,
+    expect(invokeMock).not.toHaveBeenCalledWith(
       "ensure_builtin_marketplace_source",
-      { projectRoot: "/project" },
+      expect.anything(),
     );
     expect(usePluginStore.getState().builtinMarketplaceStatus).toMatchObject({
       ok: false,
-      message: "Offline.",
+      message: "Previous bootstrap failure.",
     });
     expect(usePluginStore.getState().isLoading).toBe(false);
   });

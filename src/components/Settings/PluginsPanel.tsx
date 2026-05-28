@@ -4639,8 +4639,6 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         }));
         if (result.ok) {
           setMessage(marketplaceSourceRefreshMessage(result));
-        } else {
-          setMarketplaceSourceFormError(result.message);
         }
       } else {
         setMessage("Added local marketplace source");

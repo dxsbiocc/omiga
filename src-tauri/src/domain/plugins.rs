@@ -1917,9 +1917,17 @@ fn add_local_user_marketplace_source(
 fn add_remote_user_marketplace_source(
     location: String,
     label: Option<String>,
+    project_root: Option<&Path>,
 ) -> Result<UserMarketplaceSource, String> {
-    let project_root = default_url_validation_project_root();
-    let location = validate_remote_marketplace_url(&location, &project_root, false)?;
+    let default_project_root;
+    let project_root = match project_root {
+        Some(project_root) => project_root,
+        None => {
+            default_project_root = default_url_validation_project_root();
+            default_project_root.as_path()
+        }
+    };
+    let location = validate_remote_marketplace_url(&location, project_root, false)?;
     let duplicate_key = normalized_remote_marketplace_location_for_compare(&location);
     let mut config = read_config();
     for source in &config.marketplaces {
@@ -1950,9 +1958,20 @@ pub fn add_user_marketplace_source(
     location: String,
     label: Option<String>,
 ) -> Result<UserMarketplaceSource, String> {
+    add_user_marketplace_source_with_project_root(kind, location, label, None)
+}
+
+pub fn add_user_marketplace_source_with_project_root(
+    kind: MarketplaceSourceKind,
+    location: String,
+    label: Option<String>,
+    project_root: Option<&Path>,
+) -> Result<UserMarketplaceSource, String> {
     match kind {
         MarketplaceSourceKind::Local => add_local_user_marketplace_source(location, label),
-        MarketplaceSourceKind::Remote => add_remote_user_marketplace_source(location, label),
+        MarketplaceSourceKind::Remote => {
+            add_remote_user_marketplace_source(location, label, project_root)
+        }
     }
 }
 
@@ -3849,6 +3868,7 @@ fn filter_retrieval_manifest_for_config(
 
 fn load_plugins_from_config(config: &PluginConfigFile, cache_root: &Path) -> PluginLoadOutcome {
     migrate_legacy_plugin_cache_best_effort(cache_root);
+    refresh_configured_builtin_plugins_best_effort(config, cache_root);
     let mut configured = config.plugins.iter().collect::<Vec<_>>();
     configured.sort_by(|(left, _), (right, _)| left.cmp(right));
     let plugins = configured
@@ -4056,6 +4076,19 @@ fn migrate_legacy_plugin_cache_best_effort(cache_root: &Path) {
     }
 }
 
+fn refresh_configured_builtin_plugins_best_effort(config: &PluginConfigFile, cache_root: &Path) {
+    match refresh_configured_builtin_plugins(config, cache_root) {
+        Ok(refreshed) if refreshed > 0 => {
+            tracing::info!(
+                count = refreshed,
+                "refreshed configured curated plugin installs"
+            )
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!("failed to refresh configured curated plugin installs: {err}"),
+    }
+}
+
 fn refresh_configured_builtin_plugins(
     config: &PluginConfigFile,
     cache_root: &Path,
@@ -4158,6 +4191,7 @@ pub fn list_plugin_marketplaces(
     let cache_root = plugin_cache_root();
     migrate_legacy_plugin_cache_best_effort(&cache_root);
     let config = read_config();
+    refresh_configured_builtin_plugins_best_effort(&config, &cache_root);
     let mut out = Vec::new();
     let mut listed_ids = HashSet::new();
     for path in marketplace_paths(project_root, resource_dir) {
@@ -4290,6 +4324,10 @@ fn marketplace_check_error(
         changed_plugins: Vec::new(),
         checked_at: chrono::Utc::now().to_rfc3339(),
     }
+}
+
+fn redirect_target_allowed(project_root: &Path, url: &str) -> bool {
+    crate::domain::tools::web_safety::validate_public_http_url(project_root, url, true).is_ok()
 }
 
 async fn check_one_remote_marketplace(
@@ -4464,9 +4502,19 @@ pub async fn check_remote_plugin_marketplaces(
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
+    let redirect_policy_root = policy_root.clone();
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.stop();
+            }
+            if redirect_target_allowed(&redirect_policy_root, attempt.url().as_str()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
         .build()
     {
         Ok(client) => client,
@@ -4848,6 +4896,37 @@ fn read_plugin_install_state(plugin_root: &Path) -> Option<PluginInstallState> {
         .and_then(|raw| serde_json::from_str::<PluginInstallState>(&raw).ok())
 }
 
+fn plugin_install_state_conflict_error(
+    requested_plugin_id: &PluginId,
+    existing_plugin_id: &str,
+    plugin_root: &Path,
+) -> String {
+    format!(
+        "cross-marketplace plugin install conflict for `{}`: typed plugin root `{}` is already owned by `{}`. Plugins with the same name currently share this typed install root; uninstall the old marketplace source first or wait for a future migration before installing or syncing `{}`.",
+        requested_plugin_id.key(),
+        plugin_root.display(),
+        existing_plugin_id,
+        requested_plugin_id.key()
+    )
+}
+
+fn ensure_plugin_install_state_matches(
+    plugin_root: &Path,
+    plugin_id: &PluginId,
+) -> Result<(), String> {
+    let Some(state) = read_plugin_install_state(plugin_root) else {
+        return Ok(());
+    };
+    if state.plugin_id == plugin_id.key() {
+        return Ok(());
+    }
+    Err(plugin_install_state_conflict_error(
+        plugin_id,
+        &state.plugin_id,
+        plugin_root,
+    ))
+}
+
 fn write_plugin_install_state(
     plugin_root: &Path,
     state: &PluginInstallState,
@@ -5143,6 +5222,9 @@ fn prepare_plugin_root_install(
     version: Option<String>,
     installed_at: Option<String>,
 ) -> Result<PathBuf, String> {
+    if let Some(existing_root) = active_plugin_root_in_base(target_base) {
+        ensure_plugin_install_state_matches(&existing_root, plugin_id)?;
+    }
     let parent = target_base.parent().ok_or_else(|| {
         format!(
             "plugin install path has no parent: {}",
@@ -5207,6 +5289,25 @@ fn rollback_activated_plugin_root(
         }
     }
     Ok(())
+}
+
+fn rollback_after_plugin_enable_failure(
+    target_base: &Path,
+    backup_base: Option<&Path>,
+    primary_err: String,
+) -> String {
+    match rollback_activated_plugin_root(target_base, backup_base) {
+        Ok(()) => primary_err,
+        Err(rollback_err) => {
+            tracing::warn!(
+                path = %target_base.display(),
+                "failed to roll back activated plugin install after enable error: {rollback_err}"
+            );
+            format!(
+                "{primary_err}; additionally failed to roll back activated plugin install: {rollback_err}"
+            )
+        }
+    }
 }
 
 fn cleanup_plugin_root_backup_best_effort(backup_base: Option<PathBuf>) {
@@ -5297,8 +5398,11 @@ pub fn install_plugin(
     )?;
     let backup_path = activate_staged_plugin_root(&staged_path, &target_base)?;
     if let Err(err) = set_plugin_enabled(&plugin_id.key(), true) {
-        let _ = rollback_activated_plugin_root(&target_base, backup_path.as_deref());
-        return Err(err);
+        return Err(rollback_after_plugin_enable_failure(
+            &target_base,
+            backup_path.as_deref(),
+            err,
+        ));
     }
     cleanup_plugin_root_backup_best_effort(backup_path);
     remove_other_typed_plugin_roots_best_effort(&store_root, &plugin_id, &target_base);
@@ -5357,6 +5461,7 @@ pub fn sync_plugin(
     }
     let installed_path = active_plugin_root(&plugin_id)
         .ok_or_else(|| format!("plugin `{}` is not installed", plugin_id.key()))?;
+    ensure_plugin_install_state_matches(&installed_path, &plugin_id)?;
 
     let source_files = plugin_file_hashes(&source_path)?;
     let current_files = plugin_file_hashes(&installed_path)?;
@@ -6090,6 +6195,7 @@ mod tests {
             MarketplaceSourceKind::Remote,
             "https://example.com/marketplace.git".to_string(),
             Some("Remote Marketplace".to_string()),
+            None,
         )
         .expect("https remote source should be accepted");
 
@@ -6101,6 +6207,31 @@ mod tests {
         assert!(!user_marketplace_cache_dir(&source.id)
             .expect("valid marketplace source id")
             .exists());
+    }
+
+    #[test]
+    fn redirect_target_private_ip_rejected() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        assert!(!redirect_target_allowed(root.path(), "http://127.0.0.1/x"));
+        assert!(!redirect_target_allowed(
+            root.path(),
+            "http://169.254.169.254/x"
+        ));
+    }
+
+    #[test]
+    fn redirect_target_public_https_allowed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let allowed = redirect_target_allowed(root.path(), "https://example.com/x");
+        if !allowed {
+            eprintln!(
+                "skipping redirect_target_public_https_allowed: example.com did not pass DNS/policy validation"
+            );
+            return;
+        }
+
+        assert!(allowed);
     }
 
     #[test]
@@ -6414,6 +6545,46 @@ mod tests {
         plugin_root
     }
 
+    fn write_local_marketplace_plugin(
+        marketplace_root: &Path,
+        marketplace_name: &str,
+        plugin_name: &str,
+        category: &str,
+    ) -> PathBuf {
+        let plugin_source = marketplace_root.join("plugins").join(plugin_name);
+        fs::create_dir_all(&plugin_source).expect("plugin source");
+        fs::write(
+            plugin_source.join(PLUGIN_MANIFEST_FILE),
+            format!(
+                r#"{{
+                  "name": "{plugin_name}",
+                  "version": "0.1.0",
+                  "interface": {{ "category": "{category}" }}
+                }}"#
+            ),
+        )
+        .expect("plugin manifest");
+        let marketplace_path = marketplace_root.join(MARKETPLACE_FILE_NAME);
+        fs::write(
+            &marketplace_path,
+            format!(
+                r#"{{
+                  "name": "{marketplace_name}",
+                  "plugins": [
+                    {{
+                      "name": "{plugin_name}",
+                      "source": {{ "source": "local", "path": "./plugins/{plugin_name}" }},
+                      "policy": {{ "installation": "AVAILABLE", "authentication": "ON_USE" }},
+                      "category": "{category}"
+                    }}
+                  ]
+                }}"#
+            ),
+        )
+        .expect("marketplace manifest");
+        marketplace_path
+    }
+
     #[test]
     fn test_active_plugin_root_by_name_non_curated_computer_use_marketplace() {
         let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
@@ -6464,6 +6635,68 @@ mod tests {
             active_plugin_root_by_name("computer-use").as_deref(),
             Some(expected_path.as_path())
         );
+    }
+
+    #[test]
+    fn install_plugin_rejects_cross_marketplace_same_name_typed_root_conflict() {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("HOME", tmp.path());
+        let _user_profile = ScopedEnv::set("USERPROFILE", tmp.path());
+        let first_marketplace = write_local_marketplace_plugin(
+            &tmp.path().join("marketplace-a"),
+            "market-a",
+            "shared-plugin",
+            "Tool",
+        );
+        let second_marketplace = write_local_marketplace_plugin(
+            &tmp.path().join("marketplace-b"),
+            "market-b",
+            "shared-plugin",
+            "Tool",
+        );
+
+        let installed =
+            install_plugin(&first_marketplace, "shared-plugin").expect("install first plugin");
+
+        let err = install_plugin(&second_marketplace, "shared-plugin")
+            .expect_err("second marketplace install must conflict");
+
+        assert!(err.contains("cross-marketplace plugin install conflict"));
+        assert!(err.contains("shared-plugin@market-a"));
+        assert!(err.contains("shared-plugin@market-b"));
+        let installed_root = PathBuf::from(&installed.installed_path);
+        let state = read_plugin_install_state(&installed_root).expect("install state");
+        assert_eq!(state.plugin_id, "shared-plugin@market-a");
+    }
+
+    #[test]
+    fn sync_plugin_rejects_cross_marketplace_same_name_typed_root_conflict() {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("HOME", tmp.path());
+        let _user_profile = ScopedEnv::set("USERPROFILE", tmp.path());
+        let first_marketplace = write_local_marketplace_plugin(
+            &tmp.path().join("marketplace-a"),
+            "market-a",
+            "shared-plugin",
+            "Tool",
+        );
+        let second_marketplace = write_local_marketplace_plugin(
+            &tmp.path().join("marketplace-b"),
+            "market-b",
+            "shared-plugin",
+            "Tool",
+        );
+
+        install_plugin(&first_marketplace, "shared-plugin").expect("install first plugin");
+
+        let err = sync_plugin("shared-plugin@market-b", &second_marketplace, None, false)
+            .expect_err("second marketplace sync must conflict");
+
+        assert!(err.contains("cross-marketplace plugin install conflict"));
+        assert!(err.contains("shared-plugin@market-a"));
+        assert!(err.contains("shared-plugin@market-b"));
     }
 
     #[test]
@@ -7038,6 +7271,41 @@ mod tests {
     }
 
     #[test]
+    fn rollback_after_plugin_enable_failure_preserves_primary_error_when_rollback_succeeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target_base = tmp.path().join("plugin-root");
+        fs::create_dir_all(&target_base).expect("create target root");
+        fs::write(target_base.join("plugin.json"), "{}").expect("write plugin file");
+
+        let err = rollback_after_plugin_enable_failure(
+            &target_base,
+            None,
+            "enable plugin failed".to_string(),
+        );
+
+        assert_eq!(err, "enable plugin failed");
+        assert!(!target_base.exists());
+    }
+
+    #[test]
+    fn rollback_after_plugin_enable_failure_reports_rollback_failure_details() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target_base = tmp.path().join("plugin-root");
+        fs::write(&target_base, "not-a-directory").expect("write target file");
+
+        let err = rollback_after_plugin_enable_failure(
+            &target_base,
+            None,
+            "enable plugin failed".to_string(),
+        );
+
+        assert!(err.contains("enable plugin failed"));
+        assert!(err.contains("failed to roll back activated plugin install"));
+        assert!(err.contains(&format!("remove {}:", target_base.display())));
+        assert!(target_base.exists());
+    }
+
+    #[test]
     fn configured_builtin_plugins_refresh_moves_stale_typed_roots_without_overwriting_local_edits()
     {
         let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
@@ -7135,7 +7403,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_marketplaces_does_not_migrate_or_sync_installed_plugin_roots() {
+    fn listing_marketplaces_refreshes_configured_builtin_plugin_roots_without_syncing() {
         let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().join("home");
@@ -7179,12 +7447,12 @@ mod tests {
             .iter()
             .flat_map(|marketplace| marketplace.plugins.iter())
             .any(|plugin| plugin.id == "analysis-bundle@resolved-market"));
-        assert!(old_operator_root.exists());
+        assert!(!old_operator_root.exists());
+        assert!(workflow_root.exists());
         assert_eq!(
-            fs::read_to_string(old_operator_root.join("local-edit.txt")).expect("local marker"),
+            fs::read_to_string(workflow_root.join("local-edit.txt")).expect("local marker"),
             "must remain"
         );
-        assert!(!workflow_root.exists());
     }
 
     #[test]
