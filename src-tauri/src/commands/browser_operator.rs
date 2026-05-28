@@ -246,12 +246,18 @@ pub async fn browser_operator_install_backend(
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_operator_install_audit_arguments, browser_operator_install_audit_status,
-        browser_operator_install_failure_reason, browser_operator_install_kind,
-        has_explicit_install_confirmation, BrowserOperatorInstallAuditPhase,
+        append_browser_operator_install_audit_event, browser_operator_install_audit_arguments,
+        browser_operator_install_audit_status, browser_operator_install_failure_reason,
+        browser_operator_install_kind, has_explicit_install_confirmation,
+        BrowserOperatorInstallAuditPhase, BROWSER_OPERATOR_INSTALL_COMPLETED_REASON,
+        BROWSER_OPERATOR_INSTALL_CONFIRMATION_REASON, BROWSER_OPERATOR_INSTALL_STARTED_REASON,
+        BROWSER_OPERATOR_INSTALL_TOOL_NAME,
     };
+    use crate::app_state::OmigaAppState;
     use crate::domain::browser_operator::BrowserOperatorError;
+    use crate::domain::persistence::{init_db, SessionRepository};
     use serde_json::{json, Value};
+    use std::collections::HashMap;
 
     #[test]
     fn browser_operator_install_kind_matches_skip_flag() {
@@ -369,5 +375,132 @@ mod tests {
             browser_operator_install_failure_reason(&err),
             "Browser Operator backend install failed: sidecar_io_error"
         );
+    }
+
+    #[tokio::test]
+    async fn browser_operator_install_audit_events_persist_phase_status_and_facets_after_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let state = OmigaAppState::new(SessionRepository::new(pool));
+        let project_root = dir.path().join("project");
+        let project_root = project_root.to_string_lossy().to_string();
+        let failure = BrowserOperatorError {
+            code: "install_timeout".to_string(),
+            message: "Browser Operator backend install timed out after 60s.".to_string(),
+            details: None,
+        };
+        let failure_reason = browser_operator_install_failure_reason(&failure);
+
+        append_browser_operator_install_audit_event(
+            &state,
+            Some("session-browser"),
+            Some(project_root.as_str()),
+            "denied",
+            Some(BROWSER_OPERATOR_INSTALL_CONFIRMATION_REASON),
+            false,
+            BrowserOperatorInstallAuditPhase::NotStarted,
+        )
+        .await;
+        append_browser_operator_install_audit_event(
+            &state,
+            Some("session-browser"),
+            Some(project_root.as_str()),
+            "approved",
+            Some(BROWSER_OPERATOR_INSTALL_STARTED_REASON),
+            true,
+            BrowserOperatorInstallAuditPhase::Started,
+        )
+        .await;
+        append_browser_operator_install_audit_event(
+            &state,
+            Some("session-browser"),
+            Some(project_root.as_str()),
+            "approved",
+            Some(BROWSER_OPERATOR_INSTALL_COMPLETED_REASON),
+            true,
+            BrowserOperatorInstallAuditPhase::Completed,
+        )
+        .await;
+        append_browser_operator_install_audit_event(
+            &state,
+            Some("session-browser"),
+            Some(project_root.as_str()),
+            "approved",
+            Some(failure_reason.as_str()),
+            true,
+            BrowserOperatorInstallAuditPhase::Failed,
+        )
+        .await;
+
+        state.repo.pool().close().await;
+        drop(state);
+
+        let reopened_pool = init_db(&db_path).await.expect("reopen db");
+        let reopened_repo = SessionRepository::new(reopened_pool);
+        let page = reopened_repo
+            .list_recent_permission_audit_events_page(
+                10,
+                0,
+                Some(project_root.as_str()),
+                None,
+                Some("browser_operator"),
+            )
+            .await
+            .expect("list browser operator audit events");
+
+        assert_eq!(page.total_count, 4);
+        assert_eq!(page.facets.approved_count, 3);
+        assert_eq!(page.facets.denied_count, 1);
+
+        let by_phase = page
+            .events
+            .iter()
+            .map(|event| {
+                assert_eq!(event.session_id, "session-browser");
+                assert_eq!(event.project_root.as_deref(), Some(project_root.as_str()));
+                assert_eq!(event.tool_name, BROWSER_OPERATOR_INSTALL_TOOL_NAME);
+                let arguments: Value =
+                    serde_json::from_str(&event.arguments_json).expect("valid audit arguments");
+                let phase = arguments
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .expect("phase")
+                    .to_string();
+                (phase, (event, arguments))
+            })
+            .collect::<HashMap<_, _>>();
+
+        let not_started = by_phase.get("not_started").expect("not_started event");
+        assert_eq!(not_started.0.decision, "denied");
+        assert_eq!(not_started.0.tool_name, BROWSER_OPERATOR_INSTALL_TOOL_NAME);
+        assert_eq!(
+            not_started.0.reason.as_deref(),
+            Some(BROWSER_OPERATOR_INSTALL_CONFIRMATION_REASON)
+        );
+        assert_eq!(not_started.1["status"], "denied");
+        assert_eq!(not_started.1["installKind"], "full");
+
+        let started = by_phase.get("started").expect("started event");
+        assert_eq!(started.0.decision, "approved");
+        assert_eq!(
+            started.0.reason.as_deref(),
+            Some(BROWSER_OPERATOR_INSTALL_STARTED_REASON)
+        );
+        assert_eq!(started.1["status"], "started");
+        assert_eq!(started.1["installKind"], "packages-only");
+
+        let completed = by_phase.get("completed").expect("completed event");
+        assert_eq!(completed.0.decision, "approved");
+        assert_eq!(
+            completed.0.reason.as_deref(),
+            Some(BROWSER_OPERATOR_INSTALL_COMPLETED_REASON)
+        );
+        assert_eq!(completed.1["status"], "completed");
+
+        let failed = by_phase.get("failed").expect("failed event");
+        assert_eq!(failed.0.decision, "approved");
+        assert_eq!(failed.0.reason.as_deref(), Some(failure_reason.as_str()));
+        assert_eq!(failed.1["status"], "failed");
     }
 }
