@@ -54,6 +54,8 @@ import {
   type OperatorRunSummary,
   type OperatorSummary,
   type MarketplaceRemoteCheckResult,
+  type MarketplaceSourceKind,
+  type MarketplaceSourceView,
   type PluginEnvironmentSummary,
   type PluginProcessPoolRouteStatus,
   type PluginRetrievalLifecycleState,
@@ -61,6 +63,7 @@ import {
   type PluginRetrievalResourceSummary,
   type PluginSummary,
   type PluginTemplateSummary,
+  type RefreshResult,
   usePluginStore,
 } from "../../state/pluginStore";
 import { useChatComposerStore } from "../../state/chatComposerStore";
@@ -1803,6 +1806,24 @@ function remoteMarketplaceCheckMessage(results: MarketplaceRemoteCheckResult[]):
     return `${updates.length} remote marketplace update${updates.length === 1 ? "" : "s"} available${changed > 0 ? ` · ${changed} plugin${changed === 1 ? "" : "s"} changed` : ""}.`;
   }
   return "All remote marketplaces are up to date.";
+}
+
+function marketplaceSourceLabel(source: { label?: string | null; location: string }): string {
+  const label = source.label?.trim();
+  return label || source.location;
+}
+
+export function marketplaceSourceRefreshMessage(result: RefreshResult): string {
+  if (!result.ok) return result.message;
+  const details = [
+    result.marketplaceName?.trim() ? result.marketplaceName.trim() : null,
+    typeof result.pluginCount === "number"
+      ? `${result.pluginCount} plugin${result.pluginCount === 1 ? "" : "s"}`
+      : null,
+  ].filter(Boolean);
+  return details.length > 0
+    ? `${result.message} · ${details.join(" · ")}`
+    : result.message;
 }
 
 export function remoteMarketplaceChangedPluginNames(
@@ -4314,15 +4335,19 @@ function OperatorRunDetailsDialog({
 
 export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const {
+    marketplaceSourceViews,
     marketplaces,
     operators,
     operatorRuns,
     retrievalStatuses,
     processPoolStatuses,
     remoteMarketplaceChecks,
+    builtinMarketplaceStatus,
     isLoading,
     isMutating,
+    bootstrapInProgress,
     error,
+    ensureBuiltinMarketplace,
     loadPlugins,
     loadOperatorRuns,
     readOperatorRun,
@@ -4332,6 +4357,10 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     installPlugin,
     syncPlugin,
     checkRemoteMarketplaces,
+    addMarketplaceSource,
+    removeMarketplaceSource,
+    setMarketplaceSourceEnabled,
+    refreshMarketplaceSource,
     uninstallPlugin,
     setPluginEnabled,
     setTemplateEnabled,
@@ -4351,6 +4380,14 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const [operatorRunDetailError, setOperatorRunDetailError] = useState<string | null>(null);
   const [pluginSearch, setPluginSearch] = useState("");
   const [pluginFilter, setPluginFilter] = useState<PluginCatalogFilter>("all");
+  const [marketplaceSourceKind, setMarketplaceSourceKind] = useState<MarketplaceSourceKind>("local");
+  const [marketplaceSourceLocation, setMarketplaceSourceLocation] = useState("");
+  const [marketplaceSourceLabelInput, setMarketplaceSourceLabelInput] = useState("");
+  const [marketplaceSourceFormError, setMarketplaceSourceFormError] = useState<string | null>(null);
+  const [marketplaceSourceActionKey, setMarketplaceSourceActionKey] = useState<string | null>(null);
+  const [marketplaceSourceRefreshResults, setMarketplaceSourceRefreshResults] = useState<
+    Record<string, RefreshResult | undefined>
+  >({});
   const [dismissedFeedbackKey, setDismissedFeedbackKey] = useState<string | null>(null);
   const [installingPluginId, setInstallingPluginId] = useState<string | null>(null);
   const [checkingRemoteMarketplaces, setCheckingRemoteMarketplaces] = useState(false);
@@ -4489,6 +4526,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const feedbackSeverity = error ? "error" : "success";
   const feedbackKey = feedbackText ? `${feedbackSeverity}:${feedbackText}` : null;
   const feedbackOpen = Boolean(feedbackText && feedbackKey !== dismissedFeedbackKey);
+  const marketplaceSourceMutationDisabled = isMutating || isLoading || bootstrapInProgress;
 
   useEffect(() => {
     setDismissedFeedbackKey(null);
@@ -4567,6 +4605,126 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       // Store exposes the error banner.
     } finally {
       setCheckingRemoteMarketplaces(false);
+    }
+  };
+
+  const handleAddMarketplaceSource = async () => {
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    const location = marketplaceSourceLocation.trim();
+    const label = marketplaceSourceLabelInput.trim();
+    if (!location) {
+      setMarketplaceSourceFormError(
+        marketplaceSourceKind === "local"
+          ? "Enter a local marketplace path."
+          : "Enter an HTTPS Git URL.",
+      );
+      return;
+    }
+    setMarketplaceSourceActionKey("add");
+    try {
+      const source = await addMarketplaceSource(
+        marketplaceSourceKind,
+        location,
+        label || undefined,
+        projectRoot,
+      );
+      setMarketplaceSourceLocation("");
+      setMarketplaceSourceLabelInput("");
+      if (source.kind === "remote") {
+        const result = await refreshMarketplaceSource(source.id, projectRoot);
+        setMarketplaceSourceRefreshResults((current) => ({
+          ...current,
+          [source.id]: { ...result },
+        }));
+        if (result.ok) {
+          setMessage(marketplaceSourceRefreshMessage(result));
+        }
+      } else {
+        setMessage("Added local marketplace source");
+      }
+    } catch (err) {
+      setMarketplaceSourceFormError(extractErrorMessage(err));
+    } finally {
+      setMarketplaceSourceActionKey((current) => (current === "add" ? null : current));
+    }
+  };
+
+  const handleRefreshMarketplaceSource = async (source: MarketplaceSourceView) => {
+    if (!source.removable || source.kind !== "remote") return;
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    setMarketplaceSourceActionKey(`refresh:${source.id}`);
+    try {
+      const result = await refreshMarketplaceSource(source.id, projectRoot);
+      setMarketplaceSourceRefreshResults((current) => ({
+        ...current,
+        [source.id]: { ...result },
+      }));
+      if (result.ok) setMessage(marketplaceSourceRefreshMessage(result));
+    } catch (err) {
+      const result: RefreshResult = {
+        id: source.id,
+        ok: false,
+        message: extractErrorMessage(err),
+      };
+      setMarketplaceSourceRefreshResults((current) => ({
+        ...current,
+        [source.id]: result,
+      }));
+    } finally {
+      setMarketplaceSourceActionKey((current) =>
+        current === `refresh:${source.id}` ? null : current,
+      );
+    }
+  };
+
+  const handleRefreshBuiltinMarketplace = async () => {
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    const status = await ensureBuiltinMarketplace(projectRoot);
+    if (status.ok) setMessage(status.message);
+  };
+
+  const handleToggleMarketplaceSource = async (
+    source: MarketplaceSourceView,
+    enabled: boolean,
+  ) => {
+    if (!source.removable) return;
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    setMarketplaceSourceActionKey(`toggle:${source.id}`);
+    try {
+      await setMarketplaceSourceEnabled(source.id, enabled, projectRoot);
+      setMessage(`${enabled ? "Enabled" : "Disabled"} ${marketplaceSourceLabel(source)}`);
+    } catch {
+      // Store exposes the error banner.
+    } finally {
+      setMarketplaceSourceActionKey((current) =>
+        current === `toggle:${source.id}` ? null : current,
+      );
+    }
+  };
+
+  const handleRemoveMarketplaceSource = async (source: MarketplaceSourceView) => {
+    if (!source.removable) return;
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    setMarketplaceSourceActionKey(`remove:${source.id}`);
+    try {
+      await removeMarketplaceSource(source.id, projectRoot);
+      setMarketplaceSourceRefreshResults((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
+      setMessage(`Removed ${marketplaceSourceLabel(source)}`);
+    } catch {
+      // Store exposes the error banner.
+    } finally {
+      setMarketplaceSourceActionKey((current) =>
+        current === `remove:${source.id}` ? null : current,
+      );
     }
   };
 
@@ -5207,6 +5365,253 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         </AccordionDetails>
       </Accordion>
       )}
+
+      <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
+        <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+            <Typography variant="subtitle2" fontWeight={700}>Marketplace Sources</Typography>
+            <Chip size="small" variant="outlined" label={`${marketplaceSourceViews.length} source${marketplaceSourceViews.length === 1 ? "" : "s"}`} />
+          </Stack>
+        </AccordionSummary>
+        <AccordionDetails sx={{ px: 1.5, pt: 0.75, pb: 1.5 }}>
+          <Stack spacing={1.25} useFlexGap>
+            {bootstrapInProgress && (
+              <Stack direction="row" spacing={1} alignItems="center">
+                <CircularProgress size={16} />
+                <Typography variant="caption" color="text.secondary">
+                  Refreshing built-in marketplace
+                </Typography>
+              </Stack>
+            )}
+            {builtinMarketplaceStatus && !builtinMarketplaceStatus.ok && (
+              <Alert severity="warning" sx={{ borderRadius: 1.5 }}>
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={1}
+                  alignItems={{ xs: "stretch", sm: "center" }}
+                  justifyContent="space-between"
+                >
+                  <Typography variant="body2">
+                    {builtinMarketplaceStatus.message}
+                  </Typography>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={bootstrapInProgress ? <CircularProgress size={14} /> : <RefreshRounded />}
+                    disabled={isLoading || bootstrapInProgress}
+                    onClick={() => void handleRefreshBuiltinMarketplace()}
+                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
+                  >
+                    Retry
+                  </Button>
+                </Stack>
+              </Alert>
+            )}
+            {marketplaceSourceViews.length === 0 ? (
+              <Box sx={{ p: 1.5, borderRadius: 2, textAlign: "center", bgcolor: "background.paper" }}>
+                <Typography variant="body2" color="text.secondary">
+                  No marketplace sources configured.
+                </Typography>
+              </Box>
+            ) : (
+              <Stack spacing={1} useFlexGap>
+                {marketplaceSourceViews.map((source) => {
+                  const label = marketplaceSourceLabel(source);
+                  const sourceLabel = source.label?.trim();
+                  const refreshResult = marketplaceSourceRefreshResults[source.id];
+                  const kindLabel =
+                    source.kind === "builtin"
+                      ? "Built-in"
+                      : source.kind === "remote"
+                        ? "Remote"
+                        : "Local";
+                  const kindColor: ChipProps["color"] =
+                    source.kind === "builtin"
+                      ? "success"
+                      : source.kind === "remote"
+                        ? "info"
+                        : "default";
+                  return (
+                    <Paper
+                      key={source.id}
+                      variant="outlined"
+                      sx={{ p: 1.25, borderRadius: 2, bgcolor: "background.paper" }}
+                    >
+                      <Stack spacing={1}>
+                        <Stack
+                          direction={{ xs: "column", md: "row" }}
+                          spacing={1}
+                          alignItems={{ xs: "stretch", md: "center" }}
+                        >
+                          <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flex: 1 }}>
+                            <Chip
+                              size="small"
+                              color={kindColor}
+                              variant="outlined"
+                              label={kindLabel}
+                            />
+                            <Box sx={{ minWidth: 0 }}>
+                              {sourceLabel ? (
+                                <Typography variant="body2" fontWeight={800} noWrap title={sourceLabel}>
+                                  {sourceLabel}
+                                </Typography>
+                              ) : null}
+                              <Typography
+                                variant={sourceLabel ? "caption" : "body2"}
+                                color={sourceLabel ? "text.secondary" : "text.primary"}
+                                sx={{ display: "block", wordBreak: "break-all" }}
+                              >
+                                {source.location}
+                              </Typography>
+                            </Box>
+                          </Stack>
+                          <Stack direction="row" spacing={0.75} alignItems="center" justifyContent="flex-end">
+                            {source.removable ? (
+                              <>
+                                <Switch
+                                  checked={source.enabled}
+                                  disabled={marketplaceSourceMutationDisabled}
+                                  onChange={(event) =>
+                                    void handleToggleMarketplaceSource(source, event.target.checked)
+                                  }
+                                  inputProps={{
+                                    "aria-label": `${source.enabled ? "Disable" : "Enable"} marketplace source ${label}`,
+                                  }}
+                                />
+                                {source.kind === "remote" && (
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    startIcon={
+                                      marketplaceSourceActionKey === `refresh:${source.id}`
+                                        ? <CircularProgress size={16} />
+                                        : <RefreshRounded />
+                                    }
+                                    disabled={marketplaceSourceMutationDisabled}
+                                    onClick={() => void handleRefreshMarketplaceSource(source)}
+                                    aria-label={`Refresh marketplace source ${label}`}
+                                    sx={{ textTransform: "none", borderRadius: 1.5 }}
+                                  >
+                                    Refresh
+                                  </Button>
+                                )}
+                                <IconButton
+                                  size="small"
+                                  color="error"
+                                  disabled={marketplaceSourceMutationDisabled}
+                                  onClick={() => void handleRemoveMarketplaceSource(source)}
+                                  aria-label={`Remove marketplace source ${label}`}
+                                >
+                                  {marketplaceSourceActionKey === `remove:${source.id}` ? (
+                                    <CircularProgress size={16} />
+                                  ) : (
+                                    <DeleteOutlineRounded fontSize="small" />
+                                  )}
+                                </IconButton>
+                              </>
+                            ) : (
+                              <>
+                                {source.kind === "builtin" && (
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    startIcon={bootstrapInProgress ? <CircularProgress size={16} /> : <RefreshRounded />}
+                                    disabled={isLoading || bootstrapInProgress}
+                                    onClick={() => void handleRefreshBuiltinMarketplace()}
+                                    aria-label={`Refresh marketplace source ${label}`}
+                                    sx={{ textTransform: "none", borderRadius: 1.5 }}
+                                  >
+                                    Refresh
+                                  </Button>
+                                )}
+                                <Typography
+                                  variant="caption"
+                                  color="text.secondary"
+                                  sx={{ whiteSpace: "nowrap" }}
+                                >
+                                  Always enabled
+                                </Typography>
+                              </>
+                            )}
+                          </Stack>
+                        </Stack>
+                        {refreshResult && (
+                          <Alert severity={refreshResult.ok ? "success" : "error"} sx={{ borderRadius: 1.5 }}>
+                            {marketplaceSourceRefreshMessage(refreshResult)}
+                          </Alert>
+                        )}
+                      </Stack>
+                    </Paper>
+                  );
+                })}
+              </Stack>
+            )}
+
+            <Box sx={{ p: 1.25, borderRadius: 2, bgcolor: "background.paper" }}>
+              <Stack spacing={1} useFlexGap>
+                <Stack
+                  direction={{ xs: "column", md: "row" }}
+                  spacing={1}
+                  alignItems={{ xs: "stretch", md: "flex-start" }}
+                >
+                  <TextField
+                    select
+                    size="small"
+                    label="Source type"
+                    value={marketplaceSourceKind}
+                    onChange={(event) => setMarketplaceSourceKind(event.target.value as MarketplaceSourceKind)}
+                    inputProps={{ "aria-label": "Marketplace source kind" }}
+                    sx={{ minWidth: { xs: "100%", md: 150 } }}
+                  >
+                    <MenuItem value="local">Local</MenuItem>
+                    <MenuItem value="remote">Remote</MenuItem>
+                  </TextField>
+                  <TextField
+                    size="small"
+                    label={marketplaceSourceKind === "local" ? "Local path" : "Remote Git URL"}
+                    value={marketplaceSourceLocation}
+                    onChange={(event) => setMarketplaceSourceLocation(event.target.value)}
+                    error={Boolean(marketplaceSourceFormError)}
+                    inputProps={{ "aria-label": "Marketplace source location" }}
+                    sx={{ flex: 1, minWidth: { xs: "100%", md: 260 } }}
+                  />
+                  <TextField
+                    size="small"
+                    label="Label"
+                    value={marketplaceSourceLabelInput}
+                    onChange={(event) => setMarketplaceSourceLabelInput(event.target.value)}
+                    inputProps={{ "aria-label": "Marketplace source label" }}
+                    sx={{ minWidth: { xs: "100%", md: 190 } }}
+                  />
+                  <Button
+                    size="small"
+                    variant="contained"
+                    startIcon={marketplaceSourceActionKey === "add" ? <CircularProgress size={16} /> : <AddRounded />}
+                    disabled={marketplaceSourceMutationDisabled || marketplaceSourceActionKey === "add"}
+                    onClick={() => void handleAddMarketplaceSource()}
+                    aria-label="Add marketplace source"
+                    sx={{
+                      textTransform: "none",
+                      borderRadius: 1.5,
+                      minHeight: 40,
+                      flexShrink: 0,
+                      whiteSpace: "nowrap",
+                      alignSelf: { xs: "stretch", md: "flex-start" },
+                    }}
+                  >
+                    Add
+                  </Button>
+                </Stack>
+                {marketplaceSourceFormError && (
+                  <Alert severity="error" sx={{ borderRadius: 1.5 }}>
+                    {marketplaceSourceFormError}
+                  </Alert>
+                )}
+              </Stack>
+            </Box>
+          </Stack>
+        </AccordionDetails>
+      </Accordion>
 
       {marketplaces.length === 0 || allPlugins.length === 0 ? (
         <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>

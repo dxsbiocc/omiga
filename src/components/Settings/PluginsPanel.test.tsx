@@ -1,6 +1,220 @@
-import { describe, expect, it } from "vitest";
+import type { ReactElement, ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import type {
+  HookRuntimeApi,
+  RenderedNode,
+} from "../../test/__tests__/componentHarness";
 import {
+  ComponentHarness,
+  createHookRuntime,
+  findAllNodes,
+  installComponentTestWindow,
+  textContent,
+} from "../../test/__tests__/componentHarness";
+
+const hookRuntimeRef = vi.hoisted(() => ({
+  current: null as HookRuntimeApi | null,
+}));
+
+const pluginStoreMock = vi.hoisted(() => ({
+  state: {
+    marketplaceSources: [] as unknown[],
+    marketplaceSourceViews: [] as unknown[],
+    marketplaces: [] as unknown[],
+    operators: [] as unknown[],
+    operatorRuns: [] as unknown[],
+    retrievalStatuses: [] as unknown[],
+    processPoolStatuses: [] as unknown[],
+    remoteMarketplaceChecks: [] as unknown[],
+    builtinMarketplaceStatus: null as {
+      ok: boolean;
+      source: string;
+      path?: string | null;
+      message: string;
+    } | null,
+    isLoading: false,
+    isMutating: false,
+    bootstrapInProgress: false,
+    error: null as string | null,
+    ensureBuiltinMarketplace: vi.fn().mockResolvedValue({
+      ok: true,
+      source: "github",
+      path: "/builtin",
+      message: "Built-in marketplace ready.",
+    }),
+    loadPlugins: vi.fn().mockResolvedValue(undefined),
+    loadOperatorRuns: vi.fn().mockResolvedValue(undefined),
+    readOperatorRun: vi.fn(),
+    readOperatorRunLog: vi.fn(),
+    verifyOperatorRun: vi.fn(),
+    clearProcessPool: vi.fn().mockResolvedValue(0),
+    installPlugin: vi.fn(),
+    syncPlugin: vi.fn(),
+    checkRemoteMarketplaces: vi.fn(),
+    addMarketplaceSource: vi.fn(),
+    removeMarketplaceSource: vi.fn(),
+    setMarketplaceSourceEnabled: vi.fn(),
+    refreshMarketplaceSource: vi.fn(),
+    uninstallPlugin: vi.fn(),
+    setPluginEnabled: vi.fn(),
+    setTemplateEnabled: vi.fn(),
+    setRetrievalResourceEnabled: vi.fn(),
+    setEnvironmentEnabled: vi.fn(),
+    checkPluginEnvironment: vi.fn(),
+  },
+}));
+
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    useEffect: (effect: () => void | (() => void), deps?: readonly unknown[]) =>
+      hookRuntimeRef.current?.useEffect(effect, deps),
+    useMemo: <T,>(factory: () => T, deps?: readonly unknown[]) =>
+      hookRuntimeRef.current?.useMemo(factory, deps),
+    useState: <T,>(initial: T | (() => T)) =>
+      hookRuntimeRef.current?.useState(initial),
+  };
+});
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  revealItemInDir: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../../state/pluginStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../state/pluginStore")>();
+  const usePluginStore = (() => pluginStoreMock.state) as typeof actual.usePluginStore;
+  usePluginStore.setState = (partial: unknown) => {
+    const next =
+      typeof partial === "function"
+        ? (partial as (state: typeof pluginStoreMock.state) => Partial<typeof pluginStoreMock.state>)(
+            pluginStoreMock.state,
+          )
+        : partial;
+    if (next && typeof next === "object") {
+      Object.assign(pluginStoreMock.state, next);
+    }
+  };
+  return {
+    ...actual,
+    usePluginStore,
+  };
+});
+
+vi.mock("../../state/chatComposerStore", () => ({
+  useChatComposerStore: <T,>(selector: (state: {
+    environment: string;
+    sshServer: string | null;
+    sandboxBackend: string;
+  }) => T): T =>
+    selector({
+      environment: "local",
+      sshServer: null,
+      sandboxBackend: "docker",
+    }),
+}));
+
+vi.mock("../../state/sessionStore", () => ({
+  useSessionStore: <T,>(selector: (state: { currentSession: { id: string } | null }) => T): T =>
+    selector({ currentSession: null }),
+}));
+
+vi.mock("@mui/material", async () => {
+  const React = await import("react");
+  const { createMuiMaterialMock } = await import("../../test/__tests__/muiMocks");
+  const base = createMuiMaterialMock();
+  const passthrough = (type: string) => {
+    const Component = ({ children, ...props }: Record<string, unknown> & { children?: ReactNode }) =>
+      React.createElement(type, props, children);
+    Component.displayName = `Mock${type}`;
+    return Component;
+  };
+  const Snackbar = ({
+    children,
+    open,
+    ...props
+  }: Record<string, unknown> & { children?: ReactNode; open?: boolean }) =>
+    open ? React.createElement("snackbar", props, children) : null;
+  const Switch = ({
+    inputProps,
+    checked,
+    ...props
+  }: Record<string, unknown> & { inputProps?: Record<string, unknown>; checked?: boolean }) =>
+    React.createElement("input", {
+      ...props,
+      ...inputProps,
+      type: "checkbox",
+      checked,
+    });
+
+  return {
+    ...base,
+    Accordion: passthrough("accordion"),
+    AccordionDetails: passthrough("accordion-details"),
+    AccordionSummary: passthrough("accordion-summary"),
+    Collapse: passthrough("collapse"),
+    InputAdornment: passthrough("input-adornment"),
+    Portal: passthrough("portal"),
+    Snackbar,
+    Switch,
+    ToggleButton: passthrough("toggle-button"),
+    ToggleButtonGroup: passthrough("toggle-button-group"),
+  };
+});
+
+vi.mock("@mui/material/styles", async () => {
+  const React = await import("react");
+  const theme = {
+    palette: {
+      mode: "light",
+      common: { black: "#000", white: "#fff" },
+      primary: { main: "#1976d2" },
+      secondary: { main: "#7b1fa2" },
+      success: { main: "#2e7d32" },
+      warning: { main: "#ed6c02" },
+      error: { main: "#d32f2f" },
+      info: { main: "#0288d1" },
+      text: { primary: "#111", secondary: "#555" },
+      background: { paper: "#fff", default: "#fafafa" },
+      action: { hover: "#f5f5f5" },
+      divider: "#ddd",
+    },
+    shadows: Array.from({ length: 25 }, () => "none"),
+    zIndex: { drawer: 1200, tooltip: 1500 },
+  };
+  return {
+    __esModule: true,
+    ThemeProvider: ({ children }: { children?: ReactNode }) =>
+      React.createElement("theme-provider", {}, children),
+    alpha: (color: string, value: number) => `${color}/${value}`,
+    createTheme: () => theme,
+    useTheme: () => theme,
+  };
+});
+
+vi.mock("@mui/icons-material", async () => {
+  const { createIconMock } = await import("../../test/__tests__/muiMocks");
+  return createIconMock([
+    "AddRounded",
+    "ClearRounded",
+    "CloseRounded",
+    "ContentCopyRounded",
+    "DeleteOutlineRounded",
+    "DescriptionOutlined",
+    "ExtensionRounded",
+    "ExpandMoreRounded",
+    "KeyboardArrowDownRounded",
+    "PublishedWithChangesRounded",
+    "RefreshRounded",
+    "SearchRounded",
+    "SettingsRounded",
+    "SyncRounded",
+    "TroubleshootRounded",
+  ]);
+});
+import {
+  PluginsPanel,
   displayName,
   filterPluginsForCatalog,
   groupPluginsByCatalogGroup,
@@ -157,6 +371,244 @@ function remoteMarketplaceCheck(
     ...overrides,
   };
 }
+
+const resetPanelStore = () => {
+  pluginStoreMock.state.marketplaceSources = [];
+  pluginStoreMock.state.marketplaceSourceViews = [];
+  pluginStoreMock.state.marketplaces = [];
+  pluginStoreMock.state.operators = [];
+  pluginStoreMock.state.operatorRuns = [];
+  pluginStoreMock.state.retrievalStatuses = [];
+  pluginStoreMock.state.processPoolStatuses = [];
+  pluginStoreMock.state.remoteMarketplaceChecks = [];
+  pluginStoreMock.state.builtinMarketplaceStatus = null;
+  pluginStoreMock.state.isLoading = false;
+  pluginStoreMock.state.isMutating = false;
+  pluginStoreMock.state.bootstrapInProgress = false;
+  pluginStoreMock.state.error = null;
+  pluginStoreMock.state.ensureBuiltinMarketplace = vi.fn().mockResolvedValue({
+    ok: true,
+    source: "github",
+    path: "/builtin",
+    message: "Built-in marketplace ready.",
+  });
+  pluginStoreMock.state.loadPlugins = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.loadOperatorRuns = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.readOperatorRun = vi.fn();
+  pluginStoreMock.state.readOperatorRunLog = vi.fn();
+  pluginStoreMock.state.verifyOperatorRun = vi.fn();
+  pluginStoreMock.state.clearProcessPool = vi.fn().mockResolvedValue(0);
+  pluginStoreMock.state.installPlugin = vi.fn();
+  pluginStoreMock.state.syncPlugin = vi.fn();
+  pluginStoreMock.state.checkRemoteMarketplaces = vi.fn();
+  pluginStoreMock.state.addMarketplaceSource = vi.fn().mockResolvedValue({
+    id: "source-local",
+    kind: "local",
+    location: "/tmp/omiga-plugins",
+    label: null,
+    enabled: true,
+    addedAt: "2026-05-27T00:00:00Z",
+  });
+  pluginStoreMock.state.removeMarketplaceSource = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.setMarketplaceSourceEnabled = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.refreshMarketplaceSource = vi.fn().mockResolvedValue({
+    id: "source-local",
+    ok: true,
+    message: "Refreshed",
+    marketplaceName: "omiga-curated",
+    pluginCount: 1,
+  });
+  pluginStoreMock.state.uninstallPlugin = vi.fn();
+  pluginStoreMock.state.setPluginEnabled = vi.fn();
+  pluginStoreMock.state.setTemplateEnabled = vi.fn();
+  pluginStoreMock.state.setRetrievalResourceEnabled = vi.fn();
+  pluginStoreMock.state.setEnvironmentEnabled = vi.fn();
+  pluginStoreMock.state.checkPluginEnvironment = vi.fn();
+};
+
+const createPanelHarness = () => {
+  installComponentTestWindow();
+  const runtime = createHookRuntime();
+  hookRuntimeRef.current = runtime;
+  const harness = new ComponentHarness(
+    runtime,
+    (): ReactElement => <PluginsPanel projectPath="/project" />,
+  );
+  harness.render();
+  return harness;
+};
+
+const getNodeByAriaLabel = (
+  harness: ComponentHarness,
+  label: string,
+): RenderedNode => {
+  const node = findAllNodes(
+    harness.tree,
+    (candidate) => candidate.props["aria-label"] === label,
+  )[0];
+  if (!node) throw new Error(`Unable to find node labelled "${label}".`);
+  return node;
+};
+
+const getButtonByText = (
+  harness: ComponentHarness,
+  label: string,
+): RenderedNode => {
+  const button = findAllNodes(
+    harness.tree,
+    (candidate) =>
+      candidate.type === "button" && textContent(candidate).includes(label),
+  )[0];
+  if (!button) throw new Error(`Unable to find button containing "${label}".`);
+  return button;
+};
+
+beforeEach(() => {
+  resetPanelStore();
+});
+
+afterEach(() => {
+  hookRuntimeRef.current?.cleanup();
+  hookRuntimeRef.current = null;
+  vi.clearAllMocks();
+});
+
+describe("PluginsPanel marketplace sources UI", () => {
+  it("renders the sources section and invokes the add source action", () => {
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain("Marketplace Sources");
+    expect(textContent(harness.tree)).toContain("Add");
+
+    harness.change(getNodeByAriaLabel(harness, "Local path"), "/tmp/omiga-plugins");
+    harness.click(getButtonByText(harness, "Add"));
+
+    expect(pluginStoreMock.state.addMarketplaceSource).toHaveBeenCalledWith(
+      "local",
+      "/tmp/omiga-plugins",
+      undefined,
+      "/project",
+    );
+  });
+
+  it("disables marketplace source mutations while initial loading is active", () => {
+    pluginStoreMock.state.isLoading = true;
+    pluginStoreMock.state.marketplaceSourceViews = [
+      {
+        id: "source-remote",
+        kind: "remote",
+        location: "https://example.com/omiga-plugins.git",
+        label: "Remote Marketplace",
+        enabled: true,
+        removable: true,
+        addedAt: "2026-05-27T00:00:00Z",
+      },
+    ];
+
+    const harness = createPanelHarness();
+
+    expect(getButtonByText(harness, "Add").props.disabled).toBe(true);
+    expect(
+      getNodeByAriaLabel(
+        harness,
+        "Refresh marketplace source Remote Marketplace",
+      ).props.disabled,
+    ).toBe(true);
+    expect(
+      getNodeByAriaLabel(
+        harness,
+        "Remove marketplace source Remote Marketplace",
+      ).props.disabled,
+    ).toBe(true);
+  });
+
+  it("renders a built-in source without remove controls", () => {
+    pluginStoreMock.state.marketplaceSourceViews = [
+      {
+        id: "builtin",
+        kind: "builtin",
+        location: "/workspace/omiga-plugins",
+        label: "Built-in Marketplace",
+        enabled: true,
+        removable: false,
+        addedAt: null,
+      },
+    ];
+
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain("Built-in Marketplace");
+    expect(textContent(harness.tree)).toContain("Always enabled");
+    expect(textContent(harness.tree)).toContain("Refresh");
+    expect(
+      findAllNodes(
+        harness.tree,
+        (candidate) =>
+          candidate.props["aria-label"] ===
+          "Remove marketplace source Built-in Marketplace",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("shows built-in bootstrap failure details and retries bootstrap", async () => {
+    pluginStoreMock.state.marketplaceSourceViews = [
+      {
+        id: "builtin",
+        kind: "builtin",
+        location: "/workspace/omiga-plugins",
+        label: "Built-in Marketplace",
+        enabled: true,
+        removable: false,
+        addedAt: null,
+      },
+    ];
+    pluginStoreMock.state.builtinMarketplaceStatus = {
+      ok: false,
+      source: "github",
+      path: null,
+      message: "Install git or connect to the network, then retry.",
+    };
+
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain(
+      "Install git or connect to the network, then retry.",
+    );
+    await harness.click(getNodeByAriaLabel(
+      harness,
+      "Refresh marketplace source Built-in Marketplace",
+    ));
+    await harness.click(getButtonByText(harness, "Retry"));
+
+    expect(pluginStoreMock.state.ensureBuiltinMarketplace).toHaveBeenCalledTimes(2);
+    expect(pluginStoreMock.state.ensureBuiltinMarketplace).toHaveBeenCalledWith("/project");
+  });
+
+  it("disables built-in source refresh while bootstrap is in progress", () => {
+    pluginStoreMock.state.bootstrapInProgress = true;
+    pluginStoreMock.state.marketplaceSourceViews = [
+      {
+        id: "builtin",
+        kind: "builtin",
+        location: "/workspace/omiga-plugins",
+        label: "Built-in Marketplace",
+        enabled: true,
+        removable: false,
+        addedAt: null,
+      },
+    ];
+
+    const harness = createPanelHarness();
+    const refreshButton = getNodeByAriaLabel(
+      harness,
+      "Refresh marketplace source Built-in Marketplace",
+    );
+
+    expect(refreshButton.props.disabled).toBe(true);
+    expect(getButtonByText(harness, "Add").props.disabled).toBe(true);
+    expect(textContent(harness.tree)).toContain("Refreshing built-in marketplace");
+  });
+});
 
 describe("PluginsPanel diagnostics helpers", () => {
   it("removes the duplicate global operator registration surface", () => {
