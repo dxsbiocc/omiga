@@ -27,6 +27,14 @@ const pluginStoreMock = vi.hoisted(() => ({
     retrievalStatuses: [] as unknown[],
     processPoolStatuses: [] as unknown[],
     remoteMarketplaceChecks: [] as unknown[],
+    pluginMigrationStatus: null as {
+      migrationNeeded: boolean;
+      configRewriteNeeded: boolean;
+      legacyCacheEntriesToMigrate: number;
+      legacyCacheEntriesToRemove: number;
+      builtinRootsToRefresh: number;
+      warnings: string[];
+    } | null,
     builtinMarketplaceStatus: null as {
       ok: boolean;
       source: string;
@@ -382,6 +390,14 @@ const resetPanelStore = () => {
   pluginStoreMock.state.retrievalStatuses = [];
   pluginStoreMock.state.processPoolStatuses = [];
   pluginStoreMock.state.remoteMarketplaceChecks = [];
+  pluginStoreMock.state.pluginMigrationStatus = {
+    migrationNeeded: false,
+    configRewriteNeeded: false,
+    legacyCacheEntriesToMigrate: 0,
+    legacyCacheEntriesToRemove: 0,
+    builtinRootsToRefresh: 0,
+    warnings: [],
+  };
   pluginStoreMock.state.builtinMarketplaceStatus = null;
   pluginStoreMock.state.isLoading = false;
   pluginStoreMock.state.isMutating = false;
@@ -509,7 +525,7 @@ describe("PluginsPanel marketplace sources UI", () => {
     const harness = createPanelHarness();
 
     expect(textContent(harness.tree)).toContain(
-      "If you upgraded from an older version or plugins look inconsistent, run migration to refresh config, cache, and built-in roots.",
+      "Plugin migration status is current. Run migration only if plugins still look inconsistent.",
     );
 
     await harness.click(getButtonByText(harness, "Run migration"));
@@ -520,6 +536,24 @@ describe("PluginsPanel marketplace sources UI", () => {
       "Last migration: config rewritten · 2 legacy cache entries migrated · 3 built-in roots refreshed",
     );
     expect(textContent(harness.tree)).toContain("Skipped one stale cache entry.");
+  });
+
+  it("surfaces migration status before running migration", () => {
+    pluginStoreMock.state.pluginMigrationStatus = {
+      migrationNeeded: true,
+      configRewriteNeeded: true,
+      legacyCacheEntriesToMigrate: 2,
+      legacyCacheEntriesToRemove: 1,
+      builtinRootsToRefresh: 3,
+      warnings: ["Legacy duplicate can be cleaned."],
+    };
+
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain(
+      "Migration recommended: config rewrite needed · 2 legacy cache entries to migrate · 1 legacy cache duplicate to remove · 3 built-in roots to refresh.",
+    );
+    expect(textContent(harness.tree)).toContain("Legacy duplicate can be cleaned.");
   });
 
   it("disables marketplace source mutations while initial loading is active", () => {

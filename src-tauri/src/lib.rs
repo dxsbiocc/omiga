@@ -310,6 +310,7 @@ pub fn run() {
             commands::plugins::remove_omiga_plugin_marketplace_source,
             commands::plugins::refresh_omiga_plugin_marketplace_source,
             commands::plugins::set_omiga_plugin_marketplace_source_enabled,
+            commands::plugins::get_omiga_plugin_migration_status,
             commands::plugins::migrate_omiga_plugin_state,
             domain::plugins::ensure_builtin_marketplace_source,
             commands::plugins::read_omiga_plugin,

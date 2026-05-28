@@ -230,6 +230,15 @@ export interface PluginMigrationResult {
   warnings: string[];
 }
 
+export interface PluginMigrationStatus {
+  migrationNeeded: boolean;
+  configRewriteNeeded: boolean;
+  legacyCacheEntriesToMigrate: number;
+  legacyCacheEntriesToRemove: number;
+  builtinRootsToRefresh: number;
+  warnings: string[];
+}
+
 export interface PluginInstallResult {
   pluginId: string;
   installedPath: string;
@@ -585,6 +594,7 @@ interface PluginState {
   processPoolStatuses: PluginProcessPoolRouteStatus[];
   remoteMarketplaceChecks: MarketplaceRemoteCheckResult[];
   builtinMarketplaceStatus: BuiltinMarketplaceStatus | null;
+  pluginMigrationStatus: PluginMigrationStatus | null;
   isLoading: boolean;
   isMutating: boolean;
   bootstrapInProgress: boolean;
@@ -636,6 +646,7 @@ interface PluginState {
   ) => Promise<OperatorRunCleanupResult>;
   loadRetrievalStatuses: (projectRoot?: string) => Promise<void>;
   loadProcessPoolStatuses: (projectRoot?: string) => Promise<void>;
+  loadPluginMigrationStatus: (projectRoot?: string) => Promise<PluginMigrationStatus | null>;
   migratePluginState: (projectRoot?: string) => Promise<PluginMigrationResult>;
   clearProcessPool: (projectRoot?: string) => Promise<number>;
   installPlugin: (plugin: PluginSummary, projectRoot?: string) => Promise<PluginInstallResult>;
@@ -1235,6 +1246,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   processPoolStatuses: [],
   remoteMarketplaceChecks: [],
   builtinMarketplaceStatus: null,
+  pluginMigrationStatus: null,
   isLoading: false,
   isMutating: false,
   bootstrapInProgress: false,
@@ -1428,6 +1440,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         processPoolStatuses,
         operatorCatalog,
         operatorRuns,
+        pluginMigrationStatus,
       ] = await Promise.all([
         invoke<UserMarketplaceSource[]>("list_omiga_plugin_marketplace_sources"),
         invoke<MarketplaceSourceView[]>(
@@ -1451,6 +1464,9 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           statusFilter: undefined,
           afterMs: undefined,
         }),
+        invoke<PluginMigrationStatus>("get_omiga_plugin_migration_status", {
+          projectRoot,
+        }),
       ]);
       set({
         marketplaceSources: [...marketplaceSources],
@@ -1462,6 +1478,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         operatorDiagnostics: [...(operatorCatalog.diagnostics ?? [])],
         operatorRegistryPath: operatorCatalog.registryPath,
         operatorRuns: [...operatorRuns],
+        pluginMigrationStatus,
         isLoading: false,
       });
     } catch (e) {
@@ -1692,6 +1709,20 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     }
   },
 
+  loadPluginMigrationStatus: async (projectRoot?: string) => {
+    try {
+      const pluginMigrationStatus = await invoke<PluginMigrationStatus>(
+        "get_omiga_plugin_migration_status",
+        { projectRoot },
+      );
+      set({ pluginMigrationStatus });
+      return pluginMigrationStatus;
+    } catch (e) {
+      set({ error: extractErrorMessage(e) });
+      return null;
+    }
+  },
+
   migratePluginState: async (projectRoot?: string) => {
     set({ isMutating: true, error: null });
     try {
@@ -1705,6 +1736,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         marketplaces,
         retrievalStatuses,
         processPoolStatuses,
+        pluginMigrationStatus,
       ] = await Promise.all([
         invoke<UserMarketplaceSource[]>("list_omiga_plugin_marketplace_sources"),
         invoke<MarketplaceSourceView[]>(
@@ -1721,6 +1753,9 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           "list_omiga_plugin_process_pool_statuses",
           { projectRoot },
         ),
+        invoke<PluginMigrationStatus>("get_omiga_plugin_migration_status", {
+          projectRoot,
+        }),
       ]);
       set({
         marketplaceSources: [...marketplaceSources],
@@ -1728,6 +1763,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         marketplaces: [...marketplaces],
         retrievalStatuses: [...retrievalStatuses],
         processPoolStatuses: [...processPoolStatuses],
+        pluginMigrationStatus,
         isMutating: false,
       });
       return result;

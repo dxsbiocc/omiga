@@ -1591,6 +1591,51 @@ pub struct PluginMigrationResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMigrationStatus {
+    pub migration_needed: bool,
+    pub config_rewrite_needed: bool,
+    pub legacy_cache_entries_to_migrate: usize,
+    pub legacy_cache_entries_to_remove: usize,
+    pub builtin_roots_to_refresh: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LegacyPluginCacheMigrationStatus {
+    entries_to_migrate: usize,
+    entries_to_remove: usize,
+}
+
+pub fn plugin_state_migration_status() -> PluginMigrationStatus {
+    let mut status = PluginMigrationStatus::default();
+    let mut config = read_config_raw();
+    status.config_rewrite_needed = migrate_superseded_builtin_plugin_config(&mut config);
+
+    let cache_root = plugin_cache_root();
+    match legacy_plugin_cache_migration_status(&cache_root) {
+        Ok(legacy) => {
+            status.legacy_cache_entries_to_migrate = legacy.entries_to_migrate;
+            status.legacy_cache_entries_to_remove = legacy.entries_to_remove;
+        }
+        Err(err) => status.warnings.push(format!(
+            "failed to inspect legacy plugin cache entries: {err}"
+        )),
+    }
+    match configured_builtin_plugins_to_refresh(&config, &cache_root) {
+        Ok(to_refresh) => status.builtin_roots_to_refresh = to_refresh,
+        Err(err) => status.warnings.push(format!(
+            "failed to inspect configured curated plugin installs: {err}"
+        )),
+    }
+    status.migration_needed = status.config_rewrite_needed
+        || status.legacy_cache_entries_to_migrate > 0
+        || status.legacy_cache_entries_to_remove > 0
+        || status.builtin_roots_to_refresh > 0;
+    status
+}
+
 pub fn migrate_plugin_state_if_needed() -> PluginMigrationResult {
     let mut result = PluginMigrationResult::default();
     let mut config = read_config_raw();
@@ -4117,6 +4162,29 @@ fn migrate_legacy_plugin_cache(cache_root: &Path) -> Result<usize, String> {
     Ok(migrated)
 }
 
+fn legacy_plugin_cache_migration_status(
+    cache_root: &Path,
+) -> Result<LegacyPluginCacheMigrationStatus, String> {
+    let store_root = plugin_store_root_from_cache_root(cache_root);
+    let mut status = LegacyPluginCacheMigrationStatus::default();
+    for plugin_id in cached_plugin_ids_in_cache(cache_root) {
+        let Some(legacy_root) = active_plugin_root_in_cache(cache_root, &plugin_id) else {
+            continue;
+        };
+        let Some(manifest) = load_plugin_manifest(&legacy_root) else {
+            continue;
+        };
+        let kind = plugin_kind_for_manifest(&legacy_root, None, &manifest);
+        let target = plugin_base_root_for_kind(&store_root, kind, &plugin_id);
+        if target.exists() {
+            status.entries_to_remove += 1;
+        } else {
+            status.entries_to_migrate += 1;
+        }
+    }
+    Ok(status)
+}
+
 fn migrate_legacy_plugin_cache_best_effort(cache_root: &Path) {
     match migrate_legacy_plugin_cache(cache_root) {
         Ok(migrated) if migrated > 0 => {
@@ -4163,6 +4231,42 @@ fn refresh_configured_builtin_plugins(
     Ok(refreshed)
 }
 
+fn configured_builtin_plugins_to_refresh(
+    config: &PluginConfigFile,
+    cache_root: &Path,
+) -> Result<usize, String> {
+    let Some(marketplace_path) = builtin_marketplace_path() else {
+        return Ok(0);
+    };
+    let marketplace = read_marketplace(&marketplace_path)?;
+    let store_root = plugin_store_root_from_cache_root(cache_root);
+    let mut to_refresh = 0;
+
+    for entry in &marketplace.plugins {
+        let plugin_id = PluginId::new(&entry.name, &marketplace.name)?;
+        if !config.plugins.contains_key(&plugin_id.key()) {
+            continue;
+        }
+        if entry.policy.installation == PluginInstallPolicy::NotAvailable {
+            continue;
+        }
+        let source_path = resolve_marketplace_source_path(&marketplace_path, &entry.source)?;
+        let Some(manifest) = load_plugin_manifest(&source_path) else {
+            continue;
+        };
+        if manifest.name != entry.name {
+            continue;
+        }
+        let kind = plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest);
+        let target_base = plugin_base_root_for_kind(&store_root, kind, &plugin_id);
+        if stale_typed_plugin_root_candidate(&store_root, &plugin_id, &target_base).is_some() {
+            to_refresh += 1;
+        }
+    }
+
+    Ok(to_refresh)
+}
+
 fn migrate_stale_typed_plugin_root(
     store_root: &Path,
     plugin_id: &PluginId,
@@ -4171,13 +4275,7 @@ fn migrate_stale_typed_plugin_root(
     // This is a typed-root migration only. It intentionally moves the user's
     // existing installed plugin tree instead of copying marketplace source
     // content, so read/list paths never bypass explicit sync conflict checks.
-    if target_base.exists() {
-        return Ok(false);
-    }
-    let Some(stale_base) = typed_plugin_base_roots(store_root, plugin_id)
-        .into_iter()
-        .filter(|candidate| candidate != target_base && candidate.exists())
-        .find(|candidate| active_plugin_root_in_base(candidate).is_some())
+    let Some(stale_base) = stale_typed_plugin_root_candidate(store_root, plugin_id, target_base)
     else {
         return Ok(false);
     };
@@ -4197,6 +4295,20 @@ fn migrate_stale_typed_plugin_root(
         )
     })?;
     Ok(true)
+}
+
+fn stale_typed_plugin_root_candidate(
+    store_root: &Path,
+    plugin_id: &PluginId,
+    target_base: &Path,
+) -> Option<PathBuf> {
+    if target_base.exists() {
+        return None;
+    }
+    typed_plugin_base_roots(store_root, plugin_id)
+        .into_iter()
+        .filter(|candidate| candidate != target_base && candidate.exists())
+        .find(|candidate| active_plugin_root_in_base(candidate).is_some())
 }
 
 fn unlisted_installed_plugin_summaries(
@@ -6999,6 +7111,18 @@ mod tests {
         )
         .expect("plugin config");
 
+        let status = plugin_state_migration_status();
+
+        assert!(status.migration_needed);
+        assert!(status.config_rewrite_needed);
+        assert_eq!(status.legacy_cache_entries_to_migrate, 0);
+        assert_eq!(status.legacy_cache_entries_to_remove, 0);
+        assert_eq!(status.builtin_roots_to_refresh, 0);
+        assert!(status.warnings.is_empty(), "{:?}", status.warnings);
+        let previewed = fs::read_to_string(&config_file).expect("previewed plugin config");
+        assert!(previewed.contains("legacy-analysis-tool@resolved-market"));
+        assert!(!previewed.contains("analysis-bundle@resolved-market"));
+
         let result = migrate_plugin_state_if_needed();
 
         assert!(result.config_rewritten);
@@ -7006,6 +7130,50 @@ mod tests {
         let persisted = fs::read_to_string(&config_file).expect("persisted plugin config");
         assert!(persisted.contains("analysis-bundle@resolved-market"));
         assert!(!persisted.contains("legacy-analysis-tool@resolved-market"));
+    }
+
+    #[test]
+    fn plugin_state_migration_status_detects_legacy_cache_without_moving() {
+        let _guard = PLUGIN_HOME_ENV_LOCK.lock().expect("plugin home env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let _home = ScopedEnv::set("HOME", &home);
+        let _user_profile = ScopedEnv::set("USERPROFILE", &home);
+        let _plugins_dir = ScopedEnv::remove("OMIGA_PLUGINS_DIR");
+        let legacy_root = plugin_cache_root()
+            .join("resolved-market")
+            .join("legacy-operator");
+        fs::create_dir_all(&legacy_root).expect("legacy plugin root");
+        fs::write(
+            legacy_root.join(PLUGIN_MANIFEST_FILE),
+            r#"{
+              "name":"legacy-operator",
+              "version":"0.1.0",
+              "interface": { "category":"Operator" }
+            }"#,
+        )
+        .expect("legacy plugin manifest");
+        let target_root = plugin_store_root()
+            .join(PluginKind::Operator.dir_name())
+            .join("legacy-operator");
+
+        let status = plugin_state_migration_status();
+
+        assert!(status.migration_needed);
+        assert!(!status.config_rewrite_needed);
+        assert_eq!(status.legacy_cache_entries_to_migrate, 1);
+        assert_eq!(status.legacy_cache_entries_to_remove, 0);
+        assert_eq!(status.builtin_roots_to_refresh, 0);
+        assert!(status.warnings.is_empty(), "{:?}", status.warnings);
+        assert!(legacy_root.exists());
+        assert!(!target_root.exists());
+
+        let result = migrate_plugin_state_if_needed();
+
+        assert_eq!(result.legacy_cache_entries_migrated, 1);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert!(!legacy_root.exists());
+        assert!(target_root.exists());
     }
 
     #[test]
@@ -7520,6 +7688,17 @@ mod tests {
         let workflow_root = plugin_store_root()
             .join(PluginKind::Workflow.dir_name())
             .join("analysis-bundle");
+
+        let status = plugin_state_migration_status();
+
+        assert!(status.migration_needed);
+        assert!(!status.config_rewrite_needed);
+        assert_eq!(status.legacy_cache_entries_to_migrate, 0);
+        assert_eq!(status.legacy_cache_entries_to_remove, 0);
+        assert_eq!(status.builtin_roots_to_refresh, 1);
+        assert!(status.warnings.is_empty(), "{:?}", status.warnings);
+        assert!(old_operator_root.exists());
+        assert!(!workflow_root.exists());
 
         let result = migrate_plugin_state_if_needed();
         let marketplaces = list_plugin_marketplaces(None, None);

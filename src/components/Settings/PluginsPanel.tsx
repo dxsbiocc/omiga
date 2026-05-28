@@ -55,6 +55,7 @@ import {
   type OperatorSummary,
   type MarketplaceRemoteCheckResult,
   type PluginMigrationResult,
+  type PluginMigrationStatus,
   type MarketplaceSourceKind,
   type MarketplaceSourceView,
   type PluginEnvironmentSummary,
@@ -1849,6 +1850,34 @@ export function pluginMigrationSummary(result: PluginMigrationResult): string {
       "built-in roots refreshed",
     ),
   ].join(" · ");
+}
+
+export function pluginMigrationStatusSummary(status: PluginMigrationStatus): string {
+  const details = [
+    status.configRewriteNeeded ? "config rewrite needed" : null,
+    status.legacyCacheEntriesToMigrate > 0
+      ? pluginMigrationCount(
+          status.legacyCacheEntriesToMigrate,
+          "legacy cache entry to migrate",
+          "legacy cache entries to migrate",
+        )
+      : null,
+    status.legacyCacheEntriesToRemove > 0
+      ? pluginMigrationCount(
+          status.legacyCacheEntriesToRemove,
+          "legacy cache duplicate to remove",
+          "legacy cache duplicates to remove",
+        )
+      : null,
+    status.builtinRootsToRefresh > 0
+      ? pluginMigrationCount(
+          status.builtinRootsToRefresh,
+          "built-in root to refresh",
+          "built-in roots to refresh",
+        )
+      : null,
+  ].filter(Boolean);
+  return details.length > 0 ? details.join(" · ") : "no migration needed";
 }
 
 export function remoteMarketplaceChangedPluginNames(
@@ -4368,6 +4397,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     processPoolStatuses,
     remoteMarketplaceChecks,
     builtinMarketplaceStatus,
+    pluginMigrationStatus,
     isLoading,
     isMutating,
     bootstrapInProgress,
@@ -5419,7 +5449,13 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         <AccordionDetails sx={{ px: 1.5, pt: 0.75, pb: 1.5 }}>
           <Stack spacing={1.25} useFlexGap>
             <Alert
-              severity={pluginMigrationResult?.warnings.length ? "warning" : "info"}
+              severity={
+                pluginMigrationResult?.warnings.length ||
+                pluginMigrationStatus?.migrationNeeded ||
+                pluginMigrationStatus?.warnings.length
+                  ? "warning"
+                  : "info"
+              }
               sx={{ borderRadius: 1.5 }}
             >
               <Stack spacing={0.75}>
@@ -5430,7 +5466,11 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                   justifyContent="space-between"
                 >
                   <Typography variant="body2">
-                    If you upgraded from an older version or plugins look inconsistent, run migration to refresh config, cache, and built-in roots.
+                    {!pluginMigrationStatus
+                      ? "Checking plugin migration status..."
+                      : pluginMigrationStatus.migrationNeeded
+                        ? `Migration recommended: ${pluginMigrationStatusSummary(pluginMigrationStatus)}.`
+                        : "Plugin migration status is current. Run migration only if plugins still look inconsistent."}
                   </Typography>
                   <Button
                     size="small"
@@ -5449,6 +5489,20 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                     Run migration
                   </Button>
                 </Stack>
+                {pluginMigrationStatus?.warnings.length ? (
+                  <Stack component="ul" spacing={0.25} sx={{ mt: 0.5, mb: 0, pl: 2 }}>
+                    {pluginMigrationStatus.warnings.map((warning) => (
+                      <Typography
+                        key={warning}
+                        component="li"
+                        variant="caption"
+                        color="text.secondary"
+                      >
+                        {warning}
+                      </Typography>
+                    ))}
+                  </Stack>
+                ) : null}
                 {pluginMigrationResult && (
                   <Box>
                     <Typography variant="body2" fontWeight={700}>

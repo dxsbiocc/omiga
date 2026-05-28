@@ -26,6 +26,7 @@ import {
   type MarketplaceSourceView,
   type PluginMarketplaceEntry,
   type PluginMigrationResult,
+  type PluginMigrationStatus,
   type PluginProcessPoolRouteStatus,
   type PluginRetrievalRouteStatus,
   type PluginSummary,
@@ -358,6 +359,7 @@ describe("usePluginStore operator actions", () => {
       processPoolStatuses: [],
       remoteMarketplaceChecks: [],
       builtinMarketplaceStatus: null,
+      pluginMigrationStatus: null,
       isLoading: false,
       isMutating: false,
       bootstrapInProgress: false,
@@ -892,6 +894,14 @@ describe("usePluginStore operator actions", () => {
       }),
     ];
     const catalog = [marketplace("/marketplace.json", [plugin()])];
+    const migrationStatus: PluginMigrationStatus = {
+      migrationNeeded: true,
+      configRewriteNeeded: true,
+      legacyCacheEntriesToMigrate: 0,
+      legacyCacheEntriesToRemove: 0,
+      builtinRootsToRefresh: 1,
+      warnings: [],
+    };
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "list_omiga_plugin_marketplace_sources") return [source];
       if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
@@ -902,6 +912,7 @@ describe("usePluginStore operator actions", () => {
         return { registryPath: "/registry.json", operators: [], diagnostics: [] };
       }
       if (command === "list_operator_runs") return [];
+      if (command === "get_omiga_plugin_migration_status") return migrationStatus;
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -924,6 +935,7 @@ describe("usePluginStore operator actions", () => {
     expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
     expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
     expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().pluginMigrationStatus).toEqual(migrationStatus);
     expect(usePluginStore.getState().isLoading).toBe(false);
   });
 
@@ -971,6 +983,14 @@ describe("usePluginStore operator actions", () => {
       builtinRootsRefreshed: 3,
       warnings: ["Skipped one stale cache entry."],
     };
+    const migrationStatus: PluginMigrationStatus = {
+      migrationNeeded: false,
+      configRewriteNeeded: false,
+      legacyCacheEntriesToMigrate: 0,
+      legacyCacheEntriesToRemove: 0,
+      builtinRootsToRefresh: 0,
+      warnings: [],
+    };
 
     invokeMock.mockImplementation(async (command: string) => {
       if (command === "migrate_omiga_plugin_state") return result;
@@ -979,6 +999,7 @@ describe("usePluginStore operator actions", () => {
       if (command === "list_omiga_plugin_marketplaces") return catalog;
       if (command === "list_omiga_plugin_retrieval_statuses") return retrievalStatuses;
       if (command === "list_omiga_plugin_process_pool_statuses") return processPoolStatuses;
+      if (command === "get_omiga_plugin_migration_status") return migrationStatus;
       throw new Error(`unexpected command ${command}`);
     });
 
@@ -1006,11 +1027,41 @@ describe("usePluginStore operator actions", () => {
       "list_omiga_plugin_process_pool_statuses",
       { projectRoot: "/project" },
     );
+    expect(invokeMock).toHaveBeenCalledWith("get_omiga_plugin_migration_status", {
+      projectRoot: "/project",
+    });
     expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
     expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
     expect(usePluginStore.getState().marketplaces).toEqual(catalog);
     expect(usePluginStore.getState().retrievalStatuses).toEqual(retrievalStatuses);
     expect(usePluginStore.getState().processPoolStatuses).toEqual(processPoolStatuses);
+    expect(usePluginStore.getState().pluginMigrationStatus).toEqual(migrationStatus);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("loads plugin migration status without mutating plugin state", async () => {
+    const migrationStatus: PluginMigrationStatus = {
+      migrationNeeded: true,
+      configRewriteNeeded: false,
+      legacyCacheEntriesToMigrate: 1,
+      legacyCacheEntriesToRemove: 1,
+      builtinRootsToRefresh: 0,
+      warnings: ["Legacy duplicate will be cleaned up."],
+    };
+    invokeMock.mockResolvedValue(migrationStatus);
+
+    await expect(
+      usePluginStore.getState().loadPluginMigrationStatus("/project"),
+    ).resolves.toEqual(migrationStatus);
+
+    expect(invokeMock).toHaveBeenCalledWith("get_omiga_plugin_migration_status", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "migrate_omiga_plugin_state",
+      expect.anything(),
+    );
+    expect(usePluginStore.getState().pluginMigrationStatus).toEqual(migrationStatus);
     expect(usePluginStore.getState().isMutating).toBe(false);
   });
 
@@ -1034,6 +1085,16 @@ describe("usePluginStore operator actions", () => {
         return { registryPath: "/registry.json", operators: [], diagnostics: [] };
       }
       if (command === "list_operator_runs") return [];
+      if (command === "get_omiga_plugin_migration_status") {
+        return {
+          migrationNeeded: false,
+          configRewriteNeeded: false,
+          legacyCacheEntriesToMigrate: 0,
+          legacyCacheEntriesToRemove: 0,
+          builtinRootsToRefresh: 0,
+          warnings: [],
+        };
+      }
       throw new Error(`unexpected command ${command}`);
     });
 
