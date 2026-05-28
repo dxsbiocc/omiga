@@ -15,6 +15,12 @@ pub const TEMPLATE_API_VERSION_V1ALPHA1: &str = "omiga.ai/unit/v1alpha1";
 pub const TEMPLATE_KIND: &str = "Template";
 const TEMPLATE_MANIFEST_NAMES: &[&str] = &["template.yaml", "template.yml"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemplateRenderEngine {
+    Static,
+    SimpleReplacement,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateMetadata {
@@ -1107,15 +1113,9 @@ fn render_template_text(
     template: &TemplateSpecWithSource,
     invocation: &crate::domain::operators::OperatorInvocation,
 ) -> Result<String, String> {
-    let engine = template.spec.template.engine.trim().to_ascii_lowercase();
-    if matches!(engine.as_str(), "static" | "raw") {
-        return Ok(raw.to_string());
-    }
-    if !matches!(engine.as_str(), "jinja2" | "jinja" | "minijinja") {
-        return Err(format!(
-            "unsupported template engine `{}`; supported MVP engines are static and jinja2-compatible simple replacement",
-            template.spec.template.engine
-        ));
+    match template_render_engine(&template.spec.template.engine)? {
+        TemplateRenderEngine::Static => return Ok(raw.to_string()),
+        TemplateRenderEngine::SimpleReplacement => {}
     }
     let mut rendered = raw.to_string();
     for (prefix, values) in [
@@ -1161,6 +1161,23 @@ fn render_template_text(
         }
     }
     Ok(rendered)
+}
+
+fn template_render_engine(raw_engine: &str) -> Result<TemplateRenderEngine, String> {
+    let engine = raw_engine.trim().to_ascii_lowercase();
+    match engine.as_str() {
+        "static" | "raw" => Ok(TemplateRenderEngine::Static),
+        "simple" | "omiga-replace" | "omiga_replace" => {
+            Ok(TemplateRenderEngine::SimpleReplacement)
+        }
+        // Legacy aliases are accepted for existing Template manifests only.
+        // They use Omiga's simple `{{ scope.key }}` / `${scope.key}` replacement
+        // and do not enable full Jinja syntax such as loops, filters, or conditionals.
+        "jinja2" | "jinja" | "minijinja" => Ok(TemplateRenderEngine::SimpleReplacement),
+        _ => Err(format!(
+            "unsupported template engine `{raw_engine}`; supported engines are `static`/`raw` and simple replacement (`simple`/`omiga-replace`). Legacy aliases `jinja`, `jinja2`, and `minijinja` map to simple replacement only; loops, filters, and conditionals are not supported."
+        )),
+    }
 }
 
 fn template_value_to_string(value: &JsonValue) -> String {
@@ -1865,6 +1882,53 @@ migrationTarget: demo_operator
         write_valid_template(&template_dir.join("template.yaml"), template_id);
     }
 
+    fn render_test_template(engine: &str) -> TemplateSpecWithSource {
+        TemplateSpecWithSource {
+            spec: TemplateSpec {
+                api_version: TEMPLATE_API_VERSION_V1ALPHA1.to_string(),
+                kind: TEMPLATE_KIND.to_string(),
+                metadata: TemplateMetadata {
+                    id: "render_test_template".to_string(),
+                    version: "0.1.0".to_string(),
+                    name: Some("Render Test Template".to_string()),
+                    description: None,
+                    tags: Vec::new(),
+                },
+                classification: TemplateClassification::default(),
+                exposure: TemplateExposure::default(),
+                interface: JsonValue::Null,
+                runtime: TemplateRuntime::default(),
+                template: TemplateBody {
+                    engine: engine.to_string(),
+                    entry: PathBuf::from("./run.sh"),
+                },
+                aliases: Vec::new(),
+                execution: TemplateExecution::default(),
+                migration_target: None,
+            },
+            source: TemplateSource {
+                source_plugin: "render-test@local".to_string(),
+                plugin_root: PathBuf::from("/tmp/render-test-plugin"),
+                manifest_path: PathBuf::from(
+                    "/tmp/render-test-plugin/templates/demo/template.yaml",
+                ),
+            },
+        }
+    }
+
+    fn render_test_invocation() -> crate::domain::operators::OperatorInvocation {
+        crate::domain::operators::OperatorInvocation {
+            operation: None,
+            inputs: BTreeMap::from([("table".to_string(), json!("counts.tsv"))]),
+            params: BTreeMap::from([
+                ("message".to_string(), json!("hello")),
+                ("threshold".to_string(), json!(0.05)),
+            ]),
+            resources: BTreeMap::from([("gene_sets".to_string(), json!("hallmark.gmt"))]),
+            metadata: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn parses_and_validates_template_spec() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2045,10 +2109,10 @@ template:
             .collect::<HashSet<_>>();
 
         let required = [
-            "viz_scatter_basic",
+            "viz_scatter_volcano",
             "viz_distribution_boxplot",
             "viz_bar_basic",
-            "viz_heatmap_basic",
+            "viz_heatmap_clustered",
             "viz_line_time_series",
         ];
 
@@ -2064,7 +2128,7 @@ template:
                     .template
                     .entry
                     .to_string_lossy()
-                    .ends_with("template.R.j2")
+                    .ends_with("template.R")
                 && candidate.spec.exposure.expose_to_agent
         }));
     }
@@ -2143,7 +2207,7 @@ template:
         }
 
         let plugin_root = repo_plugin_root("visualization-r");
-        let template_dir = plugin_root.join("templates/scatter/basic");
+        let template_dir = plugin_root.join("templates/scatter/volcano");
         let template = load_template_manifest(
             &template_dir.join("template.yaml"),
             "visualization-r@omiga-curated",
@@ -2196,7 +2260,7 @@ template:
         }
         let markdown_report = parsed["markdownReport"].as_str().expect("markdownReport");
         assert!(
-            markdown_report.contains("![Basic Scatter Plot]"),
+            markdown_report.contains("![Volcano Plot]"),
             "{markdown_report}"
         );
         assert!(
@@ -2386,6 +2450,48 @@ template:
                 Some("Rscript")
             );
         }
+    }
+
+    #[test]
+    fn render_template_text_simple_engine_replaces_scoped_values() {
+        let template = render_test_template("simple");
+        let invocation = render_test_invocation();
+
+        let rendered = render_template_text(
+            "{{ inputs.table }}|{{params.message}}|${resources.gene_sets}|{{ params.threshold }}",
+            &template,
+            &invocation,
+        )
+        .expect("simple render");
+
+        assert_eq!(rendered, "counts.tsv|hello|hallmark.gmt|0.05");
+    }
+
+    #[test]
+    fn render_template_text_legacy_jinja_aliases_use_simple_replacement() {
+        let invocation = render_test_invocation();
+
+        for engine in ["jinja", "jinja2", "minijinja"] {
+            let template = render_test_template(engine);
+            let rendered = render_template_text("{{ params.message }}", &template, &invocation)
+                .unwrap_or_else(|err| panic!("{engine} should remain a legacy alias: {err}"));
+
+            assert_eq!(rendered, "hello", "{engine}");
+        }
+    }
+
+    #[test]
+    fn render_template_text_unsupported_engine_error_describes_simple_semantics() {
+        let template = render_test_template("liquid");
+        let invocation = render_test_invocation();
+
+        let error = render_template_text("{{ params.message }}", &template, &invocation)
+            .expect_err("unsupported engine");
+
+        assert!(error.contains("supported engines are `static`/`raw` and simple replacement"));
+        assert!(error.contains("Legacy aliases `jinja`, `jinja2`, and `minijinja`"));
+        assert!(error.contains("loops, filters, and conditionals are not supported"));
+        assert!(!error.contains("jinja2-compatible"));
     }
 
     #[test]

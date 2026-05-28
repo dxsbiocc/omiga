@@ -822,8 +822,16 @@ metadata:
             .iter()
             .find(|profile| profile.spec.metadata.id == "r-base")
             .expect("visualization-r r-base profile");
-        assert_eq!(profile.spec.runtime.kind.as_deref(), Some("system"));
-        assert_eq!(profile.spec.runtime.command.as_deref(), Some("Rscript"));
+        assert_eq!(profile.spec.runtime.kind.as_deref(), Some("conda"));
+        assert_eq!(
+            profile
+                .spec
+                .runtime
+                .extra
+                .get("condaEnvFile")
+                .and_then(JsonValue::as_str),
+            Some("./conda.yaml")
+        );
         assert_eq!(
             profile.spec.diagnostics.check_command,
             vec!["Rscript".to_string(), "--version".to_string()]

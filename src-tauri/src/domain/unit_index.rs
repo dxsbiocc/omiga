@@ -1155,6 +1155,68 @@ mod tests {
         }
     }
 
+    fn load_visualization_template_fixture(
+        tmp: &tempfile::TempDir,
+    ) -> crate::domain::templates::TemplateSpecWithSource {
+        let plugin_root = tmp.path().join("visualization-r");
+        let template_dir = plugin_root.join("templates").join("scatter").join("basic");
+        std::fs::create_dir_all(&template_dir).expect("mkdir template fixture");
+        std::fs::write(template_dir.join("example.tsv"), "x_value\ty_value\n1\t2\n")
+            .expect("write example");
+        std::fs::write(
+            template_dir.join("template.yaml"),
+            r#"apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_basic
+  version: 0.1.0
+  name: Basic Scatter Plot
+  description: Publication-style scatter plot for tabular data.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+classification:
+  category: visualization/scatter
+  stageInput: [table]
+  stageOutput: [static_figure]
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table: {kind: file, required: true, description: Input TSV table.}
+  params:
+    x_column: {kind: string, default: x_value}
+    y_column: {kind: string, default: y_value}
+    title: {kind: string, default: Basic scatter plot}
+  outputs:
+    figure_png: {kind: file, glob: figure.png, required: true}
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.x_column}
+    - ${params.y_column}
+    - ${params.title}
+"#,
+        )
+        .expect("write template fixture");
+
+        crate::domain::templates::load_template_manifest(
+            &template_dir.join("template.yaml"),
+            "visualization-r@omiga-curated",
+            plugin_root,
+        )
+        .expect("visualization-r template")
+    }
+
     #[test]
     fn filters_units_by_kind_category_tag_stage_and_query() {
         let units = vec![
@@ -1379,22 +1441,8 @@ mod tests {
 
     #[test]
     fn indexes_visualization_r_templates_as_template_units() {
-        let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .parent()
-            .expect("workspace root")
-            .join("omiga-plugins/plugins/visualization/visualization-r");
-        let template = crate::domain::templates::load_template_manifest(
-            &plugin_root
-                .join("templates")
-                .join("scatter")
-                .join("basic")
-                .join("template.yaml"),
-            "visualization-r@omiga-curated",
-            plugin_root,
-        )
-        .expect("visualization-r template");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let template = load_visualization_template_fixture(&tmp);
 
         let units = template_units_from_specs(vec![template]);
 
@@ -1417,22 +1465,8 @@ mod tests {
 
     #[test]
     fn template_descriptions_include_executable_argument_skeleton() {
-        let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .parent()
-            .expect("workspace root")
-            .join("omiga-plugins/plugins/visualization/visualization-r");
-        let template = crate::domain::templates::load_template_manifest(
-            &plugin_root
-                .join("templates")
-                .join("scatter")
-                .join("basic")
-                .join("template.yaml"),
-            "visualization-r@omiga-curated",
-            plugin_root,
-        )
-        .expect("visualization-r template");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let template = load_visualization_template_fixture(&tmp);
 
         let execute = crate::domain::templates::template_execute_example(
             &template,
