@@ -8,6 +8,7 @@
 pub mod app_skin;
 pub mod blackboard;
 pub mod bridge;
+pub mod browser_operator;
 pub mod chat;
 pub mod citation;
 pub mod claude_import;

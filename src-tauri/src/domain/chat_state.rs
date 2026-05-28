@@ -79,6 +79,8 @@ pub struct ChatState {
     /// - Config reload: new sessions pick up configuration changes
     /// - Health checking: stdio process liveness is monitored
     pub mcp_manager: Arc<GlobalMcpManager>,
+    /// Native Browser Operator sidecar manager used by `browser_*` facade tools.
+    pub browser_operator_manager: Arc<crate::domain::browser_operator::BrowserOperatorManager>,
     /// Cached permission deny rules keyed by project root. Avoids re-reading 4 settings
     /// files synchronously on every `send_message` call.
     pub permission_deny_cache: Arc<Mutex<HashMap<PathBuf, PermissionDenyCache>>>,
@@ -164,6 +166,9 @@ impl Default for ChatState {
             permission_tool_waiters: Arc::new(Mutex::new(HashMap::new())),
             mcp_tool_cache: Arc::new(Mutex::new(HashMap::new())),
             mcp_manager: Arc::new(GlobalMcpManager::new()),
+            browser_operator_manager: Arc::new(
+                crate::domain::browser_operator::BrowserOperatorManager::default(),
+            ),
             permission_deny_cache: Arc::new(Mutex::new(HashMap::new())),
             cached_config_file: Arc::new(Mutex::new(None)),
             active_orchestrations: Arc::new(Mutex::new(HashMap::new())),
