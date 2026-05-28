@@ -39,6 +39,7 @@ type ChatTokens = ReturnType<typeof getChatTokens>;
 function toolRowIcon(toolName: string) {
   const n = toolName.toLowerCase();
   if (n.startsWith("computer_")) return ComputerIcon;
+  if (n.startsWith("browser_")) return TravelExploreIcon;
   if (n.includes("ask_user") || n.includes("askuserquestion"))
     return ForumOutlined;
   if (n === "Agent" || n === "Task") return SmartToy;
@@ -75,6 +76,10 @@ function toolRowIcon(toolName: string) {
 
 function isComputerUseTool(toolName: string): boolean {
   return toolName.toLowerCase().startsWith("computer_");
+}
+
+function isBrowserOperatorTool(toolName: string): boolean {
+  return toolName.toLowerCase().startsWith("browser_");
 }
 
 function parseToolInput(input: string | undefined): Record<string, unknown> | null {
@@ -145,6 +150,62 @@ function computerUsePanelTitle(toolName: string, input: string | undefined): str
   if (toolName === "computer_click_element") {
     const elementId = compactString(parsed?.elementId, 48);
     if (elementId) return `computer_click_element · ${elementId}`;
+  }
+  return toolName;
+}
+
+function browserOperatorInputSummary(
+  toolName: string,
+  input: string | undefined,
+): string {
+  const parsed = parseToolInput(input);
+  if (!parsed) return input?.trim() ? "[Browser Operator input hidden]" : "";
+
+  const summary: Record<string, unknown> = {};
+  for (const key of [
+    "sessionId",
+    "url",
+    "index",
+    "selector",
+    "target",
+    "fullPage",
+    "format",
+    "maxElements",
+    "maxTextChars",
+  ]) {
+    if (!(key in parsed)) continue;
+    const value = parsed[key];
+    summary[key] = typeof value === "string" ? compactString(value) ?? value : value;
+  }
+
+  if (typeof parsed.value === "string") {
+    summary.value = `[hidden ${parsed.value.length} chars]`;
+  }
+
+  if (Object.keys(summary).length === 0) {
+    summary.kind = toolName;
+  }
+  return JSON.stringify(summary, null, 2);
+}
+
+function browserOperatorPanelTitle(
+  toolName: string,
+  input: string | undefined,
+): string {
+  const parsed = parseToolInput(input);
+  if (toolName === "browser_fill" && typeof parsed?.value === "string") {
+    return `browser_fill · value hidden (${parsed.value.length} chars)`;
+  }
+  if (toolName === "browser_open") {
+    const url = compactString(parsed?.url, 64);
+    if (url) return `browser_open · ${url}`;
+  }
+  if (toolName === "browser_click") {
+    if (typeof parsed?.index === "number") return `browser_click · #${parsed.index}`;
+    const selector = compactString(parsed?.selector, 48);
+    if (selector) return `browser_click · ${selector}`;
+    const target = compactString(parsed?.target, 48);
+    if (target) return `browser_click · ${target}`;
   }
   return toolName;
 }
@@ -259,8 +320,11 @@ export const ToolCallCard = memo(function ToolCallCard({
   const structuredError = parseStructuredToolErrorHint(displayOutput);
   const executionInsight = summarizeExecutionInsight(toolCall.name, displayOutput);
   const isComputerTool = isComputerUseTool(toolCall.name);
+  const isBrowserTool = isBrowserOperatorTool(toolCall.name);
   const displayInput = isComputerTool
     ? computerUseInputSummary(toolCall.name, toolCall.input)
+    : isBrowserTool
+      ? browserOperatorInputSummary(toolCall.name, toolCall.input)
     : toolCall.input;
   const hasInput = Boolean(displayInput && displayInput.trim());
   const hasOutput = Boolean(displayOutput);
@@ -270,9 +334,13 @@ export const ToolCallCard = memo(function ToolCallCard({
     ? "Command"
     : isComputerTool
       ? "Computer Use request"
+      : isBrowserTool
+        ? "Browser Operator request"
       : toolCall.name;
   const panelTitle = isComputerTool
     ? computerUsePanelTitle(toolCall.name, toolCall.input)
+    : isBrowserTool
+      ? browserOperatorPanelTitle(toolCall.name, toolCall.input)
     : toolCallPanelTitle(toolCall.input, toolCall.name);
   const prefaceThought = prefaceBeforeTools?.trim() ?? "";
   const toolDurationLabel = formatToolDuration(timestamp, toolCall.completedAt);

@@ -210,6 +210,39 @@ describe("ToolCallCard", () => {
     expect(html).not.toContain("password=hunter2");
   });
 
+  it("summarizes browser_fill input without rendering filled value", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-browser"
+        messageId="tool-browser"
+        content=""
+        timestamp={1000}
+        toolCall={{
+          name: "browser_fill",
+          status: "completed",
+          input: JSON.stringify({
+            sessionId: "session-1",
+            selector: "input[name=password]",
+            value: "password=hunter2",
+          }),
+          output: JSON.stringify({ ok: true, value: "[REDACTED 16 chars]" }),
+          completedAt: 1100,
+        }}
+        previousAssistantHasText
+        nestedOpen
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("browser_fill · value hidden");
+    expect(html).toContain("[hidden 16 chars]");
+    expect(html).not.toContain("hunter2");
+    expect(html).not.toContain("password=hunter2");
+  });
+
   it("renders operator/template execution insight before raw output", () => {
     const html = renderToStaticMarkup(
       <ToolCallCard
