@@ -554,6 +554,7 @@ describe("PluginsPanel marketplace sources UI", () => {
       "Migration recommended: config rewrite needed · 2 legacy cache entries to migrate · 1 legacy cache duplicate to remove · 3 built-in roots to refresh.",
     );
     expect(textContent(harness.tree)).toContain("Legacy duplicate can be cleaned.");
+    expect(pluginStoreMock.state.migratePluginState).not.toHaveBeenCalled();
   });
 
   it("disables marketplace source mutations while initial loading is active", () => {

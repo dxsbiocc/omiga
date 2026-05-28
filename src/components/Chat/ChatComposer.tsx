@@ -117,6 +117,13 @@ import {
   RSYNC_SSH_WARN_STORAGE_KEY,
 } from "../../lib/rsyncSsh";
 import {
+  browserOperatorErrorMessage,
+  isBrowserOperatorBackendReady,
+  type BrowserOperatorBackendStatus,
+  type BrowserOperatorInstallIntent,
+  type BrowserOperatorInstallResult,
+} from "../../lib/browserOperator";
+import {
   getLocalStorageItem,
   setLocalStorageItem,
 } from "../../utils/browserStorage";
@@ -284,47 +291,6 @@ const BROWSER_USE_META: Record<
     hint: "当前会话持续启用 Browser Operator；取消后继续仍保留。",
   },
 };
-
-type BrowserOperatorInstallIntent = "packages-only" | "full";
-
-interface BrowserOperatorBackendStatus {
-  sidecarExists?: boolean;
-  installerExists?: boolean;
-  managedHome?: string;
-  managedPythonExists?: boolean;
-  managedBrowserUseExists?: boolean;
-  configuredPython?: string | null;
-  selectedPython?: string;
-  playwrightBrowsersPath?: string;
-  installCommand?: string;
-}
-
-interface BrowserOperatorInstallResult {
-  ok?: boolean;
-  home?: string;
-  python?: string;
-  playwrightBrowsersPath?: string;
-  error?: string;
-}
-
-function isBrowserOperatorBackendReady(
-  status: BrowserOperatorBackendStatus | null,
-): boolean {
-  return Boolean(
-    status?.configuredPython ||
-      (status?.managedPythonExists && status?.managedBrowserUseExists),
-  );
-}
-
-function unknownErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  try {
-    return JSON.stringify(error) || "未知错误";
-  } catch (_jsonError) {
-    return "未知错误";
-  }
-}
 
 /** 解析 hex 相对亮度（0–1），非 hex 时返回 0.5 避免误判 */
 function hexRelativeLuminance(color: string): number {
@@ -979,7 +945,7 @@ export const ChatComposer = memo(function ChatComposer({
         setBrowserInstallDialogOpen(true);
       } catch (error) {
         setBrowserBackendStatus(null);
-        setBrowserInstallError(unknownErrorMessage(error));
+        setBrowserInstallError(browserOperatorErrorMessage(error));
         setBrowserInstallDialogOpen(true);
       }
     },
@@ -1024,7 +990,7 @@ export const ChatComposer = memo(function ChatComposer({
         setPendingBrowserUseMode(null);
         setBrowserInstallDialogOpen(false);
       } catch (error) {
-        setBrowserInstallError(unknownErrorMessage(error));
+        setBrowserInstallError(browserOperatorErrorMessage(error));
       } finally {
         setBrowserInstallIntent(null);
       }

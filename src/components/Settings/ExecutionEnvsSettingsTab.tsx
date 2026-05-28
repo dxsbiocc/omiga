@@ -36,6 +36,7 @@ import {
   Refresh,
 } from "@mui/icons-material";
 import { RSYNC_INSTALL_HELP_URL } from "../../lib/rsyncSsh";
+import { BrowserOperatorSettingsCard } from "./BrowserOperatorSettingsCard";
 
 // Types matching Rust structs
 interface ModalConfig {
@@ -326,6 +327,7 @@ export function ExecutionEnvsSettingsTab({
         Configure API keys for remote execution environments (Modal, Daytona, SSH).
         Stored in <code>omiga.yaml</code>.
       </Typography>
+      <BrowserOperatorSettingsCard compact={embedded} />
 
       <Tabs value={activeTab} onChange={handleTabChange} sx={{ mb: 2, minHeight: embedded ? '36px' : '48px' }}>
         <Tab label="Modal" />

@@ -123,6 +123,7 @@ Required methods: `health`, `open`, `snapshot`, `click`, `fill`, `screenshot`, `
 - Frontend MVP implemented:
   - Composer/browser mode state and menu.
   - Browser backend is not installed by default; selecting `task`/`session` checks backend status and opens an on-demand install prompt when the managed backend is absent.
+  - Settings → Execution now exposes the same backend status plus explicit “packages only” and “full install” actions for maintenance outside Composer.
   - `task` mode resets after send; `session` mode is preserved for resume.
   - Tool cards redact `browser_fill.value`.
 - Permission MVP implemented:

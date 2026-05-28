@@ -5,7 +5,10 @@ import { Layout } from "./components/Layout";
 import { Chat } from "./components/Chat";
 import { FileTree } from "./components/FileTree";
 import { SessionList } from "./components/SessionList";
-import { OPEN_SETTINGS_TAB_DETAIL } from "./components/Settings/openSettingsTabMap";
+import {
+  resolveOpenSettingsTarget,
+  type OpenSettingsEventDetail,
+} from "./components/Settings/openSettingsTabMap";
 import { TaskStatus } from "./components/TaskStatus";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ResizeHandle } from "./components/ResizeHandle";
@@ -371,20 +374,10 @@ export default function App() {
 
   useEffect(() => {
     const open = (e: Event) => {
-      const detail = (e as CustomEvent<{ tab?: string; executionSubTab?: number }>)
-        .detail;
-      const key = detail?.tab;
-      const idx =
-        key != null && OPEN_SETTINGS_TAB_DETAIL[key] !== undefined
-          ? OPEN_SETTINGS_TAB_DETAIL[key]
-          : 0;
-      setSettingsTabIndex(idx);
-      if (
-        detail?.executionSubTab != null &&
-        Number.isFinite(detail.executionSubTab)
-      ) {
-        setSettingsExecutionSubTab(detail.executionSubTab);
-      }
+      const detail = (e as CustomEvent<OpenSettingsEventDetail>).detail;
+      const target = resolveOpenSettingsTarget(detail);
+      setSettingsTabIndex(target.tabIndex);
+      setSettingsExecutionSubTab(target.executionSubTab);
       setSettingsOpen(true);
       setRightPanelMode("settings");
     };

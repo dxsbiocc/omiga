@@ -1,7 +1,9 @@
 //! Tauri commands for Browser Operator backend management.
 
 use crate::app_state::OmigaAppState;
+use crate::domain::browser_operator::BrowserOperatorError;
 use serde_json::{Map, Value};
+use std::future::Future;
 use tauri::State;
 
 const BROWSER_OPERATOR_INSTALL_TOOL_NAME: &str = "browser_operator_install_backend";
@@ -178,11 +180,34 @@ pub async fn browser_operator_install_backend(
     project_root: Option<String>,
     session_id: Option<String>,
 ) -> Result<Value, String> {
+    browser_operator_install_backend_impl(
+        &state,
+        confirm_install_intent,
+        skip_browser_install,
+        project_root,
+        session_id,
+        crate::domain::browser_operator::install_managed_backend,
+    )
+    .await
+}
+
+async fn browser_operator_install_backend_impl<F, Fut>(
+    state: &OmigaAppState,
+    confirm_install_intent: Option<bool>,
+    skip_browser_install: Option<bool>,
+    project_root: Option<String>,
+    session_id: Option<String>,
+    installer: F,
+) -> Result<Value, String>
+where
+    F: FnOnce(bool) -> Fut,
+    Fut: Future<Output = Result<Value, BrowserOperatorError>>,
+{
     let skip_browser_install = skip_browser_install.unwrap_or(false);
 
     if !has_explicit_install_confirmation(confirm_install_intent) {
         append_browser_operator_install_audit_event(
-            &state,
+            state,
             session_id.as_deref(),
             project_root.as_deref(),
             "denied",
@@ -198,7 +223,7 @@ pub async fn browser_operator_install_backend(
     }
 
     append_browser_operator_install_audit_event(
-        &state,
+        state,
         session_id.as_deref(),
         project_root.as_deref(),
         "approved",
@@ -208,10 +233,10 @@ pub async fn browser_operator_install_backend(
     )
     .await;
 
-    match crate::domain::browser_operator::install_managed_backend(skip_browser_install).await {
+    match installer(skip_browser_install).await {
         Ok(result) => {
             append_browser_operator_install_audit_event(
-                &state,
+                state,
                 session_id.as_deref(),
                 project_root.as_deref(),
                 "approved",
@@ -229,7 +254,7 @@ pub async fn browser_operator_install_backend(
             // carried by the phase/status fields and reason instead of polluting denial
             // counts in the permission audit UI.
             append_browser_operator_install_audit_event(
-                &state,
+                state,
                 session_id.as_deref(),
                 project_root.as_deref(),
                 "approved",
@@ -247,17 +272,51 @@ pub async fn browser_operator_install_backend(
 mod tests {
     use super::{
         append_browser_operator_install_audit_event, browser_operator_install_audit_arguments,
-        browser_operator_install_audit_status, browser_operator_install_failure_reason,
-        browser_operator_install_kind, has_explicit_install_confirmation,
-        BrowserOperatorInstallAuditPhase, BROWSER_OPERATOR_INSTALL_COMPLETED_REASON,
-        BROWSER_OPERATOR_INSTALL_CONFIRMATION_REASON, BROWSER_OPERATOR_INSTALL_STARTED_REASON,
-        BROWSER_OPERATOR_INSTALL_TOOL_NAME,
+        browser_operator_install_audit_status, browser_operator_install_backend_impl,
+        browser_operator_install_failure_reason, browser_operator_install_kind,
+        has_explicit_install_confirmation, BrowserOperatorInstallAuditPhase,
+        BROWSER_OPERATOR_INSTALL_COMPLETED_REASON, BROWSER_OPERATOR_INSTALL_CONFIRMATION_REASON,
+        BROWSER_OPERATOR_INSTALL_STARTED_REASON, BROWSER_OPERATOR_INSTALL_TOOL_NAME,
     };
     use crate::app_state::OmigaAppState;
     use crate::domain::browser_operator::BrowserOperatorError;
     use crate::domain::persistence::{init_db, SessionRepository};
     use serde_json::{json, Value};
     use std::collections::HashMap;
+
+    async fn list_browser_operator_install_events_by_phase(
+        state: &OmigaAppState,
+        project_root: &str,
+        expected_count: i64,
+    ) -> HashMap<String, (String, Option<String>, Value)> {
+        let page = state
+            .repo
+            .list_recent_permission_audit_events_page(
+                10,
+                0,
+                Some(project_root),
+                None,
+                Some("browser_operator"),
+            )
+            .await
+            .expect("list browser operator audit events");
+
+        assert_eq!(page.total_count, expected_count);
+        page.events
+            .into_iter()
+            .map(|event| {
+                assert_eq!(event.tool_name, BROWSER_OPERATOR_INSTALL_TOOL_NAME);
+                let arguments: Value =
+                    serde_json::from_str(&event.arguments_json).expect("valid audit arguments");
+                let phase = arguments
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .expect("phase")
+                    .to_string();
+                (phase, (event.decision, event.reason, arguments))
+            })
+            .collect()
+    }
 
     #[test]
     fn browser_operator_install_kind_matches_skip_flag() {
@@ -502,5 +561,142 @@ mod tests {
         assert_eq!(failed.0.decision, "approved");
         assert_eq!(failed.0.reason.as_deref(), Some(failure_reason.as_str()));
         assert_eq!(failed.1["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn browser_operator_install_backend_impl_records_success_audit_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let state = OmigaAppState::new(SessionRepository::new(pool));
+        let project_root = dir.path().join("project").to_string_lossy().to_string();
+
+        let result = browser_operator_install_backend_impl(
+            &state,
+            Some(true),
+            Some(true),
+            Some(project_root.clone()),
+            Some("session-success".to_string()),
+            |skip_browser_install| async move {
+                Ok(json!({
+                    "ok": true,
+                    "skipBrowserInstall": skip_browser_install,
+                    "home": "/tmp/omiga-browser-operator",
+                }))
+            },
+        )
+        .await
+        .expect("install succeeds");
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["skipBrowserInstall"], true);
+
+        let by_phase =
+            list_browser_operator_install_events_by_phase(&state, &project_root, 2).await;
+
+        let started = by_phase.get("started").expect("started event");
+        assert_eq!(started.0, "approved");
+        assert_eq!(
+            started.1.as_deref(),
+            Some(BROWSER_OPERATOR_INSTALL_STARTED_REASON)
+        );
+        assert_eq!(started.2["status"], "started");
+        assert_eq!(started.2["installKind"], "packages-only");
+        assert_eq!(started.2["skipBrowserInstall"], true);
+        assert_eq!(started.2["projectRoot"], project_root);
+        assert_eq!(started.2["sessionId"], "session-success");
+
+        let completed = by_phase.get("completed").expect("completed event");
+        assert_eq!(completed.0, "approved");
+        assert_eq!(
+            completed.1.as_deref(),
+            Some(BROWSER_OPERATOR_INSTALL_COMPLETED_REASON)
+        );
+        assert_eq!(completed.2["status"], "completed");
+        assert_eq!(completed.2["installKind"], "packages-only");
+        assert_eq!(completed.2["skipBrowserInstall"], true);
+    }
+
+    #[tokio::test]
+    async fn browser_operator_install_backend_impl_records_failed_execution_without_denial() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let state = OmigaAppState::new(SessionRepository::new(pool));
+        let project_root = dir.path().join("project").to_string_lossy().to_string();
+        let failure = BrowserOperatorError {
+            code: "install_timeout".to_string(),
+            message: "Browser Operator backend install timed out after 60s.".to_string(),
+            details: None,
+        };
+        let failure_reason = browser_operator_install_failure_reason(&failure);
+
+        let error = browser_operator_install_backend_impl(
+            &state,
+            Some(true),
+            Some(false),
+            Some(project_root.clone()),
+            Some("session-failure".to_string()),
+            move |_| {
+                let failure = failure.clone();
+                async move { Err(failure) }
+            },
+        )
+        .await
+        .expect_err("install fails");
+
+        assert!(error.contains("install_timeout"));
+
+        let by_phase =
+            list_browser_operator_install_events_by_phase(&state, &project_root, 2).await;
+
+        let started = by_phase.get("started").expect("started event");
+        assert_eq!(started.0, "approved");
+        assert_eq!(started.2["status"], "started");
+        assert_eq!(started.2["installKind"], "full");
+
+        let failed = by_phase.get("failed").expect("failed event");
+        assert_eq!(failed.0, "approved");
+        assert_eq!(failed.1.as_deref(), Some(failure_reason.as_str()));
+        assert_eq!(failed.2["status"], "failed");
+        assert_eq!(failed.2["installKind"], "full");
+        assert_eq!(failed.2["skipBrowserInstall"], false);
+    }
+
+    #[tokio::test]
+    async fn browser_operator_install_backend_impl_denies_without_calling_installer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let state = OmigaAppState::new(SessionRepository::new(pool));
+        let project_root = dir.path().join("project").to_string_lossy().to_string();
+
+        let error = browser_operator_install_backend_impl(
+            &state,
+            None,
+            Some(false),
+            Some(project_root.clone()),
+            Some("session-denied".to_string()),
+            |_| async {
+                panic!("installer must not run without explicit confirmation");
+                #[allow(unreachable_code)]
+                Ok::<Value, BrowserOperatorError>(json!({ "ok": true }))
+            },
+        )
+        .await
+        .expect_err("install is denied");
+
+        assert!(error.contains("confirmInstallIntent=true"));
+
+        let by_phase =
+            list_browser_operator_install_events_by_phase(&state, &project_root, 1).await;
+        let denied = by_phase.get("not_started").expect("denied event");
+        assert_eq!(denied.0, "denied");
+        assert_eq!(
+            denied.1.as_deref(),
+            Some(BROWSER_OPERATOR_INSTALL_CONFIRMATION_REASON)
+        );
+        assert_eq!(denied.2["status"], "denied");
+        assert_eq!(denied.2["installKind"], "full");
     }
 }

@@ -1065,6 +1065,38 @@ describe("usePluginStore operator actions", () => {
     expect(usePluginStore.getState().isMutating).toBe(false);
   });
 
+  it("keeps plugin migration status checks read-only when status loading fails", async () => {
+    const previousStatus: PluginMigrationStatus = {
+      migrationNeeded: true,
+      configRewriteNeeded: true,
+      legacyCacheEntriesToMigrate: 1,
+      legacyCacheEntriesToRemove: 0,
+      builtinRootsToRefresh: 0,
+      warnings: ["Previous warning."],
+    };
+    usePluginStore.setState({
+      isMutating: false,
+      pluginMigrationStatus: previousStatus,
+      error: null,
+    });
+    invokeMock.mockRejectedValue(new Error("status unavailable"));
+
+    await expect(
+      usePluginStore.getState().loadPluginMigrationStatus("/project"),
+    ).resolves.toBeNull();
+
+    expect(invokeMock).toHaveBeenCalledWith("get_omiga_plugin_migration_status", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "migrate_omiga_plugin_state",
+      expect.anything(),
+    );
+    expect(usePluginStore.getState().pluginMigrationStatus).toEqual(previousStatus);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+    expect(usePluginStore.getState().error).toBe("status unavailable");
+  });
+
   it("does not trigger built-in marketplace bootstrap when loading plugins", async () => {
     usePluginStore.setState({
       builtinMarketplaceStatus: {

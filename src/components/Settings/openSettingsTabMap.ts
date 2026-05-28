@@ -1,8 +1,18 @@
 /**
  * Maps `window` event `openSettings` → `detail.tab` string to Settings sidebar index.
- * Keep in sync with `SETTINGS_SECTIONS` in `Settings/index.tsx` (0–14). Language is not a tab — use profile menu + locale store.
+ * Keep in sync with `SETTINGS_SECTIONS` in `Settings/index.tsx` (0–15). Language is not a tab — use profile menu + locale store.
  * Optional `detail.executionSubTab`: 0 Modal, 1 Daytona, 2 SSH (see `ExecutionEnvsSettingsTab`).
  */
+export type OpenSettingsEventDetail = {
+  tab?: string;
+  executionSubTab?: number;
+};
+
+export type ResolvedOpenSettingsTarget = {
+  tabIndex: number;
+  executionSubTab: number;
+};
+
 export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   /** LLM provider & keys */
   provider: 0,
@@ -31,6 +41,11 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   notebook: 4,
   jupyter: 4,
   ipynb: 4,
+  /** Browser Operator setup lives in Execution; Composer controls per-turn/session enablement. */
+  "browser-operator": 9,
+  browser_operator: 9,
+  "browser-use": 9,
+  browser: 9,
   /** Profile files: ~/.omiga/SOUL.md, USER.md, MEMORY.md */
   profile: 12,
   soul: 12,
@@ -55,3 +70,32 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   "cron-jobs": 15,
   "scheduled-jobs": 15,
 };
+
+const OPEN_SETTINGS_EXECUTION_SUBTAB_DETAIL: Record<string, number> = {
+  ssh: 2,
+};
+
+function clampExecutionSubTab(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(2, Math.floor(n)));
+}
+
+export function resolveOpenSettingsTarget(
+  detail?: OpenSettingsEventDetail,
+): ResolvedOpenSettingsTarget {
+  const key = detail?.tab;
+  const tabIndex =
+    key != null && OPEN_SETTINGS_TAB_DETAIL[key] !== undefined
+      ? OPEN_SETTINGS_TAB_DETAIL[key]
+      : 0;
+  const defaultExecutionSubTab =
+    key != null ? OPEN_SETTINGS_EXECUTION_SUBTAB_DETAIL[key] : undefined;
+
+  return {
+    tabIndex,
+    executionSubTab: clampExecutionSubTab(
+      detail?.executionSubTab ?? defaultExecutionSubTab,
+    ),
+  };
+}
