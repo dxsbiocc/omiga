@@ -122,6 +122,15 @@ pub fn set_omiga_plugin_marketplace_source_enabled(
 }
 
 #[tauri::command]
+pub async fn migrate_omiga_plugin_state(
+    app_state: State<'_, OmigaAppState>,
+) -> CommandResult<plugins::PluginMigrationResult> {
+    let result = plugins::migrate_plugin_state_if_needed();
+    invalidate_plugin_dependent_caches(&app_state).await;
+    Ok(result)
+}
+
+#[tauri::command]
 pub async fn read_omiga_plugin(
     marketplace_path: String,
     plugin_name: String,
