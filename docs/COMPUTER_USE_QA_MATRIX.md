@@ -128,7 +128,7 @@ scripts/computer-use-release-check.py \
   --output /tmp/computer-use-release-check.md
 ```
 
-When validating an installed internal Rust feature artifact, compare the bundled
+When validating an installed internal Rust feature artifact, compare the packaged
 binary with the source binary and run the installed sidecar in mock mode:
 
 ```sh
@@ -198,7 +198,7 @@ credential check, `--notarytool-profile PROFILE --verify-notary-profile`.
 | Result-first evidence UI | Refresh result evidence in Settings | UI shows result records, OK/Needs attention/Blocked/Stopped signals, size/retention/evidence path, not screenshots or step-by-step operation content |
 | Screenshot retention | Enable screenshots, observe, then refresh evidence | Screenshots land under `/tmp/omiga-computer-use/<runId>/`; UI keeps only evidence path/counts while retention cleanup reports pruned temp dirs when old |
 | Optional OCR observe | Call observe with `extractVisualText=true` on a visible text target | Result includes `visualTextRequested`, bounded `visualText` boxes, counts/limits, and structured `visualTextError` if Screen Recording/Vision is unavailable |
-| Packaging config | Run `scripts/computer-use-release-check.py` | Tauri resources include `bundled_plugins`; marketplace, plugin manifest, MCP config, wrappers, and executable bits are valid |
+| Packaging config | Run `scripts/computer-use-release-check.py` | No Tauri plugin resources are bundled; external marketplace, plugin manifest, MCP config, wrappers, and executable bits are valid |
 
 ## Security regression checks
 
@@ -227,7 +227,7 @@ credential check, `--notarytool-profile PROFILE --verify-notary-profile`.
    - `scripts/computer-use-release-check.py`
 2. Final packaging hygiene gate:
    - `scripts/computer-use-release-check.py --fail-on-generated-artifacts`
-   - This fails if bundled plugin resources contain generated `__pycache__` or `.pyc` files.
+   - This fails if external plugin resources contain generated `__pycache__` or `.pyc` files.
 3. Optional full app/build gate:
    - `scripts/computer-use-release-check.py --include-build --include-cargo-test`
 4. On a macOS machine with permission prompts reviewed:

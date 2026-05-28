@@ -66,10 +66,6 @@
     "category": "DeveloperTool",
     "shortDescription": "AI coding assistant",
     "longDescription": "An IDE-like AI coding assistant with file operations, search, and session persistence",
-    "resources": {
-      "bundled_plugins": "bundled_plugins",
-      "omiga-plugins": "omiga-plugins"
-    },
     "macOS": {
       "frameworks": [],
       "minimumSystemVersion": "11.0",

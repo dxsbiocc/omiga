@@ -9,7 +9,7 @@ pub const DESCRIPTION: &str =
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorDescribeArgs {
-    /// Operator alias or tool name. Examples: fastqc, operator__fastqc.
+    /// Operator alias or id. Example: fastqc.
     pub id: String,
 }
 
@@ -32,11 +32,14 @@ impl ToolImpl for OperatorDescribeTool {
                         .unwrap_or_else(|_| error.message.clone()),
                 }
             })?;
-        let tool_name = alias.as_ref().map(|alias| format!("operator__{}", alias));
         let exposed = alias.is_some();
+        let operation_summaries =
+            crate::domain::operators::operator_operation_summaries_for_spec(&spec, exposed);
+        let operation_groups = crate::domain::operators::operator_operation_groups_for_spec(&spec);
+        let operation_names = crate::domain::operators::operator_operation_names(&spec);
         let output = serde_json::json!({
             "alias": alias,
-            "toolName": tool_name,
+            "executeTool": "operator_execute",
             "exposed": exposed,
             "operator": {
                 "id": spec.metadata.id,
@@ -47,6 +50,15 @@ impl ToolImpl for OperatorDescribeTool {
                 "manifestPath": spec.source.manifest_path,
             },
             "schema": crate::domain::operators::operator_parameters_schema(&spec),
+            "operationNames": operation_names,
+            "operations": operation_names,
+            "operationSummaries": operation_summaries,
+            "operationGroups": operation_groups,
+            "progressiveDisclosure": {
+                "program": "Call operator_describe once for the Operator program.",
+                "group": "Use operationGroups/category/stage to narrow the workflow family.",
+                "operation": "Pass the selected operation name to operator_execute.operation; subcommands are not separate tools."
+            },
             "preflight": spec.preflight,
             "smokeTests": spec.smoke_tests,
             "runtime": spec.runtime,
@@ -69,7 +81,7 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "Enabled operator alias or tool name, e.g. fastqc or operator__fastqc."
+                    "description": "Enabled operator alias or operator id, e.g. fastqc."
                 }
             },
             "required": ["id"]

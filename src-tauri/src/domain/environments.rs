@@ -615,6 +615,34 @@ mod tests {
     use crate::domain::plugins::LoadedPlugin;
     use std::collections::HashMap;
 
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .parent()
+            .expect("workspace root")
+            .to_path_buf()
+    }
+
+    fn marketplace_plugin_root(plugin_name: &str) -> PathBuf {
+        let marketplace_root = workspace_root().join("omiga-plugins");
+        let manifest_path = marketplace_root.join("marketplace.json");
+        let raw = std::fs::read_to_string(&manifest_path).expect("marketplace manifest");
+        let manifest: serde_json::Value = serde_json::from_str(&raw).expect("marketplace json");
+        let source_path = manifest
+            .get("plugins")
+            .and_then(|plugins| plugins.as_array())
+            .and_then(|plugins| {
+                plugins.iter().find_map(|entry| {
+                    (entry.get("name").and_then(|name| name.as_str()) == Some(plugin_name))
+                        .then(|| entry.get("source")?.get("path")?.as_str())
+                        .flatten()
+                })
+            })
+            .unwrap_or_else(|| panic!("{plugin_name} marketplace plugin"));
+        marketplace_root.join(source_path.trim_start_matches("./"))
+    }
+
     fn loaded_plugin(id: &str, root: &Path) -> LoadedPlugin {
         LoadedPlugin {
             id: id.to_string(),
@@ -785,10 +813,7 @@ metadata:
 
     #[test]
     fn discovers_omiga_plugin_visualization_r_environment_profile() {
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .join(".omiga/plugins/visualization-r");
+        let plugin_root = marketplace_plugin_root("visualization-r");
         let plugin = loaded_plugin("visualization-r@omiga-curated", &plugin_root);
 
         let profiles = discover_environment_profiles_from_plugins([&plugin]);
@@ -797,7 +822,35 @@ metadata:
             .iter()
             .find(|profile| profile.spec.metadata.id == "r-base")
             .expect("visualization-r r-base profile");
-        assert_eq!(profile.spec.runtime.command.as_deref(), Some("Rscript"));
+        match profile.spec.runtime.kind.as_deref() {
+            Some("conda") => {
+                assert_eq!(
+                    profile
+                        .spec
+                        .runtime
+                        .extra
+                        .get("condaEnvFile")
+                        .and_then(JsonValue::as_str),
+                    Some("./conda.yaml")
+                );
+            }
+            Some("system") => {
+                assert_eq!(profile.spec.runtime.command.as_deref(), Some("Rscript"));
+                assert!(profile
+                    .spec
+                    .requirements
+                    .system
+                    .iter()
+                    .any(|requirement| requirement == "Rscript"));
+                assert!(profile
+                    .spec
+                    .requirements
+                    .r_packages
+                    .iter()
+                    .any(|package| package == "ggplot2"));
+            }
+            other => panic!("unexpected visualization-r runtime kind: {other:?}"),
+        }
         assert_eq!(
             profile.spec.diagnostics.check_command,
             vec!["Rscript".to_string(), "--version".to_string()]
@@ -806,10 +859,7 @@ metadata:
 
     #[test]
     fn discovers_project_ngs_alignment_conda_environment_profiles() {
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .join(".omiga/plugins/ngs-alignment");
+        let plugin_root = marketplace_plugin_root("ngs-alignment");
         let plugin = loaded_plugin("ngs-alignment@omiga-curated", &plugin_root);
 
         let profiles = discover_environment_profiles_from_plugins([&plugin]);

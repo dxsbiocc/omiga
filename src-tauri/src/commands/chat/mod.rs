@@ -1448,11 +1448,20 @@ pub async fn send_message(
     let computer_use_mode = crate::domain::computer_use::ComputerUseMode::from_request(
         request.computer_use_mode.as_deref(),
     );
+    let browser_use_mode = crate::domain::browser_operator::BrowserUseMode::from_request(
+        request.browser_use_mode.as_deref(),
+    );
     tracing::debug!(
         target: "omiga::computer_use",
         mode = computer_use_mode.as_str(),
         enabled = computer_use_mode.is_enabled(),
         "computer use request gate resolved"
+    );
+    tracing::debug!(
+        target: "omiga::browser_operator",
+        mode = browser_use_mode.as_str(),
+        enabled = browser_use_mode.is_enabled(),
+        "browser operator request gate resolved"
     );
 
     if let ChatInputTarget::BackgroundAgentFollowup { task_id } = input_target {
@@ -2593,6 +2602,11 @@ pub async fn send_message(
     {
         prompt_parts.push(plugins_system_section);
     }
+    if let Some(operator_tools_system_section) =
+        crate::domain::operators::format_enabled_operator_tools_system_section()
+    {
+        prompt_parts.push(operator_tools_system_section);
+    }
     if let Some(selected_plugins_system_section) =
         crate::domain::plugins::format_selected_plugins_system_section(
             &plugin_load_outcome,
@@ -3009,6 +3023,8 @@ pub async fn send_message(
                 "toolsEnabled": request.use_tools,
                 "computerUseMode": computer_use_mode.as_str(),
                 "computerUseEnabled": computer_use_mode.is_enabled(),
+                "browserUseMode": browser_use_mode.as_str(),
+                "browserUseEnabled": browser_use_mode.is_enabled(),
                 "schedulerBuiltPlan": scheduler_result.is_some(),
             }),
         )
@@ -3103,6 +3119,9 @@ pub async fn send_message(
         let mut all_schemas = all_tool_schemas(skills_exist);
         if computer_use_mode.is_enabled() {
             all_schemas.extend(crate::domain::computer_use::facade_tool_schemas());
+        }
+        if browser_use_mode.is_enabled() {
+            all_schemas.extend(crate::domain::browser_operator::facade_tool_schemas());
         }
         let n_builtin_before = all_schemas.len();
         let mut built = filter_tool_schemas_by_deny_rule_entries(all_schemas, &deny_entries);
@@ -4184,6 +4203,7 @@ pub async fn send_message(
                 local_venv_name: agent_runtime.local_venv_name.clone(),
                 env_store: agent_runtime.env_store.clone(),
                 computer_use_enabled: computer_use_mode.is_enabled(),
+                browser_use_enabled: browser_use_mode.is_enabled(),
                 artifact_registry: artifact_registry_for_tools,
             })
             .await;

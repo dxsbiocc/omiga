@@ -1,11 +1,15 @@
-# Operator Plugin Manifest v1alpha1
+# Operator Plugin Manifest v1alpha2
 
-Operators are plugin-provided, declarative execution units exposed to agents as `operator__{alias}` tools. A plugin contributes operators by placing `operator.yaml` files under its `operators/` directory.
+Operators are plugin-provided, declarative program adapters. A single Operator
+represents one executable program; subcommands or modes are modeled as
+`operations` and executed through the generic `operator_execute` tool. A plugin
+contributes operators by placing `operator.yaml` files under its declared
+`operators/` directory.
 
 ## Required identity
 
 ```yaml
-apiVersion: omiga.ai/operator/v1alpha1
+apiVersion: omiga.ai/operator/v1alpha2
 kind: Operator
 metadata:
   id: write_text_report
@@ -14,9 +18,46 @@ metadata:
   description: Write a deterministic text artifact.
 ```
 
-- `apiVersion` must stay `omiga.ai/operator/v1alpha1`.
+- `apiVersion` should be `omiga.ai/operator/v1alpha2` for multi-operation
+  program adapters. `v1alpha1` remains accepted for legacy single-operation
+  manifests.
 - `kind` must be `Operator`.
-- `metadata.id` is the stable operator id. Enabled aliases become tool names as `operator__{alias}`.
+- `metadata.id` is the stable Operator program id. Enabled aliases are passed to
+  `operator_execute.operator`; callers choose the subcommand via
+  `operator_execute.operation`.
+
+## Operation taxonomy
+
+Use `operations` when one executable has multiple subcommands or modes. Do not
+split those subcommands into separate Operator manifests.
+
+```yaml
+operations:
+  sample:
+    name: Sample Reads
+    description: Subsample FASTQ/FASTA reads.
+    category: ngs/sequence-processing
+    group: Sequence Processing
+    stage: NGS / Sequence Processing
+    tags: [fastq, fasta, sampling]
+    execution:
+      argv: [seqtk, sample, "${inputs.reads}", "${params.sample_size}"]
+  fqchk:
+    name: FASTQ Quality Check
+    description: Summarize per-base quality and composition.
+    category: ngs/quality-control
+    group: Quality Control
+    stage: NGS / Quality Control
+    tags: [fastq, quality-control]
+    execution:
+      argv: [seqtk, fqchk, "${inputs.reads}"]
+```
+
+- `category` is the stable machine-facing route key.
+- `group` is the short UI bucket inside the Operator program.
+- `stage` is the human-facing progressive-disclosure label.
+- Omiga core treats these as manifest data. It does not hardcode plugin-specific
+  operation categories.
 
 ## Interface schema
 
@@ -170,19 +211,14 @@ Container selection rules:
 - Local/SSH direct container execution bind-mounts the isolated run directory read-write and path-like inputs read-only. Local execution also mounts the project root and plugin root read-only. SSH artifacts, logs, and provenance stay on the remote workspace.
 - Sandbox/remote backends remain responsible for their own container isolation; the operator runtime is validated and recorded rather than nested in another container command.
 
-The bundled `operator-smoke@omiga-curated` plugin includes `container_text_report@0.1.0` as a live container validation fixture. It declares Docker and Singularity images and exposes a generic smoke payload that runs through the active container backend.
-
-The bundled curated operator plugins keep one atomic operator per plugin (or a tightly scoped validation pair for smoke tests):
-
-- `operator-pca-r@omiga-curated` exposes `omics_pca_matrix@0.1.0` — base-R PCA for expression/count matrices, optional sample metadata grouping, PCA scatter, and scree defaults.
-- `operator-differential-expression-r@omiga-curated` exposes `omics_differential_expression_basic@0.1.0` — bulk RNA-seq differential expression over one or more group comparisons, auto-prioritizing DESeq2, edgeR, and limma/voom for counts, and limma for quantitative matrices, with volcano/quadrant/beeswarm default displays.
-- `operator-enrichment-r@omiga-curated` exposes `omics_functional_enrichment_basic@0.1.0` — real ORA via `clusterProfiler::enricher` plus ranked GSEA via `fgsea` over GMT or two-column TSV gene sets, with bar/dot/curve default displays.
-- `operator-seqtk@omiga-curated` exposes `seqtk_sample_reads@0.1.0` — `seqtk sample` wrapper for FASTQ/FASTA subsampling on the active local/SSH environment.
+Container validation coverage now comes from Rust tests that generate temporary
+operator plugins at runtime. Omiga core must not ship app-local bundled plugin
+content; curated plugin definitions belong in the external plugin marketplace.
 
 Manual Docker validation can be run with:
 
 ```sh
-cargo test --manifest-path src-tauri/Cargo.toml executes_bundled_container_smoke_operator_with_docker_runtime --lib -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml executes_temp_container_smoke_operator_with_docker_runtime --lib -- --ignored --nocapture
 ```
 
 ## Cache policy
@@ -270,15 +306,17 @@ Failed runs persist structured diagnostics in `status.json` and, when available,
 
 The UI surfaces the latest failed status on operator cards/details and exposes a copyable diagnosis payload containing operator identity, run identity, run context, log tails, and suggested action.
 
-## Manually running the bundled smoke test
+## Smoke-test example
 
-The built-in validation fixture is:
+The app repo no longer contains a built-in smoke plugin. The smoke-test coverage
+is generated by unit tests, and marketplace plugins should provide their own
+`smokeTests` entries:
 
-- Plugin: `operator-smoke@omiga-curated`
+- Test plugin id: `operator-smoke@omiga-curated`
 - Operator id/alias: `write_text_report`
 - Agent tool name after exposure: `operator__write_text_report`
 - Smoke test id: `default`
-- Manifest: `src-tauri/bundled_plugins/plugins/operator-smoke/operators/write-text-report/operator.yaml`
+- Manifest: `temporary test plugin generated by src-tauri/src/domain/operators.rs tests`
 
 Recommended manual path:
 

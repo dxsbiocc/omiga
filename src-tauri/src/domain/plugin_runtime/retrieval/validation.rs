@@ -461,9 +461,132 @@ fn skipped(code: impl Into<String>, message: impl Into<String>) -> PluginValidat
 mod tests {
     use super::*;
 
-    fn fixture_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval-plugins/basic")
+    fn documented_basic_example_root() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::write(
+            root.join("plugin.json"),
+            r#"{
+              "name": "retrieval-protocol-example",
+              "version": "0.1.0",
+              "description": "Runnable example for the Omiga local retrieval plugin protocol.",
+              "retrieval": {
+                "protocolVersion": 1,
+                "runtime": {
+                  "command": "./scripts/basic_retrieval_plugin.py",
+                  "args": [],
+                  "cwd": ".",
+                  "idleTtlMs": 30000,
+                  "requestTimeoutMs": 5000,
+                  "cancelGraceMs": 500,
+                  "concurrency": 1
+                },
+                "resources": [{
+                  "id": "example_dataset",
+                  "category": "dataset",
+                  "label": "Example Dataset",
+                  "description": "Local example source that demonstrates search, query, and fetch responses.",
+                  "aliases": ["example data"],
+                  "subcategories": ["sample metadata"],
+                  "capabilities": ["search", "query", "fetch"],
+                  "requiredCredentialRefs": [],
+                  "optionalCredentialRefs": ["pubmed_email"],
+                  "riskLevel": "low",
+                  "riskNotes": ["Example only: does not perform network access or mutate local files."],
+                  "defaultEnabled": false,
+                  "replacesBuiltin": false,
+                  "parameters": [{
+                    "name": "organism",
+                    "type": "string",
+                    "description": "Optional organism label echoed into example metadata."
+                  }]
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+        let script = root.join("scripts/basic_retrieval_plugin.py");
+        fs::write(&script, BASIC_RETRIEVAL_PLUGIN).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).unwrap();
+        }
+        dir
     }
+
+    const BASIC_RETRIEVAL_PLUGIN: &str = r#"#!/usr/bin/env python3
+import json
+import sys
+
+PROTOCOL_VERSION = 1
+SOURCE = {
+    "category": "dataset",
+    "id": "example_dataset",
+    "capabilities": ["search", "query", "fetch"],
+}
+
+def write(message):
+    print(json.dumps(message, separators=(",", ":")), flush=True)
+
+def item(request, index=1):
+    query = request.get("query") or request.get("id") or "example"
+    return {
+        "id": f"example-{index}",
+        "title": f"Example result {index} for {query}",
+        "metadata": {"fixture": "retrieval-protocol-example"},
+    }
+
+def result(message_id, request):
+    operation = request.get("operation") or "search"
+    base = {
+        "ok": True,
+        "operation": operation,
+        "category": request.get("category", SOURCE["category"]),
+        "source": request.get("source", SOURCE["id"]),
+        "effectiveSource": SOURCE["id"],
+    }
+    if operation == "fetch":
+        base.update({"items": [], "detail": item(request, 1), "total": 1})
+    elif operation == "query":
+        base.update({"items": [item(request, 1), item(request, 2)], "total": 2})
+    else:
+        base.update({"items": [item(request, 1)], "total": 1})
+    return {"id": message_id, "type": "result", "response": base}
+
+def error(message_id, code, message):
+    return {"id": message_id, "type": "error", "error": {"code": code, "message": message}}
+
+def main():
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        message = json.loads(line)
+        message_type = message.get("type")
+        message_id = message.get("id", message_type or "unknown")
+        if message_type == "initialize":
+            write({
+                "id": message_id,
+                "type": "initialized",
+                "protocolVersion": PROTOCOL_VERSION,
+                "resources": [SOURCE],
+            })
+        elif message_type == "execute":
+            request = message.get("request") if isinstance(message.get("request"), dict) else {}
+            write(result(message_id, request))
+        elif message_type == "shutdown":
+            write({"id": message_id, "type": "shutdown"})
+            return 0
+        else:
+            write(error(message_id, "unknown_message_type", f"unsupported message type: {message_type}"))
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#;
 
     #[derive(serde::Deserialize)]
     struct CuratedMarketplace {
@@ -483,6 +606,10 @@ mod tests {
 
     fn curated_marketplace_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .parent()
+            .expect("workspace root")
             .join("omiga-plugins")
             .join("marketplace.json")
     }
@@ -505,18 +632,24 @@ mod tests {
     }
 
     fn retrieval_plugin_root(plugin_name: &str) -> PathBuf {
-        curated_plugin_root(plugin_name).unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("fixtures/plugins/legacy")
-                .join(plugin_name)
-        })
+        curated_plugin_root(plugin_name)
+            .unwrap_or_else(|| panic!("{plugin_name} must come from ../omiga-plugins"))
     }
 
     fn retrieval_plugin_cases() -> Vec<(&'static str, Vec<&'static str>)> {
         vec![
-            ("retrieval-dataset-geo", vec!["dataset.geo"]),
             (
-                "retrieval-dataset-ena",
+                "resource-ncbi",
+                vec![
+                    "literature.pubmed",
+                    "dataset.geo",
+                    "dataset.biosample",
+                    "dataset.ncbi_datasets",
+                    "knowledge.ncbi_gene",
+                ],
+            ),
+            (
+                "resource-embl-ebi",
                 vec![
                     "dataset.ena",
                     "dataset.ena_run",
@@ -525,33 +658,44 @@ mod tests {
                     "dataset.ena_analysis",
                     "dataset.ena_assembly",
                     "dataset.ena_sequence",
+                    "dataset.arrayexpress",
+                    "knowledge.ensembl",
                 ],
-            ),
-            ("retrieval-dataset-biosample", vec!["dataset.biosample"]),
-            (
-                "retrieval-dataset-arrayexpress",
-                vec!["dataset.arrayexpress"],
-            ),
-            (
-                "retrieval-dataset-ncbi-datasets",
-                vec!["dataset.ncbi_datasets"],
             ),
             ("retrieval-dataset-gtex", vec!["dataset.gtex"]),
             ("retrieval-dataset-cbioportal", vec!["dataset.cbioportal"]),
-            ("retrieval-literature-pubmed", vec!["literature.pubmed"]),
             (
                 "retrieval-literature-semantic-scholar",
                 vec!["literature.semantic_scholar"],
             ),
-            ("retrieval-knowledge-ncbi-gene", vec!["knowledge.ncbi_gene"]),
-            ("retrieval-knowledge-ensembl", vec!["knowledge.ensembl"]),
             ("retrieval-knowledge-uniprot", vec!["knowledge.uniprot"]),
+            (
+                "resource-drugs",
+                vec![
+                    "drug.chembl",
+                    "drug.pubchem",
+                    "drug.broad_repurposing_hub",
+                    "drug.openfda",
+                    "drug.clinicaltrials",
+                    "drug.dailymed",
+                ],
+            ),
+            (
+                "resource-pathways",
+                vec![
+                    "knowledge.reactome",
+                    "knowledge.gene_ontology",
+                    "knowledge.msigdb",
+                    "knowledge.kegg",
+                ],
+            ),
         ]
     }
 
     #[tokio::test]
-    async fn validates_documented_fixture_without_smoke() {
-        let report = validate_retrieval_plugin_root(&fixture_root(), false).await;
+    async fn validates_documented_example_without_smoke() {
+        let dir = documented_basic_example_root();
+        let report = validate_retrieval_plugin_root(dir.path(), false).await;
 
         assert!(report.valid);
         assert!(!report.smoke_requested);
@@ -572,8 +716,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validates_documented_fixture_with_search_query_fetch_smoke() {
-        let report = validate_retrieval_plugin_root(&fixture_root(), true).await;
+    async fn validates_documented_example_with_search_query_fetch_smoke() {
+        let dir = documented_basic_example_root();
+        let report = validate_retrieval_plugin_root(dir.path(), true).await;
 
         assert!(report.valid, "report: {report:?}");
         assert!(report.smoke_requested);

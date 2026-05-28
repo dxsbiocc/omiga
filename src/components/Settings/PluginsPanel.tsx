@@ -1,9 +1,4 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Accordion,
@@ -12,17 +7,16 @@ import {
   Alert,
   Box,
   Button,
-  Checkbox,
   Chip,
   CircularProgress,
   Dialog,
-  DialogActions,
   DialogContent,
   DialogTitle,
   IconButton,
   InputAdornment,
   MenuItem,
   Paper,
+  Portal,
   Snackbar,
   Stack,
   Switch,
@@ -41,36 +35,29 @@ import {
   DescriptionOutlined,
   ExtensionRounded,
   ExpandMoreRounded,
-  PlayArrowRounded,
   PublishedWithChangesRounded,
   RefreshRounded,
   SearchRounded,
   SettingsRounded,
-  StarBorderRounded,
-  StarRounded,
   SyncRounded,
   TroubleshootRounded,
-  AccountTreeRounded,
 } from "@mui/icons-material";
 import {
   buildPluginDiagnostics,
   buildRetrievalRuntimeDiagnostics,
   flattenMarketplacePlugins,
-  summarizeOperatorRunResult,
   type EnvironmentCheckResult,
-  type OperatorChainResult,
-  type OperatorChainStep,
-  type OperatorManifestDiagnostic,
   type OperatorRuntimeResourceProfile,
-  type OperatorRunCleanupRequest,
   type OperatorRunDetail,
   type OperatorRunVerification,
   type OperatorRunLog,
   type OperatorRunSummary,
   type OperatorSummary,
-  type OperatorTaskEvent,
-  type OperatorTaskQueueStatus,
   type MarketplaceRemoteCheckResult,
+  type PluginMigrationResult,
+  type PluginMigrationStatus,
+  type MarketplaceSourceKind,
+  type MarketplaceSourceView,
   type PluginEnvironmentSummary,
   type PluginProcessPoolRouteStatus,
   type PluginRetrievalLifecycleState,
@@ -78,18 +65,15 @@ import {
   type PluginRetrievalResourceSummary,
   type PluginSummary,
   type PluginTemplateSummary,
+  type RefreshResult,
   usePluginStore,
 } from "../../state/pluginStore";
-import { invoke } from "@tauri-apps/api/core";
 import { useChatComposerStore } from "../../state/chatComposerStore";
 import { useSessionStore } from "../../state/sessionStore";
 import { ComputerUseSettingsPanel } from "./ComputerUseSettingsTab";
 import { NotebookViewerSettingsPanel } from "./NotebookSettingsTab";
-import { OperatorChainEditorDialog } from "./OperatorChainEditorDialog";
 import { OperatorRunsTimeline } from "./OperatorRunsTimeline";
 import { extractErrorMessage } from "../../utils/errorMessage";
-
-const SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS = import.meta.env.DEV;
 
 const pluginCardGridSx = {
   display: "grid",
@@ -226,8 +210,15 @@ function pluginClassificationTerms(plugin: PluginSummary): string[] {
   return [
     plugin.interface?.category,
     ...(plugin.interface?.capabilities ?? []),
+    plugin.interface?.shortDescription,
+    plugin.interface?.longDescription,
     plugin.name,
     plugin.id,
+    ...((plugin.operators ?? []).flatMap((operator) => [
+      operator.name,
+      operator.description,
+      ...(operator.tags ?? []),
+    ])),
   ]
     .filter((value): value is string => Boolean(value?.trim()))
     .map((value) => value.trim().toLowerCase().replace(/[-_]+/g, " "));
@@ -236,6 +227,108 @@ function pluginClassificationTerms(plugin: PluginSummary): string[] {
 function pluginHasTerm(plugin: PluginSummary, terms: string[]): boolean {
   const haystack = pluginClassificationTerms(plugin);
   return haystack.some((value) => terms.some((term) => value === term || value.includes(term)));
+}
+
+function normalizedPluginCategory(plugin: PluginSummary): string {
+  return plugin.interface?.category?.trim().toLowerCase().replace(/[-_]+/g, " ") ?? "";
+}
+
+function pluginNameIdText(plugin: PluginSummary): string {
+  return [plugin.name, plugin.id]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join(" ")
+    .toLowerCase()
+    .replace(/[-_]+/g, " ");
+}
+
+function pluginMarketplaceTaxonomySegments(plugin: PluginSummary): string[] {
+  const rawPath = plugin.sourcePath?.trim() || plugin.installedPath?.trim() || "";
+  if (!rawPath) return [];
+  const pathSegments = rawPath
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const pluginsIndex = pathSegments.lastIndexOf("plugins");
+  if (pluginsIndex < 0 || pluginsIndex >= pathSegments.length - 1) return [];
+  return pathSegments.slice(pluginsIndex + 1).map((segment) => segment.toLowerCase().replace(/[_\s]+/g, "-"));
+}
+
+function humanizeTaxonomySegment(segment: string): string {
+  const normalized = segment.trim().toLowerCase().replace(/[_\s]+/g, "-");
+  const acronyms: Record<string, string> = {
+    ngs: "NGS",
+    qc: "QC",
+    hpc: "HPC",
+    r: "R",
+    rna: "RNA",
+    rnaseq: "RNA-seq",
+    "rna-seq": "RNA-seq",
+    dna: "DNA",
+    sv: "SV",
+    cnv: "CNV",
+  };
+  if (acronyms[normalized]) return acronyms[normalized];
+  return normalized
+    .split("-")
+    .filter(Boolean)
+    .map((part) => acronyms[part] ?? part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function pluginCatalogGroupIdFromTaxonomyRoot(root: string): PluginCatalogGroupId | null {
+  switch (root) {
+    case "analysis":
+    case "analyses":
+      return "analysis";
+    case "bioinformatics":
+    case "omics":
+      return "bioinformatics";
+    case "visualization":
+    case "visualizations":
+    case "visualisation":
+    case "visualisations":
+      return "visualization";
+    case "automation":
+    case "operator":
+    case "operators":
+      return "operator";
+    case "tool":
+    case "tools":
+      return "tools";
+    case "resource":
+    case "resources":
+    case "retrieval":
+    case "retrievals":
+      return "resource";
+    default:
+      return null;
+  }
+}
+
+function pluginCatalogGroupIdFromPath(plugin: PluginSummary): PluginCatalogGroupId | null {
+  const [root] = pluginMarketplaceTaxonomySegments(plugin);
+  return root ? pluginCatalogGroupIdFromTaxonomyRoot(root) : null;
+}
+
+function pluginCatalogSectionFromPath(
+  groupId: PluginCatalogGroupId,
+  plugin: PluginSummary,
+): string | null {
+  const segments = pluginMarketplaceTaxonomySegments(plugin);
+  if (segments.length < 3) return null;
+  const rootGroup = pluginCatalogGroupIdFromTaxonomyRoot(segments[0]);
+  if (rootGroup !== groupId) return null;
+  return segments[1];
+}
+
+function pluginHasAnyCategory(plugin: PluginSummary, categories: string[]): boolean {
+  const category = normalizedPluginCategory(plugin);
+  return categories.some((value) => category === value);
+}
+
+function pluginLooksLikeResourceBundle(plugin: PluginSummary): boolean {
+  return /(^|\s)(resource|retrieval)(\s|$)/.test(pluginNameIdText(plugin));
 }
 
 function isOperatorPlugin(plugin: PluginSummary): boolean {
@@ -247,14 +340,9 @@ function isTemplatePlugin(plugin: PluginSummary): boolean {
 }
 
 function isAnalysisPlugin(plugin: PluginSummary): boolean {
-  return pluginHasTerm(plugin, [
-    "analysis",
-    "omics analysis",
-    "transcriptomics",
-    "genomics",
-    "metabolomics",
-    "proteomics",
-  ]);
+  if (isResourcePlugin(plugin) || isVisualizationPlugin(plugin)) return false;
+  if (pluginHasAnyCategory(plugin, ["analysis"])) return true;
+  return pluginHasTerm(plugin, ["analysis", "statistics", "statistical"]);
 }
 
 function isAutomationPlugin(plugin: PluginSummary): boolean {
@@ -269,19 +357,15 @@ function isAutomationPlugin(plugin: PluginSummary): boolean {
 }
 
 function isVisualizationPlugin(plugin: PluginSummary): boolean {
+  if (pluginHasAnyCategory(plugin, ["visualization", "visualisation"])) return true;
+  if (isResourcePlugin(plugin)) return false;
   return pluginHasTerm(plugin, ["visualization", "visualisation", "figure", "plot"]);
 }
 
 function isRVisualizationPlugin(plugin: PluginSummary): boolean {
-  const haystack = [
-    plugin.id,
-    plugin.name,
-    plugin.interface?.displayName,
-  ]
-    .filter((value): value is string => Boolean(value?.trim()))
-    .join(" ")
-    .toLowerCase();
-  return haystack.includes("visualization-r") || haystack.includes("r visualization");
+  const taxonomy = pluginMarketplaceTaxonomySegments(plugin);
+  if (taxonomy[0] === "visualization" && taxonomy.includes("r")) return true;
+  return pluginHasTerm(plugin, ["r visualization", "rscript", "ggplot", "ggplot2", "base r"]);
 }
 
 function resourceCategoryFromTerms(plugin: PluginSummary): string | null {
@@ -349,7 +433,7 @@ function operatorIconKindFromHaystack(haystack: string): OperatorPluginIconKind 
   if (/\bc\+\+\b|\bcpp\b/.test(haystack)) return "cpp";
   if (/\brscript\b|\bbase r\b|\br\b/.test(haystack)) return "r";
   if (/\bpython\b|\bpython3\b|\bpy\b/.test(haystack)) return "python";
-  if (/\bseqtk\b|\bc\b/.test(haystack)) return "c";
+  if (/\bc\b/.test(haystack)) return "c";
   if (/\bshell\b|\bsh\b|\bbash\b|\bcontainer\b|\bsmoke\b/.test(haystack)) return "shell";
   return "operator";
 }
@@ -405,23 +489,9 @@ function isComputerUsePlugin(plugin: PluginSummary): boolean {
 }
 
 function isBioinformaticsPlugin(plugin: PluginSummary): boolean {
-  return pluginHasTerm(plugin, [
-    "bioinformatics",
-    "omics",
-    "transcriptomics",
-    "genomics",
-    "metabolomics",
-    "proteomics",
-    "ngs",
-    "next generation sequencing",
-    "sequencing",
-    "alignment",
-    "aligner",
-    "fastq",
-    "fasta",
-    "sam/bam",
-    "genome index",
-  ]);
+  if (isResourcePlugin(plugin) || isVisualizationPlugin(plugin)) return false;
+  if (pluginHasAnyCategory(plugin, ["bioinformatics"])) return true;
+  return pluginHasTerm(plugin, ["bioinformatics", "omics", "ngs"]);
 }
 
 export type PluginCatalogGroupId =
@@ -447,12 +517,17 @@ export interface PluginCatalogSection {
 }
 
 export function pluginCatalogGroupId(plugin: PluginSummary): PluginCatalogGroupId {
+  const pathGroup = pluginCatalogGroupIdFromPath(plugin);
+  if (pathGroup) return pathGroup;
+  // Preserve explicit plugin surface boundaries first. Retrieval bundles can mention
+  // genes/variants/assemblies, and visualization templates can mention gene plots;
+  // those domain words must not override the plugin's declared contribution type.
+  if (isVisualizationPlugin(plugin)) return "visualization";
+  if (isResourcePlugin(plugin)) return "resource";
   if (isBioinformaticsPlugin(plugin)) return "bioinformatics";
   if (isAnalysisPlugin(plugin)) return "analysis";
-  if (isResourcePlugin(plugin)) return "resource";
   if (isAutomationPlugin(plugin)) return "operator";
   if (isOperatorPlugin(plugin)) return "operator";
-  if (isVisualizationPlugin(plugin)) return "visualization";
   if (isFunctionPlugin(plugin)) return "tools";
   return "other";
 }
@@ -481,7 +556,7 @@ function pluginCatalogGroupDescription(group: PluginCatalogGroupId): string {
     case "analysis":
       return "Analysis plugins that bundle atomic Operator/Template units by domain.";
     case "bioinformatics":
-      return "Bioinformatics plugins grouped by workflow stage while preserving atomic units.";
+      return "Bioinformatics plugins grouped by marketplace directory taxonomy while preserving atomic units.";
     case "visualization":
       return "Plugins for creating, editing, or reviewing visual outputs.";
     case "operator":
@@ -515,9 +590,7 @@ export function groupPluginsByCatalogGroup(plugins: PluginSummary[]): PluginCata
       id,
       title: pluginCatalogGroupLabel(id),
       description: pluginCatalogGroupDescription(id),
-      plugins: (grouped.get(id) ?? []).sort((left, right) =>
-        displayName(left).localeCompare(displayName(right)),
-      ),
+      plugins: grouped.get(id) ?? [],
     }))
     .filter((group) => group.plugins.length > 0);
 }
@@ -564,7 +637,7 @@ export function groupPluginsByCatalogSection(
     .map(([sectionId, sectionPlugins]) => ({
       id: sectionId,
       title: pluginCatalogSectionLabel(groupId, sectionId),
-      plugins: sectionPlugins.sort((left, right) => displayName(left).localeCompare(displayName(right))),
+      plugins: sectionPlugins,
     }))
     .sort((left, right) => {
       const orderDelta =
@@ -588,16 +661,16 @@ function pluginCatalogSectionOrder(groupId: PluginCatalogGroupId, sectionId: str
     switch (sectionId.slice("bioinformatics:".length)) {
       case "ngs":
         return 0;
-      case "transcriptomics":
-        return 10;
       case "genomics":
+        return 10;
+      case "transcriptomics":
         return 20;
       case "proteomics":
         return 30;
       case "metabolomics":
         return 40;
       default:
-        return 60;
+        return 80;
     }
   }
   if (groupId === "visualization" && sectionId.startsWith("visualization:")) {
@@ -707,7 +780,25 @@ export function unknownRetrievalRuntimePluginIds(
 }
 
 function isResourcePlugin(plugin: PluginSummary): boolean {
-  return Boolean(plugin.retrieval?.resources.length) || resourceCategoryFromTerms(plugin) !== null;
+  const explicitResourceCategory = pluginHasAnyCategory(plugin, [
+    "retrieval",
+    "resource",
+    "resources",
+    "data source",
+    "data sources",
+    "literature",
+    "dataset",
+    "datasets",
+    "knowledge",
+    "provider",
+  ]);
+  const declaresRetrievalSurface = pluginHasTerm(plugin, ["retrieval", "search", "query", "fetch"]);
+  return (
+    Boolean(plugin.retrieval?.resources.length) ||
+    explicitResourceCategory ||
+    pluginLooksLikeResourceBundle(plugin) ||
+    (declaresRetrievalSurface && resourceCategoryFromTerms(plugin) !== null)
+  );
 }
 
 export type PluginCatalogFilter =
@@ -837,6 +928,8 @@ export function filterPluginsForCatalog(
 }
 
 function primaryResourceCategory(plugin: PluginSummary): string {
+  const pathCategory = pluginCatalogSectionFromPath("resource", plugin);
+  if (pathCategory) return pathCategory;
   const categories = Array.from(
     new Set((plugin.retrieval?.resources ?? []).map((resource) => resource.category).filter(Boolean)),
   );
@@ -860,6 +953,8 @@ function resourceCategoryLabel(category: string): string {
 }
 
 function primaryAnalysisCategory(plugin: PluginSummary): string {
+  const pathCategory = pluginCatalogSectionFromPath("analysis", plugin);
+  if (pathCategory) return pathCategory;
   if (pluginHasTerm(plugin, ["statistical", "statistics", "stats"])) return "statistics";
   if (pluginHasTerm(plugin, ["workflow", "pipeline"])) return "workflow";
   return "general";
@@ -872,39 +967,20 @@ function analysisCategoryLabel(category: string): string {
     case "workflow":
       return "Analysis workflows";
     default:
-      return "General analysis";
+      return category === "general" ? "General analysis" : humanizeTaxonomySegment(category);
   }
 }
 
 function primaryBioinformaticsCategory(plugin: PluginSummary): string {
-  if (
-    pluginHasTerm(plugin, [
-      "ngs",
-      "next generation sequencing",
-      "fastq",
-      "sam/bam",
-      "alignment",
-      "aligner",
-      "bowtie2",
-      "bwa",
-      "star",
-      "hisat2",
-    ])
-  ) {
-    return "ngs";
-  }
-  if (pluginHasTerm(plugin, ["transcriptomics", "rna seq", "rna-seq", "differential expression"])) {
-    return "transcriptomics";
-  }
-  if (pluginHasTerm(plugin, ["genomics", "variant", "annotation", "assembly"])) {
-    return "genomics";
-  }
-  if (pluginHasTerm(plugin, ["proteomics", "protein", "peptide"])) {
-    return "proteomics";
-  }
-  if (pluginHasTerm(plugin, ["metabolomics", "metabolite"])) {
-    return "metabolomics";
-  }
+  const pathCategory = pluginCatalogSectionFromPath("bioinformatics", plugin);
+  if (pathCategory) return pathCategory;
+  const declaredCapabilities = (plugin.interface?.capabilities ?? [])
+    .map((capability) => capability.trim().toLowerCase().replace(/[-_\s]+/g, "-"))
+    .filter(Boolean);
+  const taxonomyCapability = declaredCapabilities.find((capability) =>
+    ["ngs", "genomics", "transcriptomics", "proteomics", "metabolomics"].includes(capability),
+  );
+  if (taxonomyCapability) return taxonomyCapability;
   return "other";
 }
 
@@ -921,11 +997,13 @@ function bioinformaticsCategoryLabel(category: string): string {
     case "metabolomics":
       return "Metabolomics";
     default:
-      return capabilityLabel(category);
+      return humanizeTaxonomySegment(category);
   }
 }
 
 function primaryVisualizationCategory(plugin: PluginSummary): string {
+  const pathCategory = pluginCatalogSectionFromPath("visualization", plugin);
+  if (pathCategory) return pathCategory;
   if (isRVisualizationPlugin(plugin) || pluginHasTerm(plugin, ["rscript", "ggplot", "ggplot2"])) {
     return "r";
   }
@@ -942,7 +1020,7 @@ function visualizationCategoryLabel(category: string): string {
     case "python":
       return "Python visualization";
     default:
-      return "Visualization templates";
+      return category === "template" ? "Visualization templates" : humanizeTaxonomySegment(category);
   }
 }
 
@@ -1091,7 +1169,7 @@ function selectVisualizationRQuickStarts(
 }
 
 export function visualizationRTemplatePrompt(template: VisualizationRTemplateSummary): string {
-  return `Use the visualization-r Template \`${template.id}\` (${template.name}) to generate an editable R/ggplot2 static figure from my CSV/TSV data. First confirm the required columns, then call template_execute with my data file and suitable params.`;
+  return `Use Template \`${template.id}\` (${template.name}) to generate an editable figure from my CSV/TSV data. First confirm the required columns, then call template_execute with my data file and suitable params.`;
 }
 
 export function visualizationRTemplateToolCall(template: VisualizationRTemplateSummary): string {
@@ -1213,11 +1291,12 @@ export function pluginContentOverview(
   }
 
   if (operators.length > 0) {
+    const operationCount = operatorPluginOperationCount(operators);
     items.push({
       id: "automation",
-      title: "Automation",
-      detail: previewList(operators.map(operatorDisplayName)) || "Agent-callable capabilities.",
-      meta: `${operators.length}`,
+      title: "Operator programs",
+      detail: previewList(operators.map(operatorDisplayName)) || "Plugin-declared Operator programs agents can call.",
+      meta: `${operationCount} op${operationCount === 1 ? "" : "s"}`,
     });
   }
 
@@ -1265,6 +1344,55 @@ export function pluginContentOverview(
 
 export function operatorDisplayName(operator: OperatorSummary): string {
   return operator.name?.trim() || operator.id;
+}
+
+type OperatorOperationSummary = NonNullable<OperatorSummary["operations"]>[number];
+
+function operatorOperationDisplayName(operation: OperatorOperationSummary): string {
+  return operation.name?.trim() || operation.id;
+}
+
+function operatorOperationCount(operator: OperatorSummary): number {
+  return Math.max(operator.operations?.length ?? 0, 1);
+}
+
+function operatorExposedOperationCount(operator: OperatorSummary): number {
+  const operations = operator.operations ?? [];
+  if (operations.length === 0) return operator.exposed ? 1 : 0;
+  return operations.filter((operation) => operation.exposed !== false && operator.exposed).length;
+}
+
+function operatorPluginOperationCount(operators: OperatorSummary[]): number {
+  return operators.reduce((total, operator) => total + operatorOperationCount(operator), 0);
+}
+
+function operatorPluginExposedOperationCount(operators: OperatorSummary[]): number {
+  return operators.reduce((total, operator) => total + operatorExposedOperationCount(operator), 0);
+}
+
+function operationTaxonomyLabel(operation: OperatorOperationSummary): string {
+  return (
+    operation.stage?.trim()
+    || operation.group?.trim()
+    || operation.category?.trim()
+    || "Operations"
+  );
+}
+
+function operatorOperationGroups(operator: OperatorSummary): Array<{
+  key: string;
+  label: string;
+  operations: OperatorOperationSummary[];
+}> {
+  const grouped = new Map<string, { key: string; label: string; operations: OperatorOperationSummary[] }>();
+  for (const operation of operator.operations ?? []) {
+    const label = operationTaxonomyLabel(operation);
+    const key = label.trim().toLowerCase().replace(/[^a-z0-9/-]+/g, "-") || "operations";
+    const current = grouped.get(key) ?? { key, label, operations: [] };
+    current.operations.push(operation);
+    grouped.set(key, current);
+  }
+  return Array.from(grouped.values()).sort((left, right) => left.label.localeCompare(right.label));
 }
 
 function templateDisplayName(template: PluginTemplateSummary["groups"][number]["templates"][number]): string {
@@ -1682,6 +1810,76 @@ function remoteMarketplaceCheckMessage(results: MarketplaceRemoteCheckResult[]):
   return "All remote marketplaces are up to date.";
 }
 
+function marketplaceSourceLabel(source: { label?: string | null; location: string }): string {
+  const label = source.label?.trim();
+  return label || source.location;
+}
+
+export function marketplaceSourceRefreshMessage(result: RefreshResult): string {
+  if (!result.ok) return result.message;
+  const details = [
+    result.marketplaceName?.trim() ? result.marketplaceName.trim() : null,
+    typeof result.pluginCount === "number"
+      ? `${result.pluginCount} plugin${result.pluginCount === 1 ? "" : "s"}`
+      : null,
+  ].filter(Boolean);
+  return details.length > 0
+    ? `${result.message} · ${details.join(" · ")}`
+    : result.message;
+}
+
+function pluginMigrationCount(
+  count: number,
+  singular: string,
+  plural: string,
+): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+export function pluginMigrationSummary(result: PluginMigrationResult): string {
+  return [
+    result.configRewritten ? "config rewritten" : "config unchanged",
+    pluginMigrationCount(
+      result.legacyCacheEntriesMigrated,
+      "legacy cache entry migrated",
+      "legacy cache entries migrated",
+    ),
+    pluginMigrationCount(
+      result.builtinRootsRefreshed,
+      "built-in root refreshed",
+      "built-in roots refreshed",
+    ),
+  ].join(" · ");
+}
+
+export function pluginMigrationStatusSummary(status: PluginMigrationStatus): string {
+  const details = [
+    status.configRewriteNeeded ? "config rewrite needed" : null,
+    status.legacyCacheEntriesToMigrate > 0
+      ? pluginMigrationCount(
+          status.legacyCacheEntriesToMigrate,
+          "legacy cache entry to migrate",
+          "legacy cache entries to migrate",
+        )
+      : null,
+    status.legacyCacheEntriesToRemove > 0
+      ? pluginMigrationCount(
+          status.legacyCacheEntriesToRemove,
+          "legacy cache duplicate to remove",
+          "legacy cache duplicates to remove",
+        )
+      : null,
+    status.builtinRootsToRefresh > 0
+      ? pluginMigrationCount(
+          status.builtinRootsToRefresh,
+          "built-in root to refresh",
+          "built-in roots to refresh",
+        )
+      : null,
+  ].filter(Boolean);
+  return details.length > 0 ? details.join(" · ") : "no migration needed";
+}
+
 export function remoteMarketplaceChangedPluginNames(
   results: MarketplaceRemoteCheckResult[],
 ): Set<string> {
@@ -1764,10 +1962,6 @@ export function operatorSchemaStats(operator: OperatorSummary): {
     outputs: Object.keys(operator.interface?.outputs ?? {}).length,
     resources: Object.values(operator.resources ?? {}).filter((resource) => resource.exposed !== false).length,
   };
-}
-
-function operatorCatalogKey(operator: OperatorSummary): string {
-  return `${operator.id}:${operator.version}:${operator.sourcePlugin}:${operator.manifestPath}`;
 }
 
 export function operatorRunStatusColor(
@@ -2091,34 +2285,6 @@ export function operatorRunStats(
   return stats;
 }
 
-function formatOperatorRunTimestamp(updatedAt?: string | null): string | null {
-  if (!updatedAt?.trim()) return null;
-  const date = new Date(updatedAt);
-  if (Number.isNaN(date.getTime())) return updatedAt;
-  return date.toLocaleString();
-}
-
-function formatRelativeTime(ms: number): string {
-  const diff = Date.now() - ms;
-  if (diff < 60_000) return "just now";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  return `${Math.floor(diff / 86_400_000)}d ago`;
-}
-
-function formatBytes(bytes?: number | null): string {
-  if (!Number.isFinite(bytes ?? Number.NaN) || (bytes ?? 0) <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes ?? 0;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const precision = value >= 10 || unit === 0 ? 0 : 1;
-  return `${value.toFixed(precision)} ${units[unit]}`;
-}
-
 function PluginCard({
   plugin,
   retrievalStatuses = [],
@@ -2127,7 +2293,6 @@ function PluginCard({
   busy,
   onInstall,
   onToggle,
-  onOperatorRegistrationChange,
   onOpenDetails,
 }: {
   plugin: PluginSummary;
@@ -2138,7 +2303,6 @@ function PluginCard({
   busy: boolean;
   onInstall: (plugin: PluginSummary) => void;
   onToggle: (plugin: PluginSummary, enabled: boolean) => void;
-  onOperatorRegistrationChange: (operators: OperatorSummary[], enabled: boolean) => void;
   onOpenDetails: (plugin: PluginSummary) => void;
 }) {
   const installable = plugin.installPolicy !== "NOT_AVAILABLE";
@@ -2149,12 +2313,13 @@ function PluginCard({
     (status) => status.quarantined || status.state === "degraded",
   );
   const subtitle = pluginCardSubtitle(plugin);
-  const registeredOperatorCount = operators.filter((operator) => operator.exposed).length;
-  const hasOperatorRegistrationControl = plugin.installed && operators.length > 0;
-  const operatorRegistrationChecked = registeredOperatorCount > 0;
-  const operatorRegistrationLabel = operators.length === 1
-    ? operatorRegistrationChecked ? "Registered" : "Not registered"
-    : `${registeredOperatorCount}/${operators.length} registered`;
+  const exposedOperatorCount = operatorPluginExposedOperationCount(operators);
+  const operationCount = operatorPluginOperationCount(operators);
+  const operatorExposureLabel = operators.length > 0
+    ? plugin.installed && plugin.enabled
+      ? `${exposedOperatorCount}/${operationCount} operations exposed`
+      : `${operationCount} operations available`
+    : null;
   const operatorIcon = operatorPluginIconSpec(plugin);
   const iconTone = operatorIcon?.color ?? tone;
 
@@ -2252,33 +2417,21 @@ function PluginCard({
             </Tooltip>
           )}
           {pluginResourceProfileChip(operators, true)}
+          {operatorExposureLabel && (
+            <Chip
+              size="small"
+              variant="outlined"
+              label={operatorExposureLabel}
+              sx={{ height: 22, flexShrink: 0 }}
+            />
+          )}
         </Stack>
         <Typography variant="body2" color="text.secondary" noWrap title={subtitle} sx={{ mt: 0.15 }}>
           {subtitle}
         </Typography>
       </Box>
 
-      {hasOperatorRegistrationControl ? (
-        <Stack
-          direction="row"
-          spacing={0.75}
-          alignItems="center"
-          onClick={(event) => event.stopPropagation()}
-          onKeyDown={(event) => event.stopPropagation()}
-          sx={{ flexShrink: 0 }}
-        >
-          <Typography variant="caption" color="text.secondary" fontWeight={750}>
-            {operatorRegistrationLabel}
-          </Typography>
-          <Switch
-            size="small"
-            checked={operatorRegistrationChecked}
-            disabled={busy || !plugin.enabled}
-            onChange={(event) => onOperatorRegistrationChange(operators, event.target.checked)}
-            inputProps={{ "aria-label": `${operatorRegistrationChecked ? "Unregister" : "Register"} ${displayName(plugin)} tools` }}
-          />
-        </Stack>
-      ) : plugin.installed ? (
+      {plugin.installed ? (
         <Box
           aria-label={`${displayName(plugin)} is ${plugin.enabled ? "enabled" : "disabled"}`}
           title={plugin.enabled ? "Enabled" : "Installed but disabled"}
@@ -2333,7 +2486,6 @@ function PluginCatalogGroupList({
   busyPluginIds,
   onInstall,
   onToggle,
-  onOperatorRegistrationChange,
   onOpenDetails,
 }: {
   plugins: PluginSummary[];
@@ -2345,7 +2497,6 @@ function PluginCatalogGroupList({
   busyPluginIds: Set<string>;
   onInstall: (plugin: PluginSummary) => void;
   onToggle: (plugin: PluginSummary, enabled: boolean) => void;
-  onOperatorRegistrationChange: (operators: OperatorSummary[], enabled: boolean) => void;
   onOpenDetails: (plugin: PluginSummary) => void;
 }) {
   const groups = groupPluginsByCatalogGroup(plugins);
@@ -2398,7 +2549,6 @@ function PluginCatalogGroupList({
                             busy={busy || busyPluginIds.has(plugin.id)}
                             onInstall={onInstall}
                             onToggle={onToggle}
-                            onOperatorRegistrationChange={onOperatorRegistrationChange}
                             onOpenDetails={onOpenDetails}
                           />
                         );
@@ -2671,14 +2821,12 @@ function PluginUnitControls({
   plugin,
   operators,
   busy,
-  onOperatorToggle,
   onTemplateToggle,
   onRetrievalResourceToggle,
 }: {
   plugin: PluginSummary;
   operators: OperatorSummary[];
   busy: boolean;
-  onOperatorToggle: (operator: OperatorSummary, enabled: boolean) => void;
   onTemplateToggle: (plugin: PluginSummary, templateId: string, enabled: boolean) => void;
   onRetrievalResourceToggle: (
     plugin: PluginSummary,
@@ -2695,6 +2843,8 @@ function PluginUnitControls({
     })),
   ) ?? [];
   const environmentsByRef = pluginEnvironmentByRef(plugin.environments ?? []);
+  const operationCount = operatorPluginOperationCount(operators);
+  const exposedOperationCount = plugin.enabled ? operatorPluginExposedOperationCount(operators) : 0;
   const totalUnits = operators.length + templates.length + retrievalResources.length;
   if (totalUnits === 0) return null;
 
@@ -2711,7 +2861,16 @@ function PluginUnitControls({
             color={pluginUnitKindColor("operator")}
             variant="outlined"
             sx={pluginUnitKindChipSx("operator")}
-            label={`${operators.filter((operator) => operator.exposed).length}/${operators.length} operators on`}
+            label={`${operators.filter((operator) => operator.exposed).length}/${operators.length} Operator program${operators.length === 1 ? "" : "s"}`}
+          />
+        )}
+        {operators.length > 0 && (
+          <Chip
+            size="small"
+            color={pluginUnitKindColor("operator")}
+            variant="outlined"
+            sx={pluginUnitKindChipSx("operator")}
+            label={`${exposedOperationCount}/${operationCount} operations exposed`}
           />
         )}
         {templates.length > 0 && (
@@ -2731,6 +2890,12 @@ function PluginUnitControls({
           />
         )}
       </Stack>
+      {operators.length > 0 && (
+        <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.45 }}>
+          Operator programs are exposed automatically while this plugin is enabled. Use the plugin switch to turn the whole bundle on or off; no per-tool registration is required.{" "}
+          Choose subcommands as <code>operator_execute.operation</code>; operation categories come from the plugin manifest.
+        </Typography>
+      )}
       <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: "hidden" }}>
         <Stack divider={<Box sx={{ height: 1, bgcolor: "divider" }} />}>
           {retrievalResources.map((resource) => {
@@ -2789,10 +2954,12 @@ function PluginUnitControls({
             );
           })}
           {operators.map((operator) => {
-            const checked = operator.exposed;
+            const exposed = plugin.enabled && operator.exposed;
             const alias = operatorPrimaryAlias(operator);
             const envRef = operatorEnvironmentRef(operator);
             const environment = envRef ? environmentsByRef.get(envRef) : null;
+            const operationGroups = operatorOperationGroups(operator);
+            const opCount = operatorOperationCount(operator);
             return (
               <Stack
                 key={`operator:${operator.sourcePlugin}:${operator.id}:${operator.version}`}
@@ -2826,8 +2993,9 @@ function PluginUnitControls({
                       color={pluginUnitKindColor("operator")}
                       variant="outlined"
                       sx={pluginUnitKindChipSx("operator")}
-                      label="Operator"
+                      label="Operator program"
                     />
+                    <Chip size="small" variant="outlined" label={`${opCount} operation${opCount === 1 ? "" : "s"}`} />
                     {operatorResourceProfileChip(operator)}
                     {envRef && (
                       <Chip
@@ -2837,19 +3005,45 @@ function PluginUnitControls({
                         label={`env: ${environment ? pluginEnvironmentDisplayName(environment) : envRef}`}
                       />
                     )}
-                    {checked && <Chip size="small" color="success" variant="outlined" label={operatorToolName(alias)} />}
+                    <Chip
+                      size="small"
+                      color={exposed ? "success" : "default"}
+                      variant={exposed ? "filled" : "outlined"}
+                      label={
+                        exposed
+                          ? "Exposed by plugin"
+                          : plugin.enabled
+                            ? "Not exposed"
+                            : "Plugin disabled"
+                      }
+                    />
+                    {exposed && <Chip size="small" color="success" variant="outlined" label={operatorToolName(alias)} />}
                   </Stack>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, lineHeight: 1.45 }}>
                     {operator.description?.trim() || `Atomic operator ID: ${operator.id}`}
                   </Typography>
+                  {operationGroups.length > 0 && (
+                    <Stack spacing={0.5} sx={{ mt: 0.75 }}>
+                      {operationGroups.map((group) => (
+                        <Box key={`${operator.id}:${group.key}`}>
+                          <Typography variant="caption" color="text.secondary" fontWeight={800}>
+                            {group.label}
+                          </Typography>
+                          <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.35 }}>
+                            {group.operations.map((operation) => (
+                              <Chip
+                                key={`${operator.id}:${operation.id}`}
+                                size="small"
+                                variant="outlined"
+                                label={operatorOperationDisplayName(operation)}
+                              />
+                            ))}
+                          </Stack>
+                        </Box>
+                      ))}
+                    </Stack>
+                  )}
                 </Box>
-                <Switch
-                  size="small"
-                  checked={checked}
-                  disabled={disabled}
-                  onChange={(event) => onOperatorToggle(operator, event.target.checked)}
-                  inputProps={{ "aria-label": `${checked ? "Disable" : "Enable"} ${operatorDisplayName(operator)} operator` }}
-                />
               </Stack>
             );
           })}
@@ -3119,7 +3313,6 @@ function PluginDetailsDialog({
   onSync,
   onForceSync,
   onToggle,
-  onOperatorToggle,
   onTemplateToggle,
   onRetrievalResourceToggle,
   onConfigureEnvironment,
@@ -3143,7 +3336,6 @@ function PluginDetailsDialog({
   onSync: (plugin: PluginSummary) => void;
   onForceSync: (plugin: PluginSummary) => void;
   onToggle: (plugin: PluginSummary, enabled: boolean) => void;
-  onOperatorToggle: (operator: OperatorSummary, enabled: boolean) => void;
   onTemplateToggle: (plugin: PluginSummary, templateId: string, enabled: boolean) => void;
   onRetrievalResourceToggle: (
     plugin: PluginSummary,
@@ -3214,18 +3406,6 @@ function PluginDetailsDialog({
           </span>
         </Tooltip>
       )}
-      <Stack direction="row" spacing={1} alignItems="center">
-        <Typography variant="body2" color="text.secondary">
-          Enabled
-        </Typography>
-        <Switch
-          size="small"
-          checked={plugin.enabled}
-          disabled={busy}
-          onChange={(event) => onToggle(plugin, event.target.checked)}
-          inputProps={{ "aria-label": `Enable ${displayName(plugin)}` }}
-        />
-      </Stack>
       <Tooltip title={`Uninstall ${displayName(plugin)}`} arrow>
         <span>
           <IconButton
@@ -3263,7 +3443,7 @@ function PluginDetailsDialog({
       aria-labelledby="plugin-details-title"
       sx={pluginDetailsDialogSx}
     >
-      <DialogTitle id="plugin-details-title" sx={{ px: 3, py: 2, pr: 7 }}>
+      <DialogTitle id="plugin-details-title" sx={{ px: 3, py: 2, pr: plugin.installed ? 25 : 7 }}>
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
           <Typography variant="body2" color="text.secondary">
             Plugins
@@ -3275,6 +3455,38 @@ function PluginDetailsDialog({
             {displayName(plugin)}
           </Typography>
         </Stack>
+        {plugin.installed && (
+          <Stack
+            direction="row"
+            spacing={0.75}
+            alignItems="center"
+            sx={{
+              position: "absolute",
+              right: 54,
+              top: 9,
+              minHeight: 38,
+              px: 1,
+              borderRadius: 2,
+              bgcolor: alpha(
+                plugin.enabled ? theme.palette.success.main : theme.palette.text.primary,
+                theme.palette.mode === "dark" ? 0.14 : 0.07,
+              ),
+              border: 1,
+              borderColor: plugin.enabled ? alpha(theme.palette.success.main, 0.32) : "divider",
+            }}
+          >
+            <Typography variant="caption" color={plugin.enabled ? "success.main" : "text.secondary"} fontWeight={850}>
+              {plugin.enabled ? "Enabled" : "Disabled"}
+            </Typography>
+            <Switch
+              size="small"
+              checked={plugin.enabled}
+              disabled={busy}
+              onChange={(event) => onToggle(plugin, event.target.checked)}
+              inputProps={{ "aria-label": `${plugin.enabled ? "Disable" : "Enable"} ${displayName(plugin)}` }}
+            />
+          </Stack>
+        )}
         <IconButton
           aria-label="Close plugin details"
           onClick={onClose}
@@ -3588,7 +3800,6 @@ function PluginDetailsDialog({
             plugin={plugin}
             operators={operators}
             busy={busy}
-            onOperatorToggle={onOperatorToggle}
             onTemplateToggle={onTemplateToggle}
             onRetrievalResourceToggle={onRetrievalResourceToggle}
           />
@@ -4176,1720 +4387,42 @@ function OperatorRunDetailsDialog({
   );
 }
 
-type RunStatusFilter = "all" | "succeeded" | "failed" | "running" | "smoke" | "cache";
-type RunTimeFilter = "all" | "today" | "7d" | "30d";
-
-function OperatorDetailsDialog({
-  operator,
-  runs,
-  busy,
-  onClose,
-  onOpenRun,
-  onCleanupRuns,
-  onCopy,
-}: {
-  operator: OperatorSummary | null;
-  runs: OperatorRunSummary[];
-  busy: boolean;
-  onClose: () => void;
-  onOpenRun: (run: OperatorRunSummary) => void;
-  onCleanupRuns: (operator: OperatorSummary) => void;
-  onCopy: (text: string, successMessage: string) => void;
-}) {
-  const [showAllRuns, setShowAllRuns] = useState(false);
-  const [runStatusFilter, setRunStatusFilter] = useState<RunStatusFilter>("all");
-  const [runTimeFilter, setRunTimeFilter] = useState<RunTimeFilter>("all");
-
-  if (!operator) return null;
-  const now = Date.now();
-  const title = operatorDisplayName(operator);
-  const aliases = operator.enabledAliases.filter((value) => value.trim().length > 0);
-  const smokeTests = operator.smokeTests ?? [];
-  const allOperatorRuns = operatorRunsForOperator(operator, runs);
-  const timeFilteredRuns = allOperatorRuns.filter((run) => {
-    if (runTimeFilter === "all") return true;
-    const ts = run.updatedAt ? new Date(run.updatedAt).getTime() : Number.NaN;
-    if (Number.isNaN(ts)) return false;
-    const ageDays = (now - ts) / 86_400_000;
-    if (runTimeFilter === "today") return ageDays < 1;
-    if (runTimeFilter === "7d") return ageDays < 7;
-    return ageDays < 30;
-  });
-  const operatorRuns = timeFilteredRuns.filter((run) => {
-    if (runStatusFilter === "all") return true;
-    if (runStatusFilter === "smoke") return operatorRunIsSmoke(run);
-    if (runStatusFilter === "cache") return operatorRunIsCacheHit(run);
-    if (runStatusFilter === "succeeded") return operatorRunStatusColor(run.status) === "success";
-    if (runStatusFilter === "failed") return operatorRunStatusColor(run.status) === "error";
-    return operatorRunStatusColor(run.status) === "info";
-  });
-  const RUN_PAGE_SIZE = 8;
-  const visibleRuns = showAllRuns ? operatorRuns : operatorRuns.slice(0, RUN_PAGE_SIZE);
-  const stats = operatorRunStats(operator, runs);
-  const latestRun = stats.latestRun;
-  const latestFailedRun = allOperatorRuns.find((run) => operatorRunStatusColor(run.status) === "error") ?? null;
-  return (
-    <Dialog open={Boolean(operator)} onClose={onClose} fullWidth maxWidth="md" aria-labelledby="operator-details-title">
-      <DialogTitle id="operator-details-title" sx={{ px: 3, py: 2, pr: 7 }}>
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-          <Typography variant="body2" color="text.secondary">
-            Operator
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            ›
-          </Typography>
-          <Typography variant="body2" fontWeight={850} sx={{ wordBreak: "break-all" }}>
-            {title}
-          </Typography>
-        </Stack>
-        <IconButton
-          aria-label="Close tool details"
-          onClick={onClose}
-          sx={{ position: "absolute", right: 12, top: 10 }}
-        >
-          <CloseRounded />
-        </IconButton>
-      </DialogTitle>
-      <DialogContent sx={{ px: 3, pt: 2, pb: 3 }}>
-        <Stack spacing={1.5} useFlexGap>
-          <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-            <Typography variant="subtitle1" fontWeight={850}>
-              {title}
-            </Typography>
-            <Chip size="small" variant="outlined" label={operator.id} />
-            <Chip size="small" variant="outlined" label={`v${operator.version}`} />
-            <Chip
-              size="small"
-              color={operator.exposed ? "success" : "default"}
-              variant={operator.exposed ? "filled" : "outlined"}
-              label={operator.exposed ? "Registered" : "Not registered"}
-            />
-            {operatorResourceProfileChip(operator)}
-          </Stack>
-          <Typography variant="body2" color="text.secondary">
-            {operator.description?.trim() || "Plugin-defined tool callable by agents."}
-          </Typography>
-          {operatorResourceProfileSummary(operator) && (
-            <Alert severity={operatorResourceProfileColor(operator) === "error" ? "error" : "warning"} sx={{ borderRadius: 2 }}>
-              <Typography variant="body2">
-                {operatorResourceProfileSummary(operator)}
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                Prefer SSH/server/HPC execution for production-size inputs. Local smoke fixtures remain OK.
-              </Typography>
-            </Alert>
-          )}
-          <Stack spacing={0.5}>
-            <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-              Owning plugin: {operator.sourcePlugin}
-            </Typography>
-            <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-              Manifest: {operator.manifestPath}
-            </Typography>
-          </Stack>
-
-          <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}>
-            <Stack spacing={1}>
-              <Typography variant="caption" fontWeight={850}>
-                Run status
-              </Typography>
-              <Stack direction="row" gap={0.75} flexWrap="wrap">
-                <Chip size="small" variant="outlined" label={`${stats.total} calls`} />
-                <Chip size="small" color="success" variant="outlined" label={`${stats.succeeded} succeeded`} />
-                <Chip size="small" color={stats.failed > 0 ? "error" : "default"} variant="outlined" label={`${stats.failed} failed`} />
-                <Chip size="small" variant="outlined" label={`${stats.regularTotal} regular`} />
-                <Chip
-                  size="small"
-                  color={stats.smokeFailed > 0 ? "error" : stats.smokeSucceeded > 0 ? "success" : "default"}
-                  variant="outlined"
-                  label={`${stats.smokeTotal} smoke`}
-                />
-                {stats.running > 0 && <Chip size="small" color="info" variant="outlined" label={`${stats.running} running`} />}
-                {stats.warning > 0 && <Chip size="small" color="warning" variant="outlined" label={`${stats.warning} warning`} />}
-                {stats.other > 0 && <Chip size="small" variant="outlined" label={`${stats.other} other`} />}
-                {stats.cacheHits > 0 && (
-                  <Chip size="small" color="success" variant="outlined" label={`${stats.cacheHits} cache hits`} />
-                )}
-                {stats.cacheMisses > 0 && (
-                  <Chip size="small" variant="outlined" label={`${stats.cacheMisses} cache misses`} />
-                )}
-                {latestRun && (
-                  <Chip
-                    size="small"
-                    color={operatorRunStatusColor(latestRun.status)}
-                    variant={operatorRunStatusColor(latestRun.status) === "default" ? "outlined" : "filled"}
-                    label={`latest ${latestRun.status}`}
-                  />
-                )}
-              </Stack>
-              {latestRun ? (
-                <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                  Latest: {formatOperatorRunTimestamp(latestRun.updatedAt) ?? "unknown time"} · {latestRun.runId} · {latestRun.runDir}
-                </Typography>
-              ) : (
-                <Typography variant="caption" color="text.secondary">
-                  No runs recorded for this tool on the current execution surface.
-                </Typography>
-              )}
-              {stats.latestSmokeRun && (
-                <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                  Latest smoke: {stats.latestSmokeRun.smokeTestName || stats.latestSmokeRun.smokeTestId || "smoke"} · {stats.latestSmokeRun.status} · {stats.latestSmokeRun.runId}
-                </Typography>
-              )}
-              {stats.latestRegularRun && (
-                <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                  Latest regular: {stats.latestRegularRun.status} · {stats.latestRegularRun.runId}
-                </Typography>
-              )}
-              <Button
-                size="small"
-                variant="outlined"
-                color="warning"
-                startIcon={<DeleteOutlineRounded />}
-                disabled={busy || operatorRuns.length === 0}
-                onClick={() => onCleanupRuns(operator)}
-                sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-              >
-                Clean this operator's old/cache runs
-              </Button>
-            </Stack>
-          </Paper>
-
-          {latestFailedRun && (
-            <Alert severity="error" sx={{ borderRadius: 2 }}>
-              <Stack spacing={0.75}>
-                <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-                  <Typography variant="body2" fontWeight={850}>
-                    Latest failure
-                  </Typography>
-                  <Chip size="small" variant="outlined" label={latestFailedRun.runId} />
-                  {latestFailedRun.errorKind && (
-                    <Chip size="small" variant="outlined" label={latestFailedRun.errorKind} />
-                  )}
-                  {latestFailedRun.retryable != null && (
-                    <Chip
-                      size="small"
-                      color={latestFailedRun.retryable ? "warning" : "default"}
-                      variant="outlined"
-                      label={latestFailedRun.retryable ? "retryable" : "not retryable"}
-                    />
-                  )}
-                </Stack>
-                {latestFailedRun.errorMessage && (
-                  <Typography variant="caption" sx={{ wordBreak: "break-word" }}>
-                    {latestFailedRun.errorMessage}
-                  </Typography>
-                )}
-                {latestFailedRun.suggestedAction && (
-                  <Typography variant="caption" sx={{ wordBreak: "break-word" }}>
-                    Suggested action: {latestFailedRun.suggestedAction}
-                  </Typography>
-                )}
-                {latestFailedRun.stderrTail && (
-                  <Box
-                    component="pre"
-                    sx={{
-                      m: 0,
-                      p: 0.75,
-                      maxHeight: 120,
-                      overflow: "auto",
-                      borderRadius: 1,
-                      bgcolor: "background.paper",
-                      fontSize: 12,
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-word",
-                    }}
-                  >
-                    {latestFailedRun.stderrTail}
-                  </Box>
-                )}
-                <Stack direction="row" gap={0.75} flexWrap="wrap">
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    startIcon={<ContentCopyRounded />}
-                    onClick={() => onCopy(operatorRunDiagnosticsPayload(latestFailedRun, operator), `Copied ${latestFailedRun.runId} diagnostics`)}
-                    sx={{ textTransform: "none", borderRadius: 1.5 }}
-                  >
-                    Copy diagnosis
-                  </Button>
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    startIcon={<TroubleshootRounded />}
-                    onClick={() => {
-                      onClose();
-                      onOpenRun(latestFailedRun);
-                    }}
-                    sx={{ textTransform: "none", borderRadius: 1.5 }}
-                  >
-                    Open failed run
-                  </Button>
-                </Stack>
-              </Stack>
-            </Alert>
-          )}
-
-          <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}>
-            <Stack spacing={1}>
-              <Typography variant="caption" fontWeight={850}>
-                Tool aliases and smoke tests
-              </Typography>
-              <Stack direction="row" gap={0.75} flexWrap="wrap">
-                {(aliases.length > 0 ? aliases : [operatorPrimaryAlias(operator)]).map((alias) => (
-                  <Chip key={alias} size="small" variant="outlined" label={operatorToolName(alias)} />
-                ))}
-                <Chip size="small" variant="outlined" label={`${smokeTests.length} smoke ${smokeTests.length === 1 ? "test" : "tests"}`} />
-              </Stack>
-              {smokeTests.length > 0 && (
-                <Stack spacing={0.75}>
-                  {smokeTests.map((smokeTest) => (
-                    <Box key={smokeTest.id}>
-                      <Typography variant="caption" fontWeight={800} sx={{ display: "block" }}>
-                        {smokeTest.name?.trim() || smokeTest.id}
-                      </Typography>
-                      {smokeTest.description?.trim() && (
-                        <Typography variant="caption" color="text.secondary" sx={{ display: "block", wordBreak: "break-word" }}>
-                          {smokeTest.description}
-                        </Typography>
-                      )}
-                    </Box>
-                  ))}
-                </Stack>
-              )}
-            </Stack>
-          </Paper>
-
-          <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}>
-            <Stack spacing={1}>
-              <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-                <Typography variant="caption" fontWeight={850}>
-                  Recent tool runs
-                </Typography>
-                {allOperatorRuns.length > 0 && (
-                  <Chip size="small" variant="outlined" label={`${allOperatorRuns.length} total`} />
-                )}
-              </Stack>
-              {allOperatorRuns.length > 0 && (
-                <Stack direction="row" gap={0.5} flexWrap="wrap">
-                  {(["all", "succeeded", "failed", "running", "smoke", "cache"] as RunStatusFilter[]).map((f) => (
-                    <Chip
-                      key={f}
-                      size="small"
-                      variant={runStatusFilter === f ? "filled" : "outlined"}
-                      color={
-                        f === "succeeded" ? "success" :
-                        f === "failed" ? "error" :
-                        f === "running" ? "info" :
-                        f === "cache" ? "secondary" :
-                        "default"
-                      }
-                      label={f === "all" ? `All (${allOperatorRuns.length})` : f}
-                      onClick={() => { setRunStatusFilter(f); setShowAllRuns(false); }}
-                      sx={{ cursor: "pointer", textTransform: "capitalize" }}
-                    />
-                  ))}
-                </Stack>
-              )}
-              {allOperatorRuns.length > 0 && (
-                <Stack direction="row" gap={0.5} flexWrap="wrap">
-                  {(["all", "today", "7d", "30d"] as RunTimeFilter[]).map((f) => {
-                    const count = allOperatorRuns.filter((run) => {
-                      if (f === "all") return true;
-                      const ts = run.updatedAt ? new Date(run.updatedAt).getTime() : Number.NaN;
-                      if (Number.isNaN(ts)) return false;
-                      const ageDays = (now - ts) / 86_400_000;
-                      return f === "today" ? ageDays < 1 : f === "7d" ? ageDays < 7 : ageDays < 30;
-                    }).length;
-                    const label = f === "all" ? `All (${count})` : f === "today" ? `Today (${count})` : `${f} (${count})`;
-                    return (
-                      <Chip
-                        key={f}
-                        size="small"
-                        variant={runTimeFilter === f ? "filled" : "outlined"}
-                        label={label}
-                        onClick={() => { setRunTimeFilter(f); setShowAllRuns(false); }}
-                        sx={{ cursor: "pointer" }}
-                      />
-                    );
-                  })}
-                </Stack>
-              )}
-              {operatorRuns.length === 0 ? (
-                <Typography variant="caption" color="text.secondary">
-                  {runStatusFilter === "all" && runTimeFilter === "all" ? "No matching runs yet." : "No runs match the current filters."}
-                </Typography>
-              ) : (
-                <Stack spacing={0.75}>
-                  {visibleRuns.map((run) => (
-                    <Box key={run.runId} sx={{ p: 1, borderRadius: 1.5, border: 1, borderColor: "divider" }}>
-                      <Stack spacing={0.5}>
-                        <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-                          <Typography variant="body2" fontWeight={850} sx={{ wordBreak: "break-all" }}>
-                            {run.runId}
-                          </Typography>
-                          <Chip
-                            size="small"
-                            color={operatorRunStatusColor(run.status)}
-                            variant={operatorRunStatusColor(run.status) === "default" ? "outlined" : "filled"}
-                            label={run.status}
-                          />
-                          <Chip size="small" variant="outlined" label={run.location} />
-                          {operatorRunIsSmoke(run) && (
-                            <Chip
-                              size="small"
-                              color="info"
-                              variant="outlined"
-                              label={run.smokeTestName || run.smokeTestId || "smoke"}
-                            />
-                          )}
-                          {run.outputCount > 0 && (
-                            <Chip size="small" color="success" variant="outlined" label={`${run.outputCount} output${run.outputCount === 1 ? "" : "s"}`} />
-                          )}
-                          {(run.structuredOutputCount ?? 0) > 0 && (
-                            <Chip size="small" color="info" variant="outlined" label={`${run.structuredOutputCount} structured`} />
-                          )}
-                          {operatorRunIsCacheHit(run) && (
-                            <Chip size="small" color="success" variant="outlined" label="cache hit" />
-                          )}
-                        </Stack>
-                        {run.errorMessage && (
-                          <Typography variant="caption" color="error.main" sx={{ wordBreak: "break-word" }}>
-                            {run.errorMessage}
-                          </Typography>
-                        )}
-                        {run.suggestedAction && operatorRunStatusColor(run.status) === "error" && (
-                          <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-word" }}>
-                            Suggested action: {run.suggestedAction}
-                          </Typography>
-                        )}
-                        {run.stderrTail && operatorRunStatusColor(run.status) === "error" && (
-                          <Box
-                            component="pre"
-                            sx={{
-                              m: 0,
-                              p: 0.75,
-                              maxHeight: 90,
-                              overflow: "auto",
-                              borderRadius: 1,
-                              bgcolor: "action.hover",
-                              fontSize: 12,
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                            }}
-                          >
-                            {run.stderrTail}
-                          </Box>
-                        )}
-                        <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                          {(formatOperatorRunTimestamp(run.updatedAt) ?? "unknown time")} · {run.runDir}
-                        </Typography>
-                        {operatorRunIsCacheHit(run) && (
-                          <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                            Reused source run {run.cacheSourceRunId || "unknown"}{run.cacheSourceRunDir ? ` · ${run.cacheSourceRunDir}` : ""}
-                          </Typography>
-                        )}
-                        <Stack direction="row" gap={0.75} flexWrap="wrap">
-                          <Button
-                            size="small"
-                            variant="text"
-                            startIcon={<TroubleshootRounded />}
-                            onClick={() => {
-                              onClose();
-                              onOpenRun(run);
-                            }}
-                            sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-                          >
-                            View run detail
-                          </Button>
-                          {run.exportDir && (
-                            <Button
-                              size="small"
-                              variant="text"
-                              startIcon={<DescriptionOutlined />}
-                              onClick={() => void revealItemInDir(run.exportDir!)}
-                              sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-                            >
-                              Open outputs
-                            </Button>
-                          )}
-                          {operatorRunStatusColor(run.status) === "error" && (
-                            <Button
-                              size="small"
-                              variant="text"
-                              startIcon={<ContentCopyRounded />}
-                              onClick={() => onCopy(operatorRunDiagnosticsPayload(run, operator), `Copied ${run.runId} diagnostics`)}
-                              sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-                            >
-                              Copy diagnosis
-                            </Button>
-                          )}
-                        </Stack>
-                      </Stack>
-                    </Box>
-                  ))}
-                  {operatorRuns.length > RUN_PAGE_SIZE && (
-                    <Button
-                      size="small"
-                      variant="text"
-                      onClick={() => setShowAllRuns((prev) => !prev)}
-                      sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-                    >
-                      {showAllRuns ? "Show less" : `Show all ${operatorRuns.length} runs`}
-                    </Button>
-                  )}
-                </Stack>
-              )}
-            </Stack>
-          </Paper>
-        </Stack>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-const OPERATOR_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
-
-type UserOperatorInputDeclarationKind = "file" | "file_array" | "directory" | "string";
-type UserOperatorParamDeclarationKind = "string" | "integer" | "number" | "boolean";
-
-interface UserOperatorInputDeclarationRow {
-  name: string;
-  kind: UserOperatorInputDeclarationKind;
-  required: boolean;
-}
-
-interface UserOperatorParamDeclarationRow {
-  name: string;
-  kind: UserOperatorParamDeclarationKind;
-  default: string;
-}
-
-interface UserOperatorOutputDeclarationRow {
-  name: string;
-  glob: string;
-}
-
-function CreateUserOperatorDialog({
-  open,
-  onClose,
-  onCreated,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [id, setId] = useState("");
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [command, setCommand] = useState("");
-  const [inputDeclarations, setInputDeclarations] = useState<UserOperatorInputDeclarationRow[]>([]);
-  const [paramDeclarations, setParamDeclarations] = useState<UserOperatorParamDeclarationRow[]>([]);
-  const [outputDeclarations, setOutputDeclarations] = useState<UserOperatorOutputDeclarationRow[]>([]);
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-
-  const inputKindOptions: UserOperatorInputDeclarationKind[] = ["file", "file_array", "directory", "string"];
-  const paramKindOptions: UserOperatorParamDeclarationKind[] = ["string", "integer", "number", "boolean"];
-
-  const idError = id.length > 0 && !OPERATOR_ID_PATTERN.test(id)
-    ? "Must start with a letter and contain only letters, digits, hyphens, and underscores (max 64 chars)"
-    : null;
-  const argv = command.trim().split(/\s+/).filter(Boolean);
-  const canSubmit = OPERATOR_ID_PATTERN.test(id) && name.trim().length > 0 && argv.length > 0;
-  const generatedYaml = useMemo(() => {
-    const yamlScalar = (value: string) => {
-      const trimmedValue = value.trim();
-      if (!trimmedValue) return "\"\"";
-      if (/^[A-Za-z0-9_./-]+$/.test(trimmedValue)) return trimmedValue;
-      return JSON.stringify(trimmedValue);
-    };
-    const yamlKey = (value: string) => {
-      const trimmedValue = value.trim();
-      if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(trimmedValue)) return trimmedValue;
-      return JSON.stringify(trimmedValue);
-    };
-
-    const declaredInputs = inputDeclarations.filter((row) => row.name.trim().length > 0);
-    const declaredParams = paramDeclarations.filter((row) => row.name.trim().length > 0);
-    const declaredOutputs = outputDeclarations.filter((row) => row.name.trim().length > 0);
-    const lines = [
-      "apiVersion: omiga.ai/operator/v1alpha1",
-      "kind: Operator",
-      "metadata:",
-      `  id: ${yamlScalar(id)}`,
-      "  version: 0.1.0",
-      `  name: ${yamlScalar(name)}`,
-      `  description: ${yamlScalar(description)}`,
-      "interface:",
-    ];
-
-    if (declaredInputs.length > 0) {
-      lines.push("  inputs:");
-      declaredInputs.forEach((row) => {
-        lines.push(
-          `    ${yamlKey(row.name)}:`,
-          `      kind: ${row.kind}`,
-          `      required: ${row.required ? "true" : "false"}`,
-        );
-      });
-    }
-
-    if (declaredParams.length > 0) {
-      lines.push("  params:");
-      declaredParams.forEach((row) => {
-        lines.push(
-          `    ${yamlKey(row.name)}:`,
-          `      kind: ${row.kind}`,
-        );
-        if (row.default.trim().length > 0) {
-          lines.push(`      default: ${yamlScalar(row.default)}`);
-        }
-      });
-    }
-
-    if (declaredOutputs.length > 0) {
-      lines.push("  outputs:");
-      declaredOutputs.forEach((row) => {
-        lines.push(
-          `    ${yamlKey(row.name)}:`,
-          "      kind: file",
-          `      glob: ${yamlScalar(row.glob)}`,
-        );
-      });
-    }
-
-    lines.push(
-      "execution:",
-      "  argv:",
-      "    - /bin/sh",
-      "    - -c",
-      `    - ${yamlScalar(command)}`,
-    );
-
-    return lines.join("\n");
-  }, [command, description, id, inputDeclarations, name, outputDeclarations, paramDeclarations]);
-
-  function updateInputDeclaration(index: number, patch: Partial<UserOperatorInputDeclarationRow>) {
-    setInputDeclarations((rows) => rows.map((row, rowIndex) => (
-      rowIndex === index ? { ...row, ...patch } : row
-    )));
-  }
-
-  function updateParamDeclaration(index: number, patch: Partial<UserOperatorParamDeclarationRow>) {
-    setParamDeclarations((rows) => rows.map((row, rowIndex) => (
-      rowIndex === index ? { ...row, ...patch } : row
-    )));
-  }
-
-  function updateOutputDeclaration(index: number, patch: Partial<UserOperatorOutputDeclarationRow>) {
-    setOutputDeclarations((rows) => rows.map((row, rowIndex) => (
-      rowIndex === index ? { ...row, ...patch } : row
-    )));
-  }
-
-  function handleClose() {
-    if (submitting) return;
-    setId("");
-    setName("");
-    setDescription("");
-    setCommand("");
-    setInputDeclarations([]);
-    setParamDeclarations([]);
-    setOutputDeclarations([]);
-    setSubmitError(null);
-    onClose();
-  }
-
-  async function handleSubmit() {
-    if (!canSubmit) return;
-    setSubmitting(true);
-    setSubmitError(null);
-    try {
-      await invoke("save_user_script_operator", {
-        id: id.trim(),
-        name: name.trim(),
-        description: description.trim(),
-        argv,
-        inputs: inputDeclarations
-          .filter((r) => r.name.trim().length > 0)
-          .map((r) => ({ name: r.name.trim(), kind: r.kind, required: r.required })),
-        params: paramDeclarations
-          .filter((r) => r.name.trim().length > 0)
-          .map((r) => ({ name: r.name.trim(), kind: r.kind, default: r.default })),
-        outputs: outputDeclarations
-          .filter((r) => r.name.trim().length > 0)
-          .map((r) => ({ name: r.name.trim(), glob: r.glob.trim() })),
-      });
-      setId("");
-      setName("");
-      setDescription("");
-      setCommand("");
-      setInputDeclarations([]);
-      setParamDeclarations([]);
-      setOutputDeclarations([]);
-      onCreated();
-      onClose();
-    } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm" aria-labelledby="create-user-operator-title">
-      <DialogTitle id="create-user-operator-title" sx={{ px: 3, py: 2, pr: 7 }}>
-        New Script Operator
-        <IconButton
-          aria-label="Close dialog"
-          onClick={handleClose}
-          disabled={submitting}
-          sx={{ position: "absolute", right: 12, top: 10 }}
-        >
-          <CloseRounded />
-        </IconButton>
-      </DialogTitle>
-      <DialogContent sx={{ px: 3, pt: 1, pb: 1 }}>
-        <Stack spacing={2} sx={{ pt: 1 }}>
-          {submitError && (
-            <Alert severity="error" sx={{ borderRadius: 2 }}>
-              {submitError}
-            </Alert>
-          )}
-          <TextField
-            label="ID"
-            value={id}
-            onChange={(e) => setId(e.target.value)}
-            required
-            fullWidth
-            size="small"
-            helperText={idError ?? "e.g. my_script"}
-            error={Boolean(idError)}
-            disabled={submitting}
-          />
-          <TextField
-            label="Name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-            fullWidth
-            size="small"
-            helperText="Human-readable display name"
-            disabled={submitting}
-          />
-          <TextField
-            label="Description"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            fullWidth
-            size="small"
-            multiline
-            minRows={2}
-            helperText="Optional"
-            disabled={submitting}
-          />
-          <TextField
-            label="Command"
-            value={command}
-            onChange={(e) => setCommand(e.target.value)}
-            required
-            fullWidth
-            size="small"
-            helperText={`Shell command to run, e.g. bash -c "echo hello"`}
-            disabled={submitting}
-          />
-          <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
-            <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
-              <Typography variant="subtitle2" fontWeight={700}>Inputs</Typography>
-            </AccordionSummary>
-            <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
-              <Stack spacing={1.25}>
-                {inputDeclarations.map((row, index) => (
-                  <Stack
-                    key={index}
-                    direction={{ xs: "column", sm: "row" }}
-                    spacing={1}
-                    alignItems={{ xs: "stretch", sm: "center" }}
-                  >
-                    <TextField
-                      label="Name"
-                      value={row.name}
-                      onChange={(e) => updateInputDeclaration(index, { name: e.target.value })}
-                      size="small"
-                      disabled={submitting}
-                      sx={{ flex: 1 }}
-                    />
-                    <TextField
-                      select
-                      label="Kind"
-                      value={row.kind}
-                      onChange={(e) => updateInputDeclaration(index, { kind: e.target.value as UserOperatorInputDeclarationKind })}
-                      size="small"
-                      disabled={submitting}
-                      sx={{ minWidth: { xs: "100%", sm: 150 } }}
-                    >
-                      {inputKindOptions.map((kind) => (
-                        <MenuItem key={kind} value={kind}>
-                          {kind}
-                        </MenuItem>
-                      ))}
-                    </TextField>
-                    <Stack direction="row" spacing={0.5} alignItems="center" sx={{ minWidth: 112 }}>
-                      <Checkbox
-                        checked={row.required}
-                        onChange={(e) => updateInputDeclaration(index, { required: e.target.checked })}
-                        disabled={submitting}
-                        size="small"
-                        inputProps={{ "aria-label": `Input ${row.name || index + 1} required` }}
-                      />
-                      <Typography variant="body2">Required</Typography>
-                    </Stack>
-                    <IconButton
-                      aria-label="Remove input"
-                      onClick={() => setInputDeclarations((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}
-                      disabled={submitting}
-                      size="small"
-                      sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
-                    >
-                      <DeleteOutlineRounded fontSize="small" />
-                    </IconButton>
-                  </Stack>
-                ))}
-                <Button
-                  variant="text"
-                  size="small"
-                  startIcon={<AddRounded />}
-                  onClick={() => setInputDeclarations((rows) => [...rows, { name: "", kind: "file", required: true }])}
-                  disabled={submitting}
-                  sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-                >
-                  Add input
-                </Button>
-              </Stack>
-            </AccordionDetails>
-          </Accordion>
-          <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
-            <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
-              <Typography variant="subtitle2" fontWeight={700}>Parameters</Typography>
-            </AccordionSummary>
-            <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
-              <Stack spacing={1.25}>
-                {paramDeclarations.map((row, index) => (
-                  <Stack
-                    key={index}
-                    direction={{ xs: "column", sm: "row" }}
-                    spacing={1}
-                    alignItems={{ xs: "stretch", sm: "center" }}
-                  >
-                    <TextField
-                      label="Name"
-                      value={row.name}
-                      onChange={(e) => updateParamDeclaration(index, { name: e.target.value })}
-                      size="small"
-                      disabled={submitting}
-                      sx={{ flex: 1 }}
-                    />
-                    <TextField
-                      select
-                      label="Kind"
-                      value={row.kind}
-                      onChange={(e) => updateParamDeclaration(index, { kind: e.target.value as UserOperatorParamDeclarationKind })}
-                      size="small"
-                      disabled={submitting}
-                      sx={{ minWidth: { xs: "100%", sm: 150 } }}
-                    >
-                      {paramKindOptions.map((kind) => (
-                        <MenuItem key={kind} value={kind}>
-                          {kind}
-                        </MenuItem>
-                      ))}
-                    </TextField>
-                    <TextField
-                      label="Default"
-                      value={row.default}
-                      onChange={(e) => updateParamDeclaration(index, { default: e.target.value })}
-                      size="small"
-                      disabled={submitting}
-                      sx={{ flex: 1 }}
-                    />
-                    <IconButton
-                      aria-label="Remove parameter"
-                      onClick={() => setParamDeclarations((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}
-                      disabled={submitting}
-                      size="small"
-                      sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
-                    >
-                      <DeleteOutlineRounded fontSize="small" />
-                    </IconButton>
-                  </Stack>
-                ))}
-                <Button
-                  variant="text"
-                  size="small"
-                  startIcon={<AddRounded />}
-                  onClick={() => setParamDeclarations((rows) => [...rows, { name: "", kind: "string", default: "" }])}
-                  disabled={submitting}
-                  sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-                >
-                  Add parameter
-                </Button>
-              </Stack>
-            </AccordionDetails>
-          </Accordion>
-          <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
-            <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
-              <Typography variant="subtitle2" fontWeight={700}>Outputs</Typography>
-            </AccordionSummary>
-            <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
-              <Stack spacing={1.25}>
-                {outputDeclarations.map((row, index) => (
-                  <Stack
-                    key={index}
-                    direction={{ xs: "column", sm: "row" }}
-                    spacing={1}
-                    alignItems={{ xs: "stretch", sm: "center" }}
-                  >
-                    <TextField
-                      label="Name"
-                      value={row.name}
-                      onChange={(e) => updateOutputDeclaration(index, { name: e.target.value })}
-                      size="small"
-                      disabled={submitting}
-                      sx={{ flex: 1 }}
-                    />
-                    <TextField
-                      label="Glob"
-                      value={row.glob}
-                      onChange={(e) => updateOutputDeclaration(index, { glob: e.target.value })}
-                      size="small"
-                      placeholder="output.txt"
-                      disabled={submitting}
-                      sx={{ flex: 1 }}
-                    />
-                    <IconButton
-                      aria-label="Remove output"
-                      onClick={() => setOutputDeclarations((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}
-                      disabled={submitting}
-                      size="small"
-                      sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
-                    >
-                      <DeleteOutlineRounded fontSize="small" />
-                    </IconButton>
-                  </Stack>
-                ))}
-                <Button
-                  variant="text"
-                  size="small"
-                  startIcon={<AddRounded />}
-                  onClick={() => setOutputDeclarations((rows) => [...rows, { name: "", glob: "" }])}
-                  disabled={submitting}
-                  sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
-                >
-                  Add output
-                </Button>
-              </Stack>
-            </AccordionDetails>
-          </Accordion>
-          <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
-            <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
-              <Typography variant="caption" color="text.secondary">Generated YAML</Typography>
-            </AccordionSummary>
-            <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
-              <Box
-                component="pre"
-                sx={{
-                  m: 0,
-                  p: 1.5,
-                  maxHeight: 200,
-                  overflow: "auto",
-                  borderRadius: 1.5,
-                  bgcolor: "background.paper",
-                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace",
-                  fontSize: "0.75rem",
-                  lineHeight: 1.6,
-                }}
-              >
-                {generatedYaml}
-              </Box>
-            </AccordionDetails>
-          </Accordion>
-        </Stack>
-      </DialogContent>
-      <DialogActions sx={{ px: 3, py: 2 }}>
-        <Button onClick={handleClose} disabled={submitting} sx={{ textTransform: "none", borderRadius: 1.5 }}>
-          Cancel
-        </Button>
-        <Button
-          variant="contained"
-          onClick={() => void handleSubmit()}
-          disabled={!canSubmit || submitting}
-          sx={{ textTransform: "none", borderRadius: 1.5 }}
-        >
-          {submitting ? <CircularProgress size={18} color="inherit" /> : "Create"}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
-
-function OperatorCatalogSection({
-  operators,
-  diagnostics,
-  runs,
-  registryPath,
-  projectPath,
-  executionEnvironment,
-  sshServer,
-  sandboxBackend,
-  favoriteOperators,
-  busy,
-  environments,
-  activeTasks,
-  activeTaskStatus,
-  onToggle,
-  onToggleFavorite,
-  onSmokeRun,
-  onRunChain,
-  onBackgroundRun,
-  onCancelTask,
-  onRefreshRuns,
-  onCleanupRuns,
-  onOpenRun,
-  onCopy,
-  onCreateUserOperator,
-}: {
-  operators: OperatorSummary[];
-  diagnostics: OperatorManifestDiagnostic[];
-  runs: OperatorRunSummary[];
-  registryPath: string | null;
-  projectPath?: string;
-  executionEnvironment?: string;
-  sshServer?: string;
-  sandboxBackend?: string;
-  favoriteOperators: string[];
-  busy: boolean;
-  environments?: PluginEnvironmentSummary[];
-  /** Map of operator alias → active background task id. */
-  activeTasks?: Record<string, string>;
-  /** Map of operator alias → latest scheduler status. */
-  activeTaskStatus?: Record<string, OperatorTaskQueueStatus>;
-  onToggle: (operator: OperatorSummary, enabled: boolean) => void;
-  onToggleFavorite: (alias: string, pinned: boolean) => void;
-  onSmokeRun: (operator: OperatorSummary, smokeTestId?: string | null, bypassCache?: boolean) => void;
-  onRunChain: (steps: OperatorChainStep[]) => Promise<OperatorChainResult>;
-  onBackgroundRun?: (
-    operator: OperatorSummary,
-    smokeTestId?: string | null,
-    bypassCache?: boolean,
-  ) => void;
-  onCancelTask?: (taskId: string) => void;
-  onRefreshRuns: () => void;
-  onCleanupRuns: (operator?: OperatorSummary) => void;
-  onOpenRun: (run: OperatorRunSummary) => void;
-  onCopy: (text: string, successMessage: string) => void;
-  onCreateUserOperator: () => void;
-}) {
-  const theme = useTheme();
-  const [selectedSmokeTests, setSelectedSmokeTests] = useState<Record<string, string>>({});
-  const [detailOperator, setDetailOperator] = useState<OperatorSummary | null>(null);
-  const [createDialogOpen, setCreateDialogOpen] = useState(false);
-  const [chainDialogOpen, setChainDialogOpen] = useState(false);
-  const [bypassCacheOperators, setBypassCacheOperators] = useState<Record<string, boolean>>({});
-  const [favoritesOnly, setFavoritesOnly] = useState(false);
-  const favoriteOperatorSet = useMemo(
-    () => new Set(favoriteOperators.map((alias) => alias.trim()).filter(Boolean)),
-    [favoriteOperators],
-  );
-  const sortedOperators = useMemo(
-    () => [...operators].sort((left, right) => {
-      const leftFavorite = favoriteOperatorSet.has(operatorPrimaryAlias(left));
-      const rightFavorite = favoriteOperatorSet.has(operatorPrimaryAlias(right));
-      return (
-        Number(rightFavorite) - Number(leftFavorite)
-        || operatorDisplayName(left).localeCompare(operatorDisplayName(right))
-        || left.id.localeCompare(right.id)
-        || left.sourcePlugin.localeCompare(right.sourcePlugin)
-        || left.version.localeCompare(right.version)
-      );
-    }),
-    [favoriteOperatorSet, operators],
-  );
-  const visibleOperators = favoritesOnly
-    ? sortedOperators.filter((operator) => favoriteOperatorSet.has(operatorPrimaryAlias(operator)))
-    : sortedOperators;
-  const favoriteOperatorCount = operators.filter((operator) =>
-    favoriteOperatorSet.has(operatorPrimaryAlias(operator)),
-  ).length;
-  const exposedCount = operators.filter((operator) => operator.exposed).length;
-  const unavailableCount = operators.filter((operator) => operator.unavailableReason).length;
-  const failedRunCount = runs.filter((run) => operatorRunStatusColor(run.status) === "error").length;
-  const succeededRunCount = runs.filter((run) => operatorRunStatusColor(run.status) === "success").length;
-  const latestRunTime = runs.reduce<number>((max, run) => {
-    const ts = run.updatedAt ? new Date(run.updatedAt).getTime() : 0;
-    return ts > max ? ts : max;
-  }, 0);
-  const cacheHitCount = runs.filter(operatorRunIsCacheHit).length;
-  const diagnosticIssueCount = diagnostics.filter((diagnostic) => diagnostic.severity !== "info").length;
-  const chainEditorExecutionContextProps = {
-    projectPath,
-    executionEnvironment: executionEnvironment ?? undefined,
-    sshServer: sshServer ?? undefined,
-    sandboxBackend: sandboxBackend ?? undefined,
-  };
-
-  return (
-    <>
-      <OperatorDetailsDialog
-        operator={detailOperator}
-        runs={runs}
-        busy={busy}
-        onClose={() => setDetailOperator(null)}
-        onOpenRun={onOpenRun}
-        onCleanupRuns={onCleanupRuns}
-        onCopy={onCopy}
-      />
-      <CreateUserOperatorDialog
-        open={createDialogOpen}
-        onClose={() => setCreateDialogOpen(false)}
-        onCreated={onCreateUserOperator}
-      />
-      <OperatorChainEditorDialog
-        open={chainDialogOpen}
-        operators={operators}
-        {...chainEditorExecutionContextProps}
-        onClose={() => setChainDialogOpen(false)}
-        onRun={async (steps) => {
-          await onRunChain(steps);
-        }}
-      />
-      <Accordion disableGutters elevation={0} sx={accordionSx}>
-      <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={accordionSummarySx}>
-        <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ width: "100%" }}>
-          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-            <Typography variant="subtitle2" fontWeight={700}>Agent tools</Typography>
-            <Chip size="small" variant="outlined" label={`${exposedCount} registered`} />
-            <Chip size="small" variant="outlined" label={`${operators.length} available`} />
-            {favoriteOperatorCount > 0 && (
-              <Chip size="small" color="warning" variant="outlined" label={`${favoriteOperatorCount} pinned`} />
-            )}
-            {diagnosticIssueCount > 0 && (
-              <Chip size="small" color="warning" variant="filled" label={`${diagnosticIssueCount} manifest issues`} />
-            )}
-            {runs.length > 0 && (
-              <Chip size="small" variant="outlined" label={`${runs.length} runs`} />
-            )}
-            {succeededRunCount > 0 && (
-              <Chip size="small" color="success" variant="outlined" label={`${succeededRunCount} succeeded`} />
-            )}
-            {latestRunTime > 0 && (
-              <Chip size="small" variant="outlined" label={`last: ${formatRelativeTime(latestRunTime)}`} />
-            )}
-            {cacheHitCount > 0 && (
-              <Chip size="small" color="success" variant="outlined" label={`${cacheHitCount} cache hits`} />
-            )}
-            {unavailableCount > 0 && (
-              <Chip size="small" color="warning" variant="filled" label={`${unavailableCount} unavailable`} />
-            )}
-            {failedRunCount > 0 && (
-              <Chip size="small" color="error" variant="filled" label={`${failedRunCount} failed runs`} />
-            )}
-          </Stack>
-        </Stack>
-      </AccordionSummary>
-      <AccordionDetails sx={{ px: 2, pt: 0.75, pb: 2 }}>
-        <Stack spacing={1.25} useFlexGap>
-          <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1}>
-            <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
-              Advanced controls for plugin-defined tools agents can call directly after registration. Runtime follows the current session environment; the registry stays local.
-            </Typography>
-            {/* Keep actions out of AccordionSummary so its button only expands the operator list. */}
-            <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
-              <Chip
-                size="small"
-                clickable
-                color={favoritesOnly ? "primary" : "default"}
-                variant={favoritesOnly ? "filled" : "outlined"}
-                icon={favoritesOnly ? <StarRounded /> : <StarBorderRounded />}
-                label="Favorites only"
-                onClick={() => setFavoritesOnly((value) => !value)}
-              />
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<AccountTreeRounded />}
-                disabled={busy}
-                onClick={() => setChainDialogOpen(true)}
-                sx={{ textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap", flexShrink: 0 }}
-              >
-                Open chain editor
-              </Button>
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<AddRounded />}
-                onClick={() => setCreateDialogOpen(true)}
-                sx={{ textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap", flexShrink: 0 }}
-              >
-                New Script Operator
-              </Button>
-            </Stack>
-          </Stack>
-          {registryPath && (
-            <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-              Registry: {registryPath}
-            </Typography>
-          )}
-          {diagnosticIssueCount > 0 && (
-            <Alert severity="warning" sx={{ borderRadius: 2 }}>
-              <Stack spacing={0.75}>
-                <Typography variant="body2" fontWeight={800}>
-                  Some tool manifests failed static validation.
-                </Typography>
-                {diagnostics.slice(0, 4).map((diagnostic) => (
-                  <Box key={`${diagnostic.sourcePlugin}:${diagnostic.manifestPath}:${diagnostic.message}`}>
-                    <Typography variant="caption" sx={{ display: "block", wordBreak: "break-all" }}>
-                      {diagnostic.sourcePlugin} · {diagnostic.manifestPath}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", wordBreak: "break-word" }}>
-                      {diagnostic.message}
-                    </Typography>
-                  </Box>
-                ))}
-                {diagnostics.length > 4 && (
-                  <Typography variant="caption" color="text.secondary">
-                    Showing first 4 issues.
-                  </Typography>
-                )}
-              </Stack>
-            </Alert>
-          )}
-          {runs.length > 0 && (
-            <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
-              <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
-                <Stack
-                  direction={{ xs: "column", sm: "row" }}
-                  spacing={1}
-                  alignItems={{ xs: "stretch", sm: "center" }}
-                  justifyContent="space-between"
-                  sx={{ width: "100%" }}
-                >
-                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                    <Typography variant="subtitle2" fontWeight={850}>
-                      Recent Runs
-                    </Typography>
-                    <Chip size="small" variant="outlined" label={`${runs.length} recorded`} />
-                  </Stack>
-                  <Stack direction="row" gap={0.75} flexWrap="wrap">
-                    <IconButton
-                      size="small"
-                      aria-label="Refresh runs"
-                      disabled={busy}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onRefreshRuns();
-                      }}
-                    >
-                      <RefreshRounded fontSize="small" />
-                    </IconButton>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      color="warning"
-                      startIcon={<DeleteOutlineRounded />}
-                      disabled={busy}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onCleanupRuns();
-                      }}
-                      sx={{ textTransform: "none", borderRadius: 1.5 }}
-                    >
-                      Clear old runs
-                    </Button>
-                  </Stack>
-                </Stack>
-              </AccordionSummary>
-              <AccordionDetails sx={{ px: 1.25, pt: 0, pb: 1.25 }}>
-                <Stack spacing={0.75} useFlexGap>
-                  {visibleOperators
-                    .map((operator) => ({
-                      operator,
-                      operatorRuns: operatorRunsForOperator(operator, runs),
-                    }))
-                    .filter(({ operatorRuns }) => operatorRuns.length > 0)
-                    .map(({ operator }) => {
-                      const stats = operatorRunStats(operator, runs);
-                      return (
-                        <Box
-                          key={operatorCatalogKey(operator)}
-                          sx={{
-                            p: 1,
-                            borderRadius: 1.5,
-                            bgcolor: "background.paper",
-                            border: 1,
-                            borderColor: "divider",
-                          }}
-                        >
-                          <Stack
-                            direction={{ xs: "column", sm: "row" }}
-                            gap={0.75}
-                            alignItems={{ xs: "stretch", sm: "center" }}
-                            justifyContent="space-between"
-                          >
-                            <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-                              <Typography variant="body2" fontWeight={850} sx={{ wordBreak: "break-all" }}>
-                                {operatorDisplayName(operator)}
-                              </Typography>
-                              {stats.succeeded > 0 && (
-                                <Chip size="small" color="success" variant="outlined" label={`${stats.succeeded} succeeded`} />
-                              )}
-                              {stats.failed > 0 && (
-                                <Chip size="small" color="error" variant="outlined" label={`${stats.failed} failed`} />
-                              )}
-                              {stats.running > 0 && (
-                                <Chip size="small" color="info" variant="outlined" label={`${stats.running} running`} />
-                              )}
-                              {stats.cacheHits > 0 && (
-                                <Chip size="small" color="secondary" variant="outlined" label={`${stats.cacheHits} cached`} />
-                              )}
-                            </Stack>
-                            <Button
-                              size="small"
-                              variant="text"
-                              onClick={() => setDetailOperator(operator)}
-                              sx={{ alignSelf: { xs: "flex-start", sm: "center" }, textTransform: "none", borderRadius: 1.5, whiteSpace: "nowrap" }}
-                            >
-                              View details →
-                            </Button>
-                          </Stack>
-                        </Box>
-                      );
-                    })}
-                </Stack>
-              </AccordionDetails>
-            </Accordion>
-          )}
-          {operators.length === 0 ? (
-            <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
-              <ExtensionRounded sx={{ color: "text.secondary", mb: 1 }} />
-              <Typography variant="body2" color="text.secondary">
-                No agent tools discovered from enabled plugins yet.
-              </Typography>
-            </Paper>
-          ) : visibleOperators.length === 0 ? (
-            <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
-              <StarBorderRounded sx={{ color: "text.secondary", mb: 1 }} />
-              <Typography variant="body2" color="text.secondary">
-                No favorite agent tools pinned yet.
-              </Typography>
-            </Paper>
-          ) : (
-            <Box sx={pluginCardGridSx} role="region" aria-label="Plugin tool list">
-              {visibleOperators.map((operator) => {
-                const alias = operatorPrimaryAlias(operator);
-                const isPinned = favoriteOperatorSet.has(alias);
-                const aliases = operator.enabledAliases.filter((value) => value.trim().length > 0);
-                const title = operatorDisplayName(operator);
-                const tone = operator.exposed ? theme.palette.success.main : theme.palette.text.secondary;
-                const supportsSmokeRun = operatorSupportsSmokeRun(operator);
-                const operatorKey = operatorCatalogKey(operator);
-                const smokeCount = operator.smokeTests?.length ?? 0;
-                const smokeTests = operator.smokeTests ?? [];
-                const selectedSmokeTestId = selectedSmokeTests[operatorKey] ?? smokeTests[0]?.id ?? "";
-                const smokeLabel = operatorSmokeRunLabel(operator, selectedSmokeTestId);
-                const smokeSummary = operatorSmokeTestSummary(operator, selectedSmokeTestId);
-                const latestFailedRun = operatorRunsForOperator(operator, runs)
-                  .find((run) => operatorRunStatusColor(run.status) === "error") ?? null;
-                const latestFailureSummary = latestFailedRun ? operatorRunDiagnosisSummary(latestFailedRun) : null;
-                const cardEnvRef = operatorEnvironmentRef(operator);
-                const cardEnv = cardEnvRef
-                  ? (environments ?? []).find((e) => e.id === cardEnvRef || e.canonicalId === cardEnvRef)
-                  : null;
-                const envBlocked = cardEnv
-                  ? ["missing", "unavailable", "failed", "error", "not_found", "not-found"].includes(
-                      cardEnv.availabilityStatus.trim().toLowerCase(),
-                    )
-                  : false;
-                const envBlockedReason = envBlocked
-                  ? (cardEnv?.installHint?.trim() || cardEnv?.availabilityMessage?.trim() || `Environment '${cardEnvRef}' is unavailable`)
-                  : null;
-                return (
-                  <Paper
-                    key={operatorKey}
-                    variant="outlined"
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setDetailOperator(operator)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setDetailOperator(operator);
-                      }
-                    }}
-                    sx={{
-                      p: 1.25,
-                      borderRadius: 2.5,
-                      bgcolor: "background.paper",
-                      borderColor: operator.exposed
-                        ? alpha(theme.palette.success.main, 0.28)
-                        : "divider",
-                      cursor: "pointer",
-                      transition: "border-color 120ms ease, box-shadow 120ms ease",
-                      "&:hover": {
-                        borderColor: alpha(theme.palette.primary.main, 0.5),
-                        boxShadow: `0 0 0 1px ${alpha(theme.palette.primary.main, 0.12)}`,
-                      },
-                    }}
-                  >
-                    <Stack spacing={1.1}>
-                      <Stack direction="row" spacing={1.25} alignItems="center">
-                        <Box
-                          sx={{
-                            width: 36,
-                            height: 36,
-                            borderRadius: 2,
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            color: tone,
-                            bgcolor: alpha(tone, theme.palette.mode === "dark" ? 0.18 : 0.08),
-                            border: `1px solid ${alpha(tone, theme.palette.mode === "dark" ? 0.22 : 0.12)}`,
-                            flexShrink: 0,
-                          }}
-                        >
-                          <ExtensionRounded fontSize="small" />
-                        </Box>
-                        <Box sx={{ minWidth: 0, flex: 1 }}>
-                          <Typography variant="subtitle2" fontWeight={850} noWrap title={title}>
-                            {title}
-                          </Typography>
-                          <Typography variant="caption" color="text.secondary" noWrap title={operator.id}>
-                            {operator.id} · v{operator.version}
-                          </Typography>
-                        </Box>
-                        <Stack direction="row" spacing={0.25} alignItems="center" flexShrink={0}>
-                          <Tooltip title={isPinned ? "Remove from favorites" : "Add to favorites"}>
-                            <span>
-                              <IconButton
-                                size="small"
-                                color={isPinned ? "warning" : "default"}
-                                disabled={busy}
-                                aria-label={`${isPinned ? "Unpin" : "Pin"} operator ${alias}`}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  onToggleFavorite(alias, !isPinned);
-                                }}
-                                onKeyDown={(event) => event.stopPropagation()}
-                              >
-                                {isPinned ? (
-                                  <StarRounded fontSize="small" />
-                                ) : (
-                                  <StarBorderRounded fontSize="small" />
-                                )}
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Switch
-                            size="small"
-                            checked={operator.exposed}
-                            disabled={busy}
-                            onClick={(event) => event.stopPropagation()}
-                            onChange={(event) => onToggle(operator, event.target.checked)}
-                            inputProps={{ "aria-label": `${operator.exposed ? "Unregister" : "Register"} tool ${operator.id}` }}
-                          />
-                        </Stack>
-                      </Stack>
-
-                      <Typography
-                        variant="body2"
-                        color="text.secondary"
-                        sx={{ minHeight: 20 }}
-                      >
-                        {operator.description?.trim() || "Plugin-defined tool callable by agents."}
-                      </Typography>
-
-                      <Stack direction="row" gap={0.75} flexWrap="wrap">
-                        <Chip
-                          size="small"
-                          color={operator.exposed ? "success" : "default"}
-                          variant={operator.exposed ? "filled" : "outlined"}
-                          label={operator.exposed ? "Registered" : "Not registered"}
-                        />
-                        {operator.exposed ? (
-                          aliases.map((enabledAlias) => (
-                            <Chip
-                              key={enabledAlias}
-                              size="small"
-                              variant="outlined"
-                              label={operatorToolName(enabledAlias)}
-                            />
-                          ))
-                        ) : (
-                          <Chip size="small" variant="outlined" label={`alias ${alias}`} />
-                        )}
-                        <Chip size="small" variant="outlined" label={operator.sourcePlugin} />
-                        {operatorResourceProfileChip(operator)}
-                        {(() => {
-                          const envRef = operatorEnvironmentRef(operator);
-                          if (!envRef) return null;
-                          const env = (environments ?? []).find(
-                            (e) => e.id === envRef || e.canonicalId === envRef,
-                          );
-                          const color = env
-                            ? pluginEnvironmentStatusColor(env.availabilityStatus)
-                            : "default";
-                          const label = env ? pluginEnvironmentDisplayName(env) : envRef;
-                          return (
-                            <Tooltip title={`Environment: ${label}${env ? ` (${env.availabilityStatus})` : " — not resolved"}`}>
-                              <Chip
-                                size="small"
-                                color={color}
-                                variant="outlined"
-                                label={`env: ${label}`}
-                                sx={{ maxWidth: 160 }}
-                              />
-                            </Tooltip>
-                          );
-                        })()}
-                        {smokeCount > 0 && (
-                          <Chip
-                            size="small"
-                            variant="outlined"
-                            label={`${smokeCount} smoke ${smokeCount === 1 ? "test" : "tests"}`}
-                          />
-                        )}
-                      </Stack>
-
-                      {(() => {
-                        const stats = operatorRunStats(operator, runs);
-                        const latestRun = stats.latestRun;
-                        return (
-                          <Stack direction="row" gap={0.75} flexWrap="wrap">
-                            <Chip size="small" variant="outlined" label={`${stats.total} calls`} />
-                            <Chip size="small" color="success" variant="outlined" label={`${stats.succeeded} succeeded`} />
-                            <Chip size="small" color={stats.failed > 0 ? "error" : "default"} variant="outlined" label={`${stats.failed} failed`} />
-                            <Chip
-                              size="small"
-                              color={stats.smokeFailed > 0 ? "error" : stats.smokeSucceeded > 0 ? "success" : "default"}
-                              variant="outlined"
-                              label={`${stats.smokeTotal} smoke`}
-                            />
-                            {stats.cacheHits > 0 && (
-                              <Chip size="small" color="success" variant="outlined" label={`${stats.cacheHits} cache hits`} />
-                            )}
-                            {latestRun && (
-                              <Chip
-                                size="small"
-                                color={operatorRunStatusColor(latestRun.status)}
-                                variant={operatorRunStatusColor(latestRun.status) === "default" ? "outlined" : "filled"}
-                                label={`latest ${latestRun.status}`}
-                              />
-                            )}
-                            {stats.latestSmokeRun && (
-                              <Chip
-                                size="small"
-                                color={operatorRunStatusColor(stats.latestSmokeRun.status)}
-                                variant="outlined"
-                                label={`latest smoke ${stats.latestSmokeRun.status}`}
-                              />
-                            )}
-                          </Stack>
-                        );
-                      })()}
-
-                      {latestFailedRun && latestFailureSummary && (
-                        <Alert severity="error" sx={{ py: 0.5, borderRadius: 1.5 }}>
-                          <Typography variant="caption" sx={{ wordBreak: "break-word" }}>
-                            Latest failure: {latestFailureSummary}
-                          </Typography>
-                        </Alert>
-                      )}
-
-                      {smokeSummary && (
-                        <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-word" }}>
-                          {smokeSummary}
-                        </Typography>
-                      )}
-
-                      {supportsSmokeRun && (
-                        <Stack direction={{ xs: "column", sm: "row" }} gap={0.75} alignItems={{ xs: "stretch", sm: "center" }}>
-                          {smokeTests.length > 1 && (
-                            <TextField
-                              select
-                              size="small"
-                              label="Smoke test"
-                              value={selectedSmokeTestId}
-                              onClick={(event) => event.stopPropagation()}
-                              onKeyDown={(event) => event.stopPropagation()}
-                              onChange={(event) =>
-                                setSelectedSmokeTests((current) => ({
-                                  ...current,
-                                  [operatorKey]: event.target.value,
-                                }))
-                              }
-                              disabled={busy}
-                              sx={{ minWidth: 220 }}
-                            >
-                              {smokeTests.map((smokeTest) => (
-                                <MenuItem key={smokeTest.id} value={smokeTest.id}>
-                                  {smokeTest.name?.trim() || smokeTest.id}
-                                </MenuItem>
-                              ))}
-                            </TextField>
-                          )}
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            startIcon={<PlayArrowRounded />}
-                            disabled={busy || !operator.exposed || envBlocked}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              onSmokeRun(operator, selectedSmokeTestId, bypassCacheOperators[operatorKey] ?? false);
-                            }}
-                            sx={{ alignSelf: { xs: "flex-start", sm: "center" }, textTransform: "none", borderRadius: 1.5 }}
-                          >
-                            {operator.exposed ? `Run ${smokeLabel}` : "Register to run smoke test"}
-                          </Button>
-                          {onBackgroundRun && (() => {
-                            const activeTaskId = activeTasks?.[alias];
-                            const schedulerStatus = activeTaskId ? activeTaskStatus?.[alias] : undefined;
-                            const runningLabel = schedulerStatus
-                              ? `${schedulerStatus.state}${schedulerStatus.jobId ? ` · job ${schedulerStatus.jobId}` : ""}`
-                              : "Running…";
-                            if (activeTaskId) {
-                              return (
-                                <Stack direction="row" spacing={0.75} alignItems="center" sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}>
-                                  <Chip
-                                    size="small"
-                                    color="info"
-                                    label={runningLabel}
-                                    title={schedulerStatus ? `${schedulerStatus.scheduler} queue state` : undefined}
-                                    sx={{ height: 24, fontWeight: 600 }}
-                                  />
-                                  {onCancelTask && (
-                                    <Button
-                                      size="small"
-                                      variant="text"
-                                      color="warning"
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        onCancelTask(activeTaskId);
-                                      }}
-                                      sx={{ textTransform: "none", minWidth: 0 }}
-                                    >
-                                      Cancel
-                                    </Button>
-                                  )}
-                                </Stack>
-                              );
-                            }
-                            return (
-                              <Tooltip title="Run in background — UI stays responsive while operator executes">
-                                <span>
-                                  <Button
-                                    size="small"
-                                    variant="text"
-                                    disabled={busy || !operator.exposed || envBlocked}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      onBackgroundRun(operator, selectedSmokeTestId, bypassCacheOperators[operatorKey] ?? false);
-                                    }}
-                                    sx={{ alignSelf: { xs: "flex-start", sm: "center" }, textTransform: "none" }}
-                                  >
-                                    Background
-                                  </Button>
-                                </span>
-                              </Tooltip>
-                            );
-                          })()}
-                          {envBlockedReason && (
-                            <Typography variant="caption" color="warning.main" sx={{ alignSelf: "center", maxWidth: 220 }}>
-                              {envBlockedReason}
-                            </Typography>
-                          )}
-                          <Tooltip title="Skip cache lookup and force a fresh execution">
-                            <Stack
-                              direction="row"
-                              alignItems="center"
-                              spacing={0.5}
-                              onClick={(e) => e.stopPropagation()}
-                              sx={{ cursor: "pointer", userSelect: "none" }}
-                            >
-                              <Switch
-                                size="small"
-                                checked={bypassCacheOperators[operatorKey] ?? false}
-                                onChange={(e) => setBypassCacheOperators((prev) => ({
-                                  ...prev,
-                                  [operatorKey]: e.target.checked,
-                                }))}
-                                inputProps={{ "aria-label": "Force re-run (bypass cache)" }}
-                              />
-                              <Typography variant="caption" color="text.secondary">
-                                Force re-run
-                              </Typography>
-                            </Stack>
-                          </Tooltip>
-                        </Stack>
-                      )}
-
-                      {operator.unavailableReason && (
-                        <Typography variant="caption" color="warning.main" sx={{ wordBreak: "break-word" }}>
-                          {operator.unavailableReason}
-                        </Typography>
-                      )}
-                    </Stack>
-                  </Paper>
-                );
-              })}
-            </Box>
-          )}
-        </Stack>
-      </AccordionDetails>
-      </Accordion>
-    </>
-  );
-}
-
 export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const {
+    marketplaceSourceViews,
     marketplaces,
     operators,
-    operatorDiagnostics,
-    operatorRegistryPath,
-    favoriteOperators,
     operatorRuns,
     retrievalStatuses,
     processPoolStatuses,
     remoteMarketplaceChecks,
+    builtinMarketplaceStatus,
+    pluginMigrationStatus,
     isLoading,
     isMutating,
+    bootstrapInProgress,
     error,
+    ensureBuiltinMarketplace,
     loadPlugins,
-    loadOperators,
-    loadFavoriteOperators,
     loadOperatorRuns,
     readOperatorRun,
     readOperatorRunLog,
     verifyOperatorRun,
-    cleanupOperatorRuns,
     clearProcessPool,
+    migratePluginState,
     installPlugin,
     syncPlugin,
     checkRemoteMarketplaces,
+    addMarketplaceSource,
+    removeMarketplaceSource,
+    setMarketplaceSourceEnabled,
+    refreshMarketplaceSource,
     uninstallPlugin,
     setPluginEnabled,
-    setOperatorEnabled,
-    toggleFavoriteOperator,
     setTemplateEnabled,
     setRetrievalResourceEnabled,
     setEnvironmentEnabled,
     checkPluginEnvironment,
-    runOperator,
-    runOperatorChain,
-    runOperatorAsync,
-    cancelOperatorTask,
-    activeOperatorTasks,
-    activeOperatorTaskStatus,
   } = usePluginStore();
   const [message, setMessage] = useState<string | null>(null);
   const [detailPluginId, setDetailPluginId] = useState<string | null>(null);
@@ -5903,6 +4436,16 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const [operatorRunDetailError, setOperatorRunDetailError] = useState<string | null>(null);
   const [pluginSearch, setPluginSearch] = useState("");
   const [pluginFilter, setPluginFilter] = useState<PluginCatalogFilter>("all");
+  const [marketplaceSourceKind, setMarketplaceSourceKind] = useState<MarketplaceSourceKind>("local");
+  const [marketplaceSourceLocation, setMarketplaceSourceLocation] = useState("");
+  const [marketplaceSourceLabelInput, setMarketplaceSourceLabelInput] = useState("");
+  const [marketplaceSourceFormError, setMarketplaceSourceFormError] = useState<string | null>(null);
+  const [marketplaceSourceActionKey, setMarketplaceSourceActionKey] = useState<string | null>(null);
+  const [marketplaceSourceRefreshResults, setMarketplaceSourceRefreshResults] = useState<
+    Record<string, RefreshResult | undefined>
+  >({});
+  const [pluginMigrationResult, setPluginMigrationResult] = useState<PluginMigrationResult | null>(null);
+  const [pluginMigrationRunning, setPluginMigrationRunning] = useState(false);
   const [dismissedFeedbackKey, setDismissedFeedbackKey] = useState<string | null>(null);
   const [installingPluginId, setInstallingPluginId] = useState<string | null>(null);
   const [checkingRemoteMarketplaces, setCheckingRemoteMarketplaces] = useState(false);
@@ -5925,14 +4468,9 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
 
   useEffect(() => {
     void loadPlugins(projectRoot, operatorSurface);
-    void loadFavoriteOperators();
-  }, [loadFavoriteOperators, loadPlugins, operatorSurface, projectRoot]);
+  }, [loadPlugins, operatorSurface, projectRoot]);
 
   const allPlugins = useMemo(() => flattenMarketplacePlugins(marketplaces), [marketplaces]);
-  const allPluginEnvironments = useMemo(
-    () => allPlugins.flatMap((plugin) => plugin.environments ?? []),
-    [allPlugins],
-  );
   const remoteMarketplaceCount = useMemo(
     () => marketplaces.filter((marketplace) => marketplace.remote?.url?.trim()).length,
     [marketplaces],
@@ -6046,6 +4584,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const feedbackSeverity = error ? "error" : "success";
   const feedbackKey = feedbackText ? `${feedbackSeverity}:${feedbackText}` : null;
   const feedbackOpen = Boolean(feedbackText && feedbackKey !== dismissedFeedbackKey);
+  const marketplaceSourceMutationDisabled = isMutating || isLoading || bootstrapInProgress;
 
   useEffect(() => {
     setDismissedFeedbackKey(null);
@@ -6127,6 +4666,141 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     }
   };
 
+  const handleAddMarketplaceSource = async () => {
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    const location = marketplaceSourceLocation.trim();
+    const label = marketplaceSourceLabelInput.trim();
+    if (!location) {
+      setMarketplaceSourceFormError(
+        marketplaceSourceKind === "local"
+          ? "Enter a local marketplace path."
+          : "Enter an HTTPS Git URL.",
+      );
+      return;
+    }
+    setMarketplaceSourceActionKey("add");
+    try {
+      const source = await addMarketplaceSource(
+        marketplaceSourceKind,
+        location,
+        label || undefined,
+        projectRoot,
+      );
+      setMarketplaceSourceLocation("");
+      setMarketplaceSourceLabelInput("");
+      if (source.kind === "remote") {
+        const result = await refreshMarketplaceSource(source.id, projectRoot);
+        setMarketplaceSourceRefreshResults((current) => ({
+          ...current,
+          [source.id]: { ...result },
+        }));
+        if (result.ok) {
+          setMessage(marketplaceSourceRefreshMessage(result));
+        }
+      } else {
+        setMessage("Added local marketplace source");
+      }
+    } catch (err) {
+      setMarketplaceSourceFormError(extractErrorMessage(err));
+    } finally {
+      setMarketplaceSourceActionKey((current) => (current === "add" ? null : current));
+    }
+  };
+
+  const handleRefreshMarketplaceSource = async (source: MarketplaceSourceView) => {
+    if (!source.removable || source.kind !== "remote") return;
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    setMarketplaceSourceActionKey(`refresh:${source.id}`);
+    try {
+      const result = await refreshMarketplaceSource(source.id, projectRoot);
+      setMarketplaceSourceRefreshResults((current) => ({
+        ...current,
+        [source.id]: { ...result },
+      }));
+      if (result.ok) setMessage(marketplaceSourceRefreshMessage(result));
+    } catch (err) {
+      const result: RefreshResult = {
+        id: source.id,
+        ok: false,
+        message: extractErrorMessage(err),
+      };
+      setMarketplaceSourceRefreshResults((current) => ({
+        ...current,
+        [source.id]: result,
+      }));
+    } finally {
+      setMarketplaceSourceActionKey((current) =>
+        current === `refresh:${source.id}` ? null : current,
+      );
+    }
+  };
+
+  const handleRefreshBuiltinMarketplace = async () => {
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    const status = await ensureBuiltinMarketplace(projectRoot);
+    if (status.ok) setMessage(status.message);
+  };
+
+  const handleMigratePluginState = async () => {
+    setMessage(null);
+    setPluginMigrationResult(null);
+    setPluginMigrationRunning(true);
+    try {
+      const result = await migratePluginState(projectRoot);
+      setPluginMigrationResult(result);
+      setMessage(`Plugin migration completed · ${pluginMigrationSummary(result)}`);
+    } catch {
+      // Store exposes the error banner.
+    } finally {
+      setPluginMigrationRunning(false);
+    }
+  };
+
+  const handleToggleMarketplaceSource = async (
+    source: MarketplaceSourceView,
+    enabled: boolean,
+  ) => {
+    if (!source.removable) return;
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    setMarketplaceSourceActionKey(`toggle:${source.id}`);
+    try {
+      await setMarketplaceSourceEnabled(source.id, enabled, projectRoot);
+      setMessage(`${enabled ? "Enabled" : "Disabled"} ${marketplaceSourceLabel(source)}`);
+    } catch {
+      // Store exposes the error banner.
+    } finally {
+      setMarketplaceSourceActionKey((current) =>
+        current === `toggle:${source.id}` ? null : current,
+      );
+    }
+  };
+
+  const handleRemoveMarketplaceSource = async (source: MarketplaceSourceView) => {
+    if (!source.removable) return;
+    setMessage(null);
+    setMarketplaceSourceFormError(null);
+    setMarketplaceSourceActionKey(`remove:${source.id}`);
+    try {
+      await removeMarketplaceSource(source.id, projectRoot);
+      setMarketplaceSourceRefreshResults((current) => {
+        const next = { ...current };
+        delete next[source.id];
+        return next;
+      });
+      setMessage(`Removed ${marketplaceSourceLabel(source)}`);
+    } catch {
+      // Store exposes the error banner.
+    } finally {
+      setMarketplaceSourceActionKey((current) =>
+        current === `remove:${source.id}` ? null : current,
+      );
+    }
+  };
+
   const handleConfigureEnvironment = async (
     plugin: PluginSummary,
     environment: PluginEnvironmentSummary,
@@ -6192,42 +4866,6 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     }
   };
 
-  const handleOperatorToggle = async (operator: OperatorSummary, enabled: boolean) => {
-    const alias = operatorPrimaryAlias(operator);
-    setMessage(null);
-    try {
-      await setOperatorEnabled(
-        {
-          alias,
-          operatorId: operator.id,
-          sourcePlugin: operator.sourcePlugin,
-          version: operator.version,
-          enabled,
-        },
-        projectRoot,
-        operatorSurface,
-      );
-      const toolName = operatorToolName(alias);
-      setMessage(
-        enabled
-          ? `Registered ${operatorDisplayName(operator)} as ${toolName}`
-          : `Unregistered ${toolName}`,
-      );
-    } catch {
-      // Store exposes the error banner.
-    }
-  };
-
-  const handleOperatorFavoriteToggle = async (alias: string, pinned: boolean) => {
-    setMessage(null);
-    try {
-      await toggleFavoriteOperator(alias, pinned);
-      setMessage(`${pinned ? "Pinned" : "Unpinned"} ${operatorToolName(alias)}`);
-    } catch {
-      // Store exposes the error banner.
-    }
-  };
-
   const handleTemplateToggle = async (
     plugin: PluginSummary,
     templateId: string,
@@ -6273,35 +4911,6 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     }
   };
 
-  const handleOperatorRegistrationChange = async (
-    targetOperators: OperatorSummary[],
-    enabled: boolean,
-  ) => {
-    if (targetOperators.length === 0) return;
-    setMessage(null);
-    try {
-      for (const operator of targetOperators) {
-        const alias = operatorPrimaryAlias(operator);
-        await setOperatorEnabled(
-          {
-            alias,
-            operatorId: operator.id,
-            sourcePlugin: operator.sourcePlugin,
-            version: operator.version,
-            enabled,
-          },
-          projectRoot,
-          operatorSurface,
-        );
-      }
-      setMessage(
-        `${enabled ? "Registered" : "Unregistered"} ${targetOperators.length} tool${targetOperators.length === 1 ? "" : "s"}`,
-      );
-    } catch {
-      // Store exposes the error banner.
-    }
-  };
-
   const openOperatorRunDetail = async (
     run: OperatorRunSummary,
     options: { autoVerify?: boolean } = {},
@@ -6338,236 +4947,11 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     return null;
   };
 
-  const handleOperatorSmokeRun = async (
-    operator: OperatorSummary,
-    smokeTestId?: string | null,
-    bypassCache?: boolean,
-  ) => {
-    const alias = operatorPrimaryAlias(operator);
-    const smokeTest = operatorSmokeTestForRun(operator, smokeTestId);
-    setMessage(null);
-    if (
-      (operatorSurface.executionEnvironment ?? "local") === "local" &&
-      operatorShouldWarnBeforeLocalRun(operator)
-    ) {
-      const summary = operatorResourceProfileSummary(operator)
-        ?? `${operatorDisplayName(operator)} is marked as resource intensive.`;
-      const confirmed = window.confirm(
-        `${summary}\n\nLocal execution may be slow, memory-intensive, or fail on production-size inputs. Prefer SSH/server/HPC execution when available.\n\nContinue locally?`,
-      );
-      if (!confirmed) {
-        setMessage(`Canceled local run for ${operatorDisplayName(operator)}. Switch execution to SSH/server/HPC to run it remotely.`);
-        return;
-      }
-    }
-    try {
-      const response = await runOperator(
-        alias,
-        operatorSmokeRunArguments(operator, smokeTestId),
-        projectRoot,
-        operatorSurface,
-        {
-          kind: "smoke",
-          smokeTestId: smokeTest?.id ?? smokeTestId ?? null,
-          smokeTestName: smokeTest?.name ?? null,
-          bypassCache: bypassCache ?? false,
-        },
-      );
-      const runDir = response.result.runDir;
-      const smokeLabel = operatorSmokeRunLabel(operator, smokeTestId);
-      setMessage(
-        `${smokeLabel} succeeded for ${operatorToolName(alias)}${typeof runDir === "string" ? ` · ${runDir}` : ""}`,
-      );
-      const summary = summarizeOperatorRunResult(response.result);
-      if (summary) {
-        const verification = await openOperatorRunDetail(summary, { autoVerify: true });
-        const verifyStatus = verification
-          ? verification.ok ? "verified" : "verification reported issues"
-          : "opened run detail";
-        setMessage(
-          `${smokeLabel} succeeded and ${verifyStatus} for ${operatorToolName(alias)}${typeof runDir === "string" ? ` · ${runDir}` : ""}`,
-        );
-      }
-      try {
-        let granted = await isPermissionGranted();
-        if (!granted) {
-          const permission = await requestPermission();
-          granted = permission === "granted";
-        }
-        if (granted) {
-          sendNotification({
-            title: "Operator run complete",
-            body: `${operatorToolName(alias)} finished successfully`,
-          });
-        }
-      } catch {
-        /* ignore */
-      }
-    } catch {
-      try {
-        const granted = await isPermissionGranted().catch(() => false);
-        if (granted) {
-          sendNotification({
-            title: "Operator run failed",
-            body: `${operatorToolName(alias)} failed`,
-          });
-        }
-      } catch {
-        /* ignore */
-      }
-      // Store exposes the error banner.
-    }
-  };
-
-  const notifyOperatorBackgroundTerminal = async (
-    alias: string,
-    event: OperatorTaskEvent,
-  ) => {
-    const notification = (() => {
-      if (event.type === "completed") {
-        return event.ok
-          ? {
-              title: "Operator run complete",
-              body: `${operatorToolName(alias)} finished successfully`,
-            }
-          : {
-              title: "Operator run failed",
-              body: `${operatorToolName(alias)} failed`,
-            };
-      }
-      if (event.type === "failed") {
-        return {
-          title: "Operator run failed",
-          body: `${operatorToolName(alias)} failed`,
-        };
-      }
-      return null;
-    })();
-
-    if (!notification) return;
-
-    try {
-      let granted = await isPermissionGranted();
-      if (!granted) {
-        const permission = await requestPermission();
-        granted = permission === "granted";
-      }
-      if (granted) {
-        sendNotification(notification);
-      }
-    } catch {
-      /* ignore */
-    }
-  };
-
-  const handleOperatorChainRun = async (steps: OperatorChainStep[]): Promise<OperatorChainResult> => {
-    setMessage(null);
-    const result = await runOperatorChain(steps, projectRoot, operatorSurface);
-    setMessage(
-      result.ok
-        ? `Operator chain completed (${result.steps.length} step${result.steps.length === 1 ? "" : "s"})`
-        : result.error
-          ? `Operator chain stopped: ${result.error}`
-        : `Operator chain stopped after ${result.steps.length} step${result.steps.length === 1 ? "" : "s"}`,
-    );
-    return result;
-  };
-
-  const handleOperatorBackgroundRun = async (
-    operator: OperatorSummary,
-    smokeTestId?: string | null,
-    bypassCache?: boolean,
-  ) => {
-    const alias = operatorPrimaryAlias(operator);
-    const smokeTest = operatorSmokeTestForRun(operator, smokeTestId);
-    setMessage(null);
-    try {
-      await runOperatorAsync(
-        alias,
-        operatorSmokeRunArguments(operator, smokeTestId),
-        projectRoot,
-        operatorSurface,
-        {
-          kind: "smoke",
-          smokeTestId: smokeTest?.id ?? smokeTestId ?? null,
-          smokeTestName: smokeTest?.name ?? null,
-          bypassCache: bypassCache ?? false,
-        },
-        (event) => notifyOperatorBackgroundTerminal(alias, event),
-      );
-      setMessage(`Started background run for ${operatorToolName(alias)} — you can keep working.`);
-    } catch {
-      // Store exposes the error banner.
-    }
-  };
-
   const handleRefreshOperatorRuns = async () => {
     setMessage(null);
     try {
       await loadOperatorRuns(projectRoot, operatorSurface);
       setMessage("Refreshed tool runs");
-    } catch {
-      // Store exposes the error banner.
-    }
-  };
-
-  const operatorCleanupRequest = (operator?: OperatorSummary): OperatorRunCleanupRequest => ({
-    dryRun: true,
-    keepLatest: 25,
-    maxAgeDays: 30,
-    includeCacheHits: true,
-    includeFailed: true,
-    includeSucceeded: true,
-    limit: 500,
-    operatorAlias: operator ? operatorPrimaryAlias(operator) : null,
-    operatorId: operator?.id ?? null,
-    operatorVersion: operator?.version ?? null,
-    sourcePlugin: operator?.sourcePlugin ?? null,
-  });
-
-  const handleCleanupOperatorRuns = async (operator?: OperatorSummary) => {
-    setMessage(null);
-    const request = operatorCleanupRequest(operator);
-    const scopeLabel = operator
-      ? ` for ${operatorDisplayName(operator)}`
-      : "";
-    try {
-      const preview = await cleanupOperatorRuns(request, projectRoot, operatorSurface);
-      if (preview.matchedCount === 0) {
-        setMessage(
-          `No cleanup candidates${scopeLabel} in ${preview.runsRoot}; latest 25 matching runs are preserved.`,
-        );
-        return;
-      }
-      const candidateLines = preview.candidates
-        .slice(0, 8)
-        .map((candidate) => {
-          const size = candidate.estimatedBytes != null ? ` · ${formatBytes(candidate.estimatedBytes)}` : "";
-          return `• ${candidate.runId} (${candidate.status}, ${candidate.reason}${size})`;
-        })
-        .join("\n");
-      const remaining = preview.candidates.length > 8
-        ? `\n… and ${preview.candidates.length - 8} more`
-        : "";
-      const confirmed = window.confirm(
-        `Delete ${preview.matchedCount} tool run director${preview.matchedCount === 1 ? "y" : "ies"}${scopeLabel} from the current ${preview.location} workspace?\n\n` +
-        `Runs root: ${preview.runsRoot}\n` +
-        `Estimated space: ${formatBytes(preview.estimatedBytes)}\n\n` +
-        `${candidateLines}${remaining}\n\n` +
-        "This only affects the active session workspace and cannot be undone.",
-      );
-      if (!confirmed) {
-        setMessage("Operator run cleanup cancelled");
-        return;
-      }
-      const result = await cleanupOperatorRuns(
-        { ...request, dryRun: false },
-        projectRoot,
-        operatorSurface,
-      );
-      setMessage(
-        `Deleted ${result.deletedCount} tool run director${result.deletedCount === 1 ? "y" : "ies"}${scopeLabel}${result.skippedCount > 0 ? ` · ${result.skippedCount} skipped` : ""} · ${formatBytes(result.estimatedBytes)} estimated`,
-      );
     } catch {
       // Store exposes the error banner.
     }
@@ -6729,7 +5113,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
             {[
               { label: "Enabled", value: enabledPlugins.length },
               { label: "Installable", value: availablePlugins.length },
-              { label: "Registered", value: exposedOperators.length },
+              { label: "Exposed", value: exposedOperators.length },
               { label: "Runs", value: operatorRuns.length },
               { label: "Issues", value: quarantinedRouteCount + degradedRouteCount },
               { label: "Pooled", value: processPoolStatuses.length },
@@ -6846,7 +5230,6 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         onSync={(plugin) => void handleSyncPlugin(plugin)}
         onForceSync={(plugin) => void handleForceSyncPlugin(plugin)}
         onToggle={(plugin, enabled) => void handleToggle(plugin, enabled)}
-        onOperatorToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
         onTemplateToggle={(plugin, templateId, enabled) => void handleTemplateToggle(plugin, templateId, enabled)}
         onRetrievalResourceToggle={(plugin, category, resourceId, enabled) =>
           void handleRetrievalResourceToggle(plugin, category, resourceId, enabled)
@@ -7056,43 +5439,336 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       </Accordion>
       )}
 
-      <OperatorCatalogSection
-        operators={operators}
-        diagnostics={operatorDiagnostics}
-        runs={operatorRuns}
-        registryPath={operatorRegistryPath}
-        projectPath={projectPath}
-        executionEnvironment={executionEnvironment ?? undefined}
-        sshServer={sshServer ?? undefined}
-        sandboxBackend={sandboxBackend ?? undefined}
-        favoriteOperators={favoriteOperators}
-        busy={isMutating}
-        environments={allPluginEnvironments}
-        onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
-        onToggleFavorite={(alias, pinned) => void handleOperatorFavoriteToggle(alias, pinned)}
-        onSmokeRun={(operator, smokeTestId, bypassCache) =>
-          void handleOperatorSmokeRun(operator, smokeTestId, bypassCache)
-        }
-        onRunChain={handleOperatorChainRun}
-        onBackgroundRun={(operator, smokeTestId, bypassCache) =>
-          void handleOperatorBackgroundRun(operator, smokeTestId, bypassCache)
-        }
-        onCancelTask={(taskId) => void cancelOperatorTask(taskId)}
-        activeTasks={activeOperatorTasks}
-        activeTaskStatus={activeOperatorTaskStatus}
-        onRefreshRuns={() => void handleRefreshOperatorRuns()}
-        onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
-        onOpenRun={(run) => void handleOpenOperatorRun(run)}
-        onCopy={(text, successMessage) => void copyToClipboard(text, successMessage)}
-        onCreateUserOperator={() => void loadOperators()}
-      />
+      <Accordion disableGutters elevation={0} sx={nestedAccordionSx}>
+        <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+            <Typography variant="subtitle2" fontWeight={700}>Marketplace Sources</Typography>
+            <Chip size="small" variant="outlined" label={`${marketplaceSourceViews.length} source${marketplaceSourceViews.length === 1 ? "" : "s"}`} />
+          </Stack>
+        </AccordionSummary>
+        <AccordionDetails sx={{ px: 1.5, pt: 0.75, pb: 1.5 }}>
+          <Stack spacing={1.25} useFlexGap>
+            <Alert
+              severity={
+                pluginMigrationResult?.warnings.length ||
+                pluginMigrationStatus?.migrationNeeded ||
+                pluginMigrationStatus?.warnings.length
+                  ? "warning"
+                  : "info"
+              }
+              sx={{ borderRadius: 1.5 }}
+            >
+              <Stack spacing={0.75}>
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={1}
+                  alignItems={{ xs: "stretch", sm: "center" }}
+                  justifyContent="space-between"
+                >
+                  <Typography variant="body2">
+                    {!pluginMigrationStatus
+                      ? "Checking plugin migration status..."
+                      : pluginMigrationStatus.migrationNeeded
+                        ? `Migration recommended: ${pluginMigrationStatusSummary(pluginMigrationStatus)}.`
+                        : "Plugin migration status is current. Run migration only if plugins still look inconsistent."}
+                  </Typography>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={
+                      pluginMigrationRunning ? (
+                        <CircularProgress size={14} />
+                      ) : (
+                        <PublishedWithChangesRounded />
+                      )
+                    }
+                    disabled={isLoading || isMutating || bootstrapInProgress || pluginMigrationRunning}
+                    onClick={() => void handleMigratePluginState()}
+                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
+                  >
+                    Run migration
+                  </Button>
+                </Stack>
+                {pluginMigrationStatus?.warnings.length ? (
+                  <Stack component="ul" spacing={0.25} sx={{ mt: 0.5, mb: 0, pl: 2 }}>
+                    {pluginMigrationStatus.warnings.map((warning) => (
+                      <Typography
+                        key={warning}
+                        component="li"
+                        variant="caption"
+                        color="text.secondary"
+                      >
+                        {warning}
+                      </Typography>
+                    ))}
+                  </Stack>
+                ) : null}
+                {pluginMigrationResult && (
+                  <Box>
+                    <Typography variant="body2" fontWeight={700}>
+                      Last migration: {pluginMigrationSummary(pluginMigrationResult)}
+                    </Typography>
+                    {pluginMigrationResult.warnings.length > 0 && (
+                      <Stack component="ul" spacing={0.25} sx={{ mt: 0.5, mb: 0, pl: 2 }}>
+                        {pluginMigrationResult.warnings.map((warning) => (
+                          <Typography
+                            key={warning}
+                            component="li"
+                            variant="caption"
+                            color="text.secondary"
+                          >
+                            {warning}
+                          </Typography>
+                        ))}
+                      </Stack>
+                    )}
+                  </Box>
+                )}
+              </Stack>
+            </Alert>
+            {bootstrapInProgress && (
+              <Stack direction="row" spacing={1} alignItems="center">
+                <CircularProgress size={16} />
+                <Typography variant="caption" color="text.secondary">
+                  Refreshing built-in marketplace
+                </Typography>
+              </Stack>
+            )}
+            {builtinMarketplaceStatus && !builtinMarketplaceStatus.ok && (
+              <Alert severity="warning" sx={{ borderRadius: 1.5 }}>
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={1}
+                  alignItems={{ xs: "stretch", sm: "center" }}
+                  justifyContent="space-between"
+                >
+                  <Typography variant="body2">
+                    {builtinMarketplaceStatus.message}
+                  </Typography>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={bootstrapInProgress ? <CircularProgress size={14} /> : <RefreshRounded />}
+                    disabled={isLoading || bootstrapInProgress}
+                    onClick={() => void handleRefreshBuiltinMarketplace()}
+                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
+                  >
+                    Retry
+                  </Button>
+                </Stack>
+              </Alert>
+            )}
+            {marketplaceSourceViews.length === 0 ? (
+              <Box sx={{ p: 1.5, borderRadius: 2, textAlign: "center", bgcolor: "background.paper" }}>
+                <Typography variant="body2" color="text.secondary">
+                  No marketplace sources configured.
+                </Typography>
+              </Box>
+            ) : (
+              <Stack spacing={1} useFlexGap>
+                {marketplaceSourceViews.map((source) => {
+                  const label = marketplaceSourceLabel(source);
+                  const sourceLabel = source.label?.trim();
+                  const refreshResult = marketplaceSourceRefreshResults[source.id];
+                  const kindLabel =
+                    source.kind === "builtin"
+                      ? "Built-in"
+                      : source.kind === "remote"
+                        ? "Remote"
+                        : "Local";
+                  const kindColor: ChipProps["color"] =
+                    source.kind === "builtin"
+                      ? "success"
+                      : source.kind === "remote"
+                        ? "info"
+                        : "default";
+                  return (
+                    <Paper
+                      key={source.id}
+                      variant="outlined"
+                      sx={{ p: 1.25, borderRadius: 2, bgcolor: "background.paper" }}
+                    >
+                      <Stack spacing={1}>
+                        <Stack
+                          direction={{ xs: "column", md: "row" }}
+                          spacing={1}
+                          alignItems={{ xs: "stretch", md: "center" }}
+                        >
+                          <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flex: 1 }}>
+                            <Chip
+                              size="small"
+                              color={kindColor}
+                              variant="outlined"
+                              label={kindLabel}
+                            />
+                            <Box sx={{ minWidth: 0 }}>
+                              {sourceLabel ? (
+                                <Typography variant="body2" fontWeight={800} noWrap title={sourceLabel}>
+                                  {sourceLabel}
+                                </Typography>
+                              ) : null}
+                              <Typography
+                                variant={sourceLabel ? "caption" : "body2"}
+                                color={sourceLabel ? "text.secondary" : "text.primary"}
+                                sx={{ display: "block", wordBreak: "break-all" }}
+                              >
+                                {source.location}
+                              </Typography>
+                            </Box>
+                          </Stack>
+                          <Stack direction="row" spacing={0.75} alignItems="center" justifyContent="flex-end">
+                            {source.removable ? (
+                              <>
+                                <Switch
+                                  checked={source.enabled}
+                                  disabled={marketplaceSourceMutationDisabled}
+                                  onChange={(event) =>
+                                    void handleToggleMarketplaceSource(source, event.target.checked)
+                                  }
+                                  inputProps={{
+                                    "aria-label": `${source.enabled ? "Disable" : "Enable"} marketplace source ${label}`,
+                                  }}
+                                />
+                                {source.kind === "remote" && (
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    startIcon={
+                                      marketplaceSourceActionKey === `refresh:${source.id}`
+                                        ? <CircularProgress size={16} />
+                                        : <RefreshRounded />
+                                    }
+                                    disabled={marketplaceSourceMutationDisabled}
+                                    onClick={() => void handleRefreshMarketplaceSource(source)}
+                                    aria-label={`Refresh marketplace source ${label}`}
+                                    sx={{ textTransform: "none", borderRadius: 1.5 }}
+                                  >
+                                    Refresh
+                                  </Button>
+                                )}
+                                <IconButton
+                                  size="small"
+                                  color="error"
+                                  disabled={marketplaceSourceMutationDisabled}
+                                  onClick={() => void handleRemoveMarketplaceSource(source)}
+                                  aria-label={`Remove marketplace source ${label}`}
+                                >
+                                  {marketplaceSourceActionKey === `remove:${source.id}` ? (
+                                    <CircularProgress size={16} />
+                                  ) : (
+                                    <DeleteOutlineRounded fontSize="small" />
+                                  )}
+                                </IconButton>
+                              </>
+                            ) : (
+                              <>
+                                {source.kind === "builtin" && (
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    startIcon={bootstrapInProgress ? <CircularProgress size={16} /> : <RefreshRounded />}
+                                    disabled={isLoading || bootstrapInProgress}
+                                    onClick={() => void handleRefreshBuiltinMarketplace()}
+                                    aria-label={`Refresh marketplace source ${label}`}
+                                    sx={{ textTransform: "none", borderRadius: 1.5 }}
+                                  >
+                                    Refresh
+                                  </Button>
+                                )}
+                                <Typography
+                                  variant="caption"
+                                  color="text.secondary"
+                                  sx={{ whiteSpace: "nowrap" }}
+                                >
+                                  Always enabled
+                                </Typography>
+                              </>
+                            )}
+                          </Stack>
+                        </Stack>
+                        {refreshResult && (
+                          <Alert severity={refreshResult.ok ? "success" : "error"} sx={{ borderRadius: 1.5 }}>
+                            {marketplaceSourceRefreshMessage(refreshResult)}
+                          </Alert>
+                        )}
+                      </Stack>
+                    </Paper>
+                  );
+                })}
+              </Stack>
+            )}
 
+            <Box sx={{ p: 1.25, borderRadius: 2, bgcolor: "background.paper" }}>
+              <Stack spacing={1} useFlexGap>
+                <Stack
+                  direction={{ xs: "column", md: "row" }}
+                  spacing={1}
+                  alignItems={{ xs: "stretch", md: "flex-start" }}
+                >
+                  <TextField
+                    select
+                    size="small"
+                    label="Source type"
+                    value={marketplaceSourceKind}
+                    onChange={(event) => setMarketplaceSourceKind(event.target.value as MarketplaceSourceKind)}
+                    inputProps={{ "aria-label": "Marketplace source kind" }}
+                    sx={{ minWidth: { xs: "100%", md: 150 } }}
+                  >
+                    <MenuItem value="local">Local</MenuItem>
+                    <MenuItem value="remote">Remote</MenuItem>
+                  </TextField>
+                  <TextField
+                    size="small"
+                    label={marketplaceSourceKind === "local" ? "Local path" : "Remote Git URL"}
+                    value={marketplaceSourceLocation}
+                    onChange={(event) => setMarketplaceSourceLocation(event.target.value)}
+                    error={Boolean(marketplaceSourceFormError)}
+                    inputProps={{ "aria-label": "Marketplace source location" }}
+                    sx={{ flex: 1, minWidth: { xs: "100%", md: 260 } }}
+                  />
+                  <TextField
+                    size="small"
+                    label="Label"
+                    value={marketplaceSourceLabelInput}
+                    onChange={(event) => setMarketplaceSourceLabelInput(event.target.value)}
+                    inputProps={{ "aria-label": "Marketplace source label" }}
+                    sx={{ minWidth: { xs: "100%", md: 190 } }}
+                  />
+                  <Button
+                    size="small"
+                    variant="contained"
+                    startIcon={marketplaceSourceActionKey === "add" ? <CircularProgress size={16} /> : <AddRounded />}
+                    disabled={marketplaceSourceMutationDisabled || marketplaceSourceActionKey === "add"}
+                    onClick={() => void handleAddMarketplaceSource()}
+                    aria-label="Add marketplace source"
+                    sx={{
+                      textTransform: "none",
+                      borderRadius: 1.5,
+                      minHeight: 40,
+                      flexShrink: 0,
+                      whiteSpace: "nowrap",
+                      alignSelf: { xs: "stretch", md: "flex-start" },
+                    }}
+                  >
+                    Add
+                  </Button>
+                </Stack>
+                {marketplaceSourceFormError && (
+                  <Alert severity="error" sx={{ borderRadius: 1.5 }}>
+                    {marketplaceSourceFormError}
+                  </Alert>
+                )}
+              </Stack>
+            </Box>
+          </Stack>
+        </AccordionDetails>
+      </Accordion>
 
       {marketplaces.length === 0 || allPlugins.length === 0 ? (
         <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
           <ExtensionRounded sx={{ color: "text.secondary", mb: 1 }} />
           <Typography variant="body2" color="text.secondary">
-            No plugin marketplace found yet. Add one at ~/.omiga/plugins/marketplace.json or project .omiga/plugins/marketplace.json.
+            No plugin marketplace found yet. Clone or refresh the omiga-plugins repository used as the marketplace source.
           </Typography>
         </Paper>
       ) : filteredCatalogPlugins.length === 0 ? (
@@ -7113,64 +5789,31 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           busyPluginIds={busyPluginIds}
           onInstall={(plugin) => void handleInstall(plugin)}
           onToggle={(plugin, enabled) => void handleToggle(plugin, enabled)}
-          onOperatorRegistrationChange={(targetOperators, enabled) =>
-            void handleOperatorRegistrationChange(targetOperators, enabled)
-          }
           onOpenDetails={(selectedPlugin) => setDetailPluginId(selectedPlugin.id)}
         />
       )}
 
-      {SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS && (
-        <OperatorCatalogSection
-          operators={operators}
-          diagnostics={operatorDiagnostics}
-          runs={operatorRuns}
-          registryPath={operatorRegistryPath}
-          projectPath={projectPath}
-          executionEnvironment={executionEnvironment ?? undefined}
-          sshServer={sshServer ?? undefined}
-          sandboxBackend={sandboxBackend ?? undefined}
-          favoriteOperators={favoriteOperators}
-          busy={isMutating}
-          environments={allPluginEnvironments}
-          onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
-          onToggleFavorite={(alias, pinned) => void handleOperatorFavoriteToggle(alias, pinned)}
-          onSmokeRun={(operator, smokeTestId, bypassCache) =>
-            void handleOperatorSmokeRun(operator, smokeTestId, bypassCache)
-          }
-          onRunChain={handleOperatorChainRun}
-          onBackgroundRun={(operator, smokeTestId, bypassCache) =>
-            void handleOperatorBackgroundRun(operator, smokeTestId, bypassCache)
-          }
-          onCancelTask={(taskId) => void cancelOperatorTask(taskId)}
-          activeTasks={activeOperatorTasks}
-          activeTaskStatus={activeOperatorTaskStatus}
-          onRefreshRuns={() => void handleRefreshOperatorRuns()}
-          onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
-          onOpenRun={(run) => void handleOpenOperatorRun(run)}
-          onCopy={(text, successMessage) => void copyToClipboard(text, successMessage)}
-          onCreateUserOperator={() => void loadOperators()}
-        />
-      )}
     </Stack>
-    <Snackbar
-      key={feedbackKey ?? "plugin-feedback"}
-      open={feedbackOpen}
-      autoHideDuration={error ? null : 4200}
-      onClose={handleFeedbackClose}
-      anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      // Sit above any open Dialog (modal stacks at theme.zIndex.modal=1300).
-      sx={{ zIndex: (t) => t.zIndex.modal + 50 }}
-    >
-      <Alert
-        severity={feedbackSeverity}
-        variant="filled"
-        onClose={() => handleFeedbackClose()}
-        sx={{ borderRadius: 2, boxShadow: 4 }}
+    <Portal>
+      <Snackbar
+        key={feedbackKey ?? "plugin-feedback"}
+        open={feedbackOpen}
+        autoHideDuration={error ? null : 4200}
+        onClose={handleFeedbackClose}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        // Rendered through Portal and lifted above Dialog + Backdrop.
+        sx={{ zIndex: (t) => t.zIndex.tooltip + 1 }}
       >
-        {feedbackText}
-      </Alert>
-    </Snackbar>
+        <Alert
+          severity={feedbackSeverity}
+          variant="filled"
+          onClose={() => handleFeedbackClose()}
+          sx={{ borderRadius: 2, boxShadow: 4 }}
+        >
+          {feedbackText}
+        </Alert>
+      </Snackbar>
+    </Portal>
     </>
   );
 }

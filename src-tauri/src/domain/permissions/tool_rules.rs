@@ -49,9 +49,20 @@ pub fn canonical_permission_tool_name(name: &str) -> String {
         "fetch" | "Fetch" | "web_fetch" | "WebFetch" | "webFetch" => "fetch".to_string(),
         "query" | "Query" => "query".to_string(),
         "connector" | "Connector" => "connector".to_string(),
+        "operator_execute" | "OperatorExecute" => "operator_execute".to_string(),
         "search" | "Search" | "web_search" | "WebSearch" | "webSearch" => "search".to_string(),
         "todo_write" | "TodoWrite" => "todo_write".to_string(),
         "notebook_edit" | "NotebookEdit" => "notebook_edit".to_string(),
+        "browser_open" | "BrowserOpen" | "browserOpen" => "browser_open".to_string(),
+        "browser_click" | "BrowserClick" | "browserClick" => "browser_click".to_string(),
+        "browser_fill" | "BrowserFill" | "browserFill" => "browser_fill".to_string(),
+        "browser_screenshot" | "BrowserScreenshot" | "browserScreenshot" => {
+            "browser_screenshot".to_string()
+        }
+        "browser_close" | "BrowserClose" | "browserClose" => "browser_close".to_string(),
+        "browser_snapshot" | "BrowserSnapshot" | "browserSnapshot" => {
+            "browser_snapshot".to_string()
+        }
         "sleep" | "Sleep" => "sleep".to_string(),
         "ask_user_question" | "AskUserQuestion" => "ask_user_question".to_string(),
         "list_mcp_resources" | "ListMcpResourcesTool" | "ListMcpResources" => {

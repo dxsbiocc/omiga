@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub const DESCRIPTION: &str =
-    "Execute an Omiga Template unit by id. Prefer this for high-level analysis and visualization workflows; use operator__* only when the user explicitly needs an atomic operator. Template execution can render local scripts, inherit backing Operator ask/preflight questions, and optionally fall back to a migrationTarget for parity-safe runs.";
+    "Execute an Omiga Template unit by id. Prefer this for high-level analysis and visualization workflows; use operator_execute only when the user explicitly needs an atomic Operator/Operation. Template execution can render local scripts, inherit backing Operator ask/preflight questions, and optionally fall back to a migrationTarget for parity-safe runs.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

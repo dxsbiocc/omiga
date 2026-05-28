@@ -405,7 +405,7 @@ export function ComputerUseSettingsPanel({
             >
               Python backend:{" "}
               {backendStatus?.pythonBackendPath ??
-                ".omiga/plugins/computer-use/bin/computer-use-macos.py"}
+                "~/.omiga/plugins/tools/computer-use/bin/computer-use-macos.py"}
             </Typography>
           </Stack>
           <Divider />

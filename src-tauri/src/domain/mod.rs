@@ -7,6 +7,7 @@ pub mod auto_compact;
 pub mod autopilot_state;
 pub mod background_shell;
 pub mod blackboard;
+pub mod browser_operator;
 pub mod chat_session_title;
 pub mod chat_state;
 pub mod computer_use;

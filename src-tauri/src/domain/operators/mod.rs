@@ -1,9 +1,11 @@
 //! Omiga operator runtime.
 //!
-//! Operators are plugin-provided, declarative execution units exposed to the
-//! model as dynamic `operator__{id}` tools.  They are intentionally separate
-//! from MCP: Omiga owns the workspace, resource, validation, artifact, and
-//! provenance lifecycle.
+//! Operators are plugin-provided, declarative program adapters.  A single
+//! Operator represents one executable program; program subcommands or modes are
+//! modeled as Operation parameters and are executed through the generic
+//! `operator_execute` tool.  The legacy dynamic `operator__{id}` compatibility
+//! path remains available for existing callers, but it is no longer the primary
+//! model-facing discovery surface.
 //!
 //! The MVP keeps rich structured errors and explicit execution context in one
 //! module so UI/model responses can include actionable field/run/log metadata.
@@ -21,8 +23,10 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 
 pub const OPERATOR_API_VERSION_V1ALPHA1: &str = "omiga.ai/operator/v1alpha1";
+pub const OPERATOR_API_VERSION_V1ALPHA2: &str = "omiga.ai/operator/v1alpha2";
 pub const OPERATOR_KIND: &str = "Operator";
 pub const OPERATOR_TOOL_PREFIX: &str = "operator__";
+pub const OPERATOR_EXECUTE_TOOL_NAME: &str = "operator_execute";
 const OPERATOR_STATE_DIR_NAME: &str = ".omiga";
 const REGISTRY_RELATIVE_PATH: &str = "operators/registry.json";
 /// Directory for user-created script operators: `~/.omiga/user-operators/`
@@ -338,6 +342,45 @@ pub struct OperatorExecutionSpec {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OperatorOperationSpec {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Manifest-declared operation taxonomy for progressive disclosure.
+    ///
+    /// This is intentionally generic metadata: plugins decide the vocabulary
+    /// (for example `ngs/sequence-processing`), while Omiga only parses and
+    /// surfaces it for routing/catalog UIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub interface: OperatorInterfaceSpec,
+    #[serde(default)]
+    pub smoke_tests: Vec<OperatorSmokeTestSpec>,
+    pub execution: OperatorExecutionSpec,
+    #[serde(default)]
+    pub preflight: Option<OperatorPreflightSpec>,
+    #[serde(default)]
+    pub runtime: Option<JsonValue>,
+    #[serde(default)]
+    pub cache: Option<JsonValue>,
+    #[serde(default)]
+    pub resources: BTreeMap<String, OperatorResourceSpec>,
+    #[serde(default)]
+    pub bindings: Vec<OperatorBindingSpec>,
+    #[serde(default)]
+    pub permissions: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OperatorPreflightSpec {
     #[serde(default)]
     pub questions: Vec<OperatorPreflightQuestionSpec>,
@@ -411,6 +454,8 @@ pub struct OperatorSpec {
     pub metadata: OperatorMetadata,
     pub interface: OperatorInterfaceSpec,
     #[serde(default)]
+    pub operations: BTreeMap<String, OperatorOperationSpec>,
+    #[serde(default)]
     pub smoke_tests: Vec<OperatorSmokeTestSpec>,
     pub execution: OperatorExecutionSpec,
     #[serde(default)]
@@ -440,6 +485,8 @@ pub struct OperatorCandidateSummary {
     pub source_plugin: String,
     pub manifest_path: String,
     pub interface: OperatorInterfaceSpec,
+    #[serde(default)]
+    pub operations: Vec<OperatorOperationSummary>,
     pub execution: OperatorExecutionSpec,
     #[serde(default)]
     pub preflight: Option<OperatorPreflightSpec>,
@@ -452,6 +499,46 @@ pub struct OperatorCandidateSummary {
     pub enabled_aliases: Vec<String>,
     pub exposed: bool,
     pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorOperationGroupSummary {
+    pub key: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub operations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorOperationSummary {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub interface: OperatorInterfaceSpec,
+    #[serde(default)]
+    pub runtime: Option<JsonValue>,
+    #[serde(default)]
+    pub resources: BTreeMap<String, OperatorResourceSpec>,
+    #[serde(default)]
+    pub exposed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -558,7 +645,45 @@ struct RawOperatorManifest {
     interface: RawOperatorInterface,
     #[serde(default, alias = "tests", alias = "smoke")]
     smoke_tests: Vec<RawOperatorSmokeTestSpec>,
-    execution: RawOperatorExecution,
+    #[serde(default)]
+    execution: Option<RawOperatorExecution>,
+    #[serde(default)]
+    operations: BTreeMap<String, RawOperatorOperationSpec>,
+    #[serde(default)]
+    preflight: Option<OperatorPreflightSpec>,
+    #[serde(default)]
+    runtime: Option<JsonValue>,
+    #[serde(default)]
+    cache: Option<JsonValue>,
+    #[serde(default)]
+    resources: BTreeMap<String, RawResourceSpec>,
+    #[serde(default)]
+    bindings: Vec<OperatorBindingSpec>,
+    #[serde(default)]
+    permissions: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawOperatorOperationSpec {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    stage: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    interface: RawOperatorInterface,
+    #[serde(default, alias = "tests", alias = "smoke")]
+    smoke_tests: Vec<RawOperatorSmokeTestSpec>,
+    #[serde(default)]
+    execution: Option<RawOperatorExecution>,
     #[serde(default)]
     preflight: Option<OperatorPreflightSpec>,
     #[serde(default)]
@@ -756,7 +881,9 @@ pub fn load_operator_manifest(
         .map_err(|err| format!("read operator manifest {}: {err}", manifest_path.display()))?;
     let parsed: RawOperatorManifest = serde_yaml::from_str(&raw)
         .map_err(|err| format!("parse operator manifest {}: {err}", manifest_path.display()))?;
-    if parsed.api_version != OPERATOR_API_VERSION_V1ALPHA1 {
+    if parsed.api_version != OPERATOR_API_VERSION_V1ALPHA1
+        && parsed.api_version != OPERATOR_API_VERSION_V1ALPHA2
+    {
         return Err(format!(
             "unsupported operator apiVersion `{}` in {}",
             parsed.api_version,
@@ -774,69 +901,263 @@ pub fn load_operator_manifest(
     if parsed.metadata.version.trim().is_empty() {
         return Err("operator metadata.version must not be empty".to_string());
     }
-    let argv = parsed
-        .execution
-        .argv
-        .or_else(|| parsed.execution.command.and_then(|command| command.argv))
+    let source = OperatorSource {
+        source_plugin: source_plugin.into(),
+        plugin_root: plugin_root.into(),
+        manifest_path: manifest_path.to_path_buf(),
+    };
+    let metadata = OperatorMetadata {
+        id: parsed.metadata.id,
+        version: parsed.metadata.version,
+        name: parsed.metadata.name,
+        description: parsed.metadata.description,
+        tags: parsed.metadata.tags,
+    };
+    let top_interface = operator_interface_from_raw(parsed.interface);
+    let top_resources = resources_from_raw(parsed.resources);
+    let top_execution = parsed.execution.and_then(raw_execution_argv);
+    let top_smoke_tests = parsed
+        .smoke_tests
+        .into_iter()
+        .map(OperatorSmokeTestSpec::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+    let top_bindings = parsed.bindings;
+    let top_preflight = parsed.preflight;
+    let top_runtime = parsed.runtime;
+    let top_cache = parsed.cache;
+    let top_permissions = parsed.permissions;
+    let operations = normalize_operator_operations(
+        parsed.operations,
+        &metadata,
+        &top_interface,
+        &top_smoke_tests,
+        top_execution.clone(),
+        top_preflight.clone(),
+        top_runtime.clone(),
+        top_cache.clone(),
+        &top_resources,
+        &top_bindings,
+        top_permissions.clone(),
+    )?;
+    let interface = aggregate_operation_interfaces(&operations);
+    let resources = aggregate_operation_resources(&operations);
+    let execution = representative_operation(&operations)
+        .map(|operation| operation.execution.clone())
+        .or_else(|| {
+            top_execution
+                .clone()
+                .map(|argv| OperatorExecutionSpec { argv })
+        })
         .ok_or_else(|| "operator execution.argv is required".to_string())?;
-    if argv.is_empty() {
+    if execution.argv.is_empty() {
         return Err("operator execution.argv must not be empty".to_string());
     }
     let spec = OperatorSpec {
         api_version: parsed.api_version,
         kind: parsed.kind,
-        metadata: OperatorMetadata {
-            id: parsed.metadata.id,
-            version: parsed.metadata.version,
-            name: parsed.metadata.name,
-            description: parsed.metadata.description,
-            tags: parsed.metadata.tags,
-        },
-        interface: OperatorInterfaceSpec {
-            inputs: parsed
-                .interface
-                .inputs
-                .into_iter()
-                .map(|(key, value)| (key, value.into()))
-                .collect(),
-            params: parsed
-                .interface
-                .params
-                .into_iter()
-                .map(|(key, value)| (key, value.into()))
-                .collect(),
-            outputs: parsed
-                .interface
-                .outputs
-                .into_iter()
-                .map(|(key, value)| (key, value.into()))
-                .collect(),
-        },
-        smoke_tests: parsed
-            .smoke_tests
-            .into_iter()
-            .map(OperatorSmokeTestSpec::try_from)
-            .collect::<Result<Vec<_>, _>>()?,
-        execution: OperatorExecutionSpec { argv },
-        preflight: parsed.preflight,
-        runtime: parsed.runtime,
-        cache: parsed.cache,
-        resources: parsed
-            .resources
-            .into_iter()
-            .map(|(key, value)| (key, value.into()))
-            .collect(),
-        bindings: parsed.bindings,
-        permissions: parsed.permissions,
-        source: OperatorSource {
-            source_plugin: source_plugin.into(),
-            plugin_root: plugin_root.into(),
-            manifest_path: manifest_path.to_path_buf(),
-        },
+        metadata,
+        interface,
+        operations,
+        smoke_tests: top_smoke_tests,
+        execution,
+        preflight: top_preflight,
+        runtime: top_runtime,
+        cache: top_cache,
+        resources,
+        bindings: top_bindings,
+        permissions: top_permissions,
+        source,
     };
     validate_operator_preflight(&spec)?;
     validate_operator_smoke_tests(&spec)?;
+    validate_operator_operations(&spec)?;
     Ok(spec)
+}
+
+fn raw_execution_argv(execution: RawOperatorExecution) -> Option<Vec<String>> {
+    execution
+        .argv
+        .or_else(|| execution.command.and_then(|command| command.argv))
+}
+
+fn operator_interface_from_raw(raw: RawOperatorInterface) -> OperatorInterfaceSpec {
+    OperatorInterfaceSpec {
+        inputs: raw
+            .inputs
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect(),
+        params: raw
+            .params
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect(),
+        outputs: raw
+            .outputs
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect(),
+    }
+}
+
+fn resources_from_raw(
+    raw: BTreeMap<String, RawResourceSpec>,
+) -> BTreeMap<String, OperatorResourceSpec> {
+    raw.into_iter()
+        .map(|(key, value)| (key, value.into()))
+        .collect()
+}
+
+fn merge_operator_interfaces(
+    base: &OperatorInterfaceSpec,
+    overlay: OperatorInterfaceSpec,
+) -> OperatorInterfaceSpec {
+    let mut merged = base.clone();
+    merged.inputs.extend(overlay.inputs);
+    merged.params.extend(overlay.params);
+    merged.outputs.extend(overlay.outputs);
+    merged
+}
+
+fn normalize_operator_operations(
+    raw_operations: BTreeMap<String, RawOperatorOperationSpec>,
+    metadata: &OperatorMetadata,
+    top_interface: &OperatorInterfaceSpec,
+    top_smoke_tests: &[OperatorSmokeTestSpec],
+    top_execution: Option<Vec<String>>,
+    top_preflight: Option<OperatorPreflightSpec>,
+    top_runtime: Option<JsonValue>,
+    top_cache: Option<JsonValue>,
+    top_resources: &BTreeMap<String, OperatorResourceSpec>,
+    top_bindings: &[OperatorBindingSpec],
+    top_permissions: Option<JsonValue>,
+) -> Result<BTreeMap<String, OperatorOperationSpec>, String> {
+    if raw_operations.is_empty() {
+        let argv = top_execution
+            .clone()
+            .ok_or_else(|| "operator execution.argv is required".to_string())?;
+        if argv.is_empty() {
+            return Err("operator execution.argv must not be empty".to_string());
+        }
+        return Ok(BTreeMap::from([(
+            "run".to_string(),
+            OperatorOperationSpec {
+                name: metadata.name.clone(),
+                description: metadata.description.clone(),
+                category: None,
+                group: None,
+                stage: None,
+                tags: metadata.tags.clone(),
+                interface: top_interface.clone(),
+                smoke_tests: top_smoke_tests.to_vec(),
+                execution: OperatorExecutionSpec { argv },
+                preflight: top_preflight,
+                runtime: top_runtime,
+                cache: top_cache,
+                resources: top_resources.clone(),
+                bindings: top_bindings.to_vec(),
+                permissions: top_permissions,
+            },
+        )]));
+    }
+
+    let mut operations = BTreeMap::new();
+    for (id, raw) in raw_operations {
+        validate_operator_operation_id(&id)?;
+        let argv = raw
+            .execution
+            .and_then(raw_execution_argv)
+            .or_else(|| top_execution.clone())
+            .ok_or_else(|| format!("operator operations.{id}.execution.argv is required"))?;
+        if argv.is_empty() {
+            return Err(format!(
+                "operator operations.{id}.execution.argv must not be empty"
+            ));
+        }
+        let operation_interface =
+            merge_operator_interfaces(top_interface, operator_interface_from_raw(raw.interface));
+        let mut operation_resources = top_resources.clone();
+        operation_resources.extend(resources_from_raw(raw.resources));
+        let smoke_tests = if raw.smoke_tests.is_empty() {
+            top_smoke_tests.to_vec()
+        } else {
+            raw.smoke_tests
+                .into_iter()
+                .map(OperatorSmokeTestSpec::try_from)
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        operations.insert(
+            id,
+            OperatorOperationSpec {
+                name: normalize_optional_string(raw.name),
+                description: normalize_optional_string(raw.description),
+                category: normalize_optional_string(raw.category),
+                group: normalize_optional_string(raw.group),
+                stage: normalize_optional_string(raw.stage),
+                tags: raw.tags,
+                interface: operation_interface,
+                smoke_tests,
+                execution: OperatorExecutionSpec { argv },
+                preflight: raw.preflight.or_else(|| top_preflight.clone()),
+                runtime: raw.runtime.or_else(|| top_runtime.clone()),
+                cache: raw.cache.or_else(|| top_cache.clone()),
+                resources: operation_resources,
+                bindings: if raw.bindings.is_empty() {
+                    top_bindings.to_vec()
+                } else {
+                    raw.bindings
+                },
+                permissions: raw.permissions.or_else(|| top_permissions.clone()),
+            },
+        );
+    }
+    Ok(operations)
+}
+
+fn validate_operator_operation_id(id: &str) -> Result<(), String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("operator operation id must not be empty".to_string());
+    }
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(format!(
+            "operator operation id `{id}` may contain only letters, numbers, `_`, or `-`"
+        ));
+    }
+    Ok(())
+}
+
+fn aggregate_operation_interfaces(
+    operations: &BTreeMap<String, OperatorOperationSpec>,
+) -> OperatorInterfaceSpec {
+    let mut aggregate = OperatorInterfaceSpec::default();
+    for operation in operations.values() {
+        aggregate.inputs.extend(operation.interface.inputs.clone());
+        aggregate.params.extend(operation.interface.params.clone());
+        aggregate
+            .outputs
+            .extend(operation.interface.outputs.clone());
+    }
+    aggregate
+}
+
+fn aggregate_operation_resources(
+    operations: &BTreeMap<String, OperatorOperationSpec>,
+) -> BTreeMap<String, OperatorResourceSpec> {
+    let mut aggregate = BTreeMap::new();
+    for operation in operations.values() {
+        aggregate.extend(operation.resources.clone());
+    }
+    aggregate
+}
+
+fn representative_operation(
+    operations: &BTreeMap<String, OperatorOperationSpec>,
+) -> Option<&OperatorOperationSpec> {
+    operations.get("run").or_else(|| operations.values().next())
 }
 
 fn validate_operator_preflight(spec: &OperatorSpec) -> Result<(), String> {
@@ -948,6 +1269,19 @@ fn validate_operator_smoke_tests(spec: &OperatorSpec) -> Result<(), String> {
                 .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
         apply_equal_bindings(spec, &mut effective_params, &effective_resources)
             .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
+    }
+    Ok(())
+}
+
+fn validate_operator_operations(spec: &OperatorSpec) -> Result<(), String> {
+    for operation_id in spec.operations.keys() {
+        validate_operator_operation_id(operation_id)?;
+        let operation_spec = operator_spec_for_operation(spec, operation_id)
+            .map_err(|error| format!("operator operation `{operation_id}`: {}", error.message))?;
+        validate_operator_preflight(&operation_spec)
+            .map_err(|error| format!("operator operation `{operation_id}`: {error}"))?;
+        validate_operator_smoke_tests(&operation_spec)
+            .map_err(|error| format!("operator operation `{operation_id}`: {error}"))?;
     }
     Ok(())
 }
@@ -1807,11 +2141,46 @@ fn apply_operator_registry_update(
     Ok(())
 }
 
+fn registry_entry_matches_candidate(
+    alias: &str,
+    entry: &OperatorRegistryEntry,
+    candidate: &OperatorSpec,
+) -> bool {
+    candidate.metadata.id == entry.operator_id(alias)
+        && entry
+            .version()
+            .map(|version| candidate.metadata.version == version)
+            .unwrap_or(true)
+        && entry
+            .source_plugin()
+            .map(|plugin| candidate.source.source_plugin == plugin)
+            .unwrap_or(true)
+}
+
+fn operator_candidate_key(candidate: &OperatorSpec) -> (String, String, String, PathBuf) {
+    (
+        candidate.source.source_plugin.clone(),
+        candidate.metadata.id.clone(),
+        candidate.metadata.version.clone(),
+        candidate.source.manifest_path.clone(),
+    )
+}
+
 fn resolve_enabled_operators_from(
     candidates: Vec<OperatorSpec>,
     registry: OperatorRegistryFile,
 ) -> Vec<ResolvedOperator> {
     let mut resolved = Vec::new();
+    let mut resolved_aliases = HashSet::new();
+    let mut resolved_candidates = HashSet::new();
+    let mut candidate_id_counts: HashMap<String, usize> = HashMap::new();
+
+    for candidate in &candidates {
+        *candidate_id_counts
+            .entry(candidate.metadata.id.clone())
+            .or_default() += 1;
+    }
+
     for (alias, entry) in registry.enabled {
         if !entry.enabled() {
             continue;
@@ -1823,26 +2192,19 @@ fn resolve_enabled_operators_from(
         let wanted_id = entry.operator_id(&alias);
         let matches = candidates
             .iter()
-            .filter(|candidate| candidate.metadata.id == wanted_id)
-            .filter(|candidate| {
-                entry
-                    .version()
-                    .map(|version| candidate.metadata.version == version)
-                    .unwrap_or(true)
-            })
-            .filter(|candidate| {
-                entry
-                    .source_plugin()
-                    .map(|plugin| candidate.source.source_plugin == plugin)
-                    .unwrap_or(true)
-            })
+            .filter(|candidate| registry_entry_matches_candidate(&alias, &entry, candidate))
             .cloned()
             .collect::<Vec<_>>();
         match matches.as_slice() {
-            [only] => resolved.push(ResolvedOperator {
-                alias,
-                spec: only.clone(),
-            }),
+            [only] => {
+                if resolved_aliases.insert(alias.clone()) {
+                    resolved_candidates.insert(operator_candidate_key(only));
+                    resolved.push(ResolvedOperator {
+                        alias,
+                        spec: only.clone(),
+                    });
+                }
+            }
             [] => tracing::warn!(
                 alias = %alias,
                 operator_id = %wanted_id,
@@ -1856,6 +2218,28 @@ fn resolve_enabled_operators_from(
             ),
         }
     }
+
+    for candidate in candidates {
+        let alias = candidate.metadata.id.clone();
+        if candidate_id_counts.get(&alias).copied().unwrap_or_default() != 1 {
+            tracing::warn!(
+                alias = %alias,
+                "operator auto-exposure skipped because multiple active plugins define the same operator id"
+            );
+            continue;
+        }
+        if resolved_candidates.contains(&operator_candidate_key(&candidate)) {
+            continue;
+        }
+        if resolved_aliases.insert(alias.clone()) {
+            resolved_candidates.insert(operator_candidate_key(&candidate));
+            resolved.push(ResolvedOperator {
+                alias,
+                spec: candidate,
+            });
+        }
+    }
+
     resolved.sort_by(|left, right| left.alias.cmp(&right.alias));
     resolved
 }
@@ -1974,6 +2358,7 @@ fn operator_candidate_summary(
     enabled_aliases: Vec<String>,
 ) -> OperatorCandidateSummary {
     let exposed = !enabled_aliases.is_empty();
+    let operations = operator_operation_summaries(&candidate, exposed);
     OperatorCandidateSummary {
         id: candidate.metadata.id,
         version: candidate.metadata.version,
@@ -1987,6 +2372,7 @@ fn operator_candidate_summary(
             .to_string_lossy()
             .into_owned(),
         interface: candidate.interface,
+        operations,
         execution: candidate.execution,
         preflight: candidate.preflight,
         runtime: candidate.runtime,
@@ -1998,11 +2384,122 @@ fn operator_candidate_summary(
     }
 }
 
-pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
-    resolve_enabled_operators()
-        .into_iter()
-        .map(operator_tool_schema)
+fn operator_operation_summaries(
+    candidate: &OperatorSpec,
+    exposed: bool,
+) -> Vec<OperatorOperationSummary> {
+    candidate
+        .operations
+        .iter()
+        .map(|(id, operation)| OperatorOperationSummary {
+            id: id.clone(),
+            name: operation.name.clone(),
+            description: operation.description.clone(),
+            category: operation.category.clone(),
+            group: operation.group.clone(),
+            stage: operation.stage.clone(),
+            tags: operation.tags.clone(),
+            interface: operation.interface.clone(),
+            runtime: operation.runtime.clone(),
+            resources: operation.resources.clone(),
+            exposed,
+        })
         .collect()
+}
+
+pub fn operator_operation_summaries_for_spec(
+    spec: &OperatorSpec,
+    exposed: bool,
+) -> Vec<OperatorOperationSummary> {
+    operator_operation_summaries(spec, exposed)
+}
+
+pub fn operator_operation_groups_for_spec(
+    spec: &OperatorSpec,
+) -> Vec<OperatorOperationGroupSummary> {
+    let mut groups: BTreeMap<String, OperatorOperationGroupSummary> = BTreeMap::new();
+    for (operation_id, operation) in &spec.operations {
+        let (key, label) = operation_group_key(operation);
+        let entry = groups
+            .entry(key.clone())
+            .or_insert_with(|| OperatorOperationGroupSummary {
+                key,
+                label,
+                category: operation.category.clone(),
+                group: operation.group.clone(),
+                stage: operation.stage.clone(),
+                operations: Vec::new(),
+            });
+        entry.operations.push(operation_id.clone());
+    }
+    groups.into_values().collect()
+}
+
+fn operation_group_key(operation: &OperatorOperationSpec) -> (String, String) {
+    let label = operation
+        .stage
+        .as_ref()
+        .or(operation.group.as_ref())
+        .or(operation.category.as_ref())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Operations".to_string());
+    let key = label
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '/' || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    (
+        if key.is_empty() {
+            "operations".to_string()
+        } else {
+            key
+        },
+        label,
+    )
+}
+
+pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
+    Vec::new()
+}
+
+fn format_enabled_operator_tools_system_section_from_resolved(
+    resolved: Vec<ResolvedOperator>,
+) -> Option<String> {
+    if resolved.is_empty() {
+        return None;
+    }
+
+    let program_count = resolved.len();
+    let operation_count = resolved
+        .iter()
+        .map(|operator| operator_operation_names(&operator.spec).len().max(1))
+        .sum::<usize>();
+    let mut lines = vec![
+        "## Plugin operator execution".to_string(),
+        format!(
+            "Active plugins register {program_count} Operator programs with {operation_count} operations. Use `unit_search` / `unit_describe` or `operator_describe` to narrow candidates, then call `operator_execute` with `operator` and `operation`. Subcommands are operations, not separate tools; do not ask the user to manually register operator tools."
+        ),
+        String::new(),
+    ];
+    lines.push(
+        "Default routing flow: search/describe first, execute second. Legacy dynamic aliases remain available only for older callers and should not be used for new routing.".to_string(),
+    );
+
+    Some(lines.join("\n"))
+}
+
+pub fn format_enabled_operator_tools_system_section() -> Option<String> {
+    format_enabled_operator_tools_system_section_from_resolved(resolve_enabled_operators())
 }
 
 pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
@@ -2078,14 +2575,17 @@ fn operator_resource_profile_description(spec: &OperatorSpec) -> Option<String> 
 pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
     let mut properties = JsonMap::new();
     let preflight_questions = preflight_question_text_by_param(spec);
+    let operation_names = operator_operation_names(spec);
     properties.insert(
         "inputs".to_string(),
         fields_object_schema(&spec.interface.inputs, true, None),
     );
-    properties.insert(
-        "params".to_string(),
-        fields_object_schema(&spec.interface.params, true, Some(&preflight_questions)),
-    );
+    let mut params_schema =
+        fields_object_schema(&spec.interface.params, true, Some(&preflight_questions));
+    if operation_names.len() > 1 {
+        add_operation_to_params_schema(&mut params_schema, &operation_names);
+    }
+    properties.insert("params".to_string(), params_schema);
     properties.insert(
         "resources".to_string(),
         resources_object_schema(&spec.resources),
@@ -2100,6 +2600,132 @@ pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
         "required": required,
         "additionalProperties": false
     })
+}
+
+pub fn operator_operation_names(spec: &OperatorSpec) -> Vec<String> {
+    let mut names = spec.operations.keys().cloned().collect::<Vec<_>>();
+    if names.is_empty() && !spec.execution.argv.is_empty() {
+        names.push("run".to_string());
+    }
+    names
+}
+
+fn add_operation_to_params_schema(params_schema: &mut JsonValue, operation_names: &[String]) {
+    let JsonValue::Object(params) = params_schema else {
+        return;
+    };
+    let properties = params
+        .entry("properties".to_string())
+        .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+    if let JsonValue::Object(properties) = properties {
+        properties.insert(
+            "operation".to_string(),
+            json!({
+                "type": "string",
+                "enum": operation_names,
+                "description": "Operator operation/subcommand to run. Subcommands are operation parameters, not separate operator tools."
+            }),
+        );
+    }
+    let required = params
+        .entry("required".to_string())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    if let JsonValue::Array(required) = required {
+        if !required
+            .iter()
+            .any(|item| item.as_str() == Some("operation"))
+        {
+            required.push(JsonValue::String("operation".to_string()));
+        }
+    }
+}
+
+fn operator_spec_for_operation(
+    spec: &OperatorSpec,
+    operation_id: &str,
+) -> Result<OperatorSpec, OperatorToolError> {
+    let operation_id = operation_id.trim();
+    if spec.operations.is_empty() {
+        if operation_id.is_empty() || operation_id == "run" {
+            return Ok(spec.clone());
+        }
+        return Err(OperatorToolError::new(
+            "unknown_operation",
+            false,
+            format!(
+                "Operator `{}` does not declare operation `{operation_id}`.",
+                spec.metadata.id
+            ),
+        )
+        .with_suggested_action(
+            "Use operator_describe or unit_describe to inspect supported operations.",
+        ));
+    }
+    let operation = spec.operations.get(operation_id).ok_or_else(|| {
+        let supported = operator_operation_names(spec).join(", ");
+        OperatorToolError::new(
+            "unknown_operation",
+            false,
+            format!(
+                "Operator `{}` does not declare operation `{operation_id}`. Supported operations: {supported}.",
+                spec.metadata.id
+            ),
+        )
+        .with_suggested_action("Retry with one of the operation enum values from operator_describe/unit_describe.")
+    })?;
+    let mut effective = spec.clone();
+    if let Some(description) = operation.description.clone() {
+        effective.metadata.description = Some(description);
+    }
+    effective.interface = operation.interface.clone();
+    effective.smoke_tests = operation.smoke_tests.clone();
+    effective.execution = operation.execution.clone();
+    effective.preflight = operation.preflight.clone();
+    effective.runtime = operation.runtime.clone();
+    effective.cache = operation.cache.clone();
+    effective.resources = operation.resources.clone();
+    effective.bindings = operation.bindings.clone();
+    effective.permissions = operation.permissions.clone();
+    effective.operations = BTreeMap::from([(operation_id.to_string(), operation.clone())]);
+    Ok(effective)
+}
+
+fn operator_operation_from_invocation(
+    spec: &OperatorSpec,
+    invocation: &OperatorInvocation,
+) -> Result<String, OperatorToolError> {
+    let operation_from_param = invocation
+        .params
+        .get("operation")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let operation = invocation
+        .operation
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or(operation_from_param);
+    let names = operator_operation_names(spec);
+    match (operation, names.as_slice()) {
+        (Some(operation), _) => Ok(operation),
+        (None, [only]) => Ok(only.clone()),
+        (None, []) => Ok("run".to_string()),
+        (None, many) => Err(OperatorToolError::new(
+            "missing_operation",
+            false,
+            format!(
+                "Operator `{}` has multiple operations; choose one of: {}.",
+                spec.metadata.id,
+                many.join(", ")
+            ),
+        )
+        .with_suggested_action(
+            "Set `operation` on operator_execute, or `params.operation` for legacy compatibility.",
+        )),
+    }
 }
 
 fn preflight_question_text_by_param(spec: &OperatorSpec) -> BTreeMap<String, String> {
@@ -2268,11 +2894,31 @@ pub fn operator_preflight_question_with_project_preferences(
 ) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
     let resolved = resolve_operator_alias(tool_name).ok()?;
     let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
+    let invocation = serde_json::from_str::<OperatorInvocation>(arguments).ok()?;
+    let operation_id = operator_operation_from_invocation(&resolved.spec, &invocation).ok()?;
+    let operation_spec = operator_spec_for_operation(&resolved.spec, &operation_id).ok()?;
     let params = value.get("params").and_then(JsonValue::as_object);
-    let recommended_params = operator_project_preference_params(project_root, &resolved.spec);
+    let recommended_params = operator_project_preference_params(project_root, &operation_spec);
     operator_preflight_question_for_spec_with_recommended_params(
-        &resolved.spec,
+        &operation_spec,
         Some(resolved.alias.as_str()),
+        params,
+        recommended_params.as_ref(),
+    )
+}
+
+pub fn operator_execute_preflight_question_with_project_preferences(
+    project_root: &Path,
+    arguments: &str,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    let (alias, resolved, invocation, value) = operator_execute_parts(arguments).ok()?;
+    let operation_id = operator_operation_from_invocation(&resolved.spec, &invocation).ok()?;
+    let operation_spec = operator_spec_for_operation(&resolved.spec, &operation_id).ok()?;
+    let params = value.get("params").and_then(JsonValue::as_object);
+    let recommended_params = operator_project_preference_params(project_root, &operation_spec);
+    operator_preflight_question_for_spec_with_recommended_params(
+        &operation_spec,
+        Some(alias.as_str()),
         params,
         recommended_params.as_ref(),
     )
@@ -2347,10 +2993,99 @@ pub fn apply_operator_preflight_answers(
         Ok(resolved) => resolved,
         Err(_) => return Ok(arguments.to_string()),
     };
-    let Some(preflight) = resolved.spec.preflight.as_ref() else {
+    let invocation = match serde_json::from_str::<OperatorInvocation>(arguments) {
+        Ok(invocation) => invocation,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let operation_id = match operator_operation_from_invocation(&resolved.spec, &invocation) {
+        Ok(operation_id) => operation_id,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let operation_spec = match operator_spec_for_operation(&resolved.spec, &operation_id) {
+        Ok(spec) => spec,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let Some(preflight) = operation_spec.preflight.as_ref() else {
         return Ok(arguments.to_string());
     };
-    apply_operator_preflight_answers_for_spec(&resolved.spec, preflight, arguments, ask_user_output)
+    apply_operator_preflight_answers_for_spec(
+        &operation_spec,
+        preflight,
+        arguments,
+        ask_user_output,
+    )
+}
+
+pub fn apply_operator_execute_preflight_answers(
+    arguments: &str,
+    ask_user_output: &JsonValue,
+) -> Result<String, String> {
+    let (_alias, resolved, invocation, _value) = match operator_execute_parts(arguments) {
+        Ok(parts) => parts,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let operation_id = match operator_operation_from_invocation(&resolved.spec, &invocation) {
+        Ok(operation_id) => operation_id,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let operation_spec = match operator_spec_for_operation(&resolved.spec, &operation_id) {
+        Ok(spec) => spec,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let Some(preflight) = operation_spec.preflight.as_ref() else {
+        return Ok(arguments.to_string());
+    };
+    apply_operator_preflight_answers_for_spec(
+        &operation_spec,
+        preflight,
+        arguments,
+        ask_user_output,
+    )
+}
+
+fn operator_execute_parts(
+    arguments: &str,
+) -> Result<(String, ResolvedOperator, OperatorInvocation, JsonValue), String> {
+    let value = serde_json::from_str::<JsonValue>(arguments)
+        .map_err(|err| format!("Invalid operator_execute arguments JSON: {err}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "operator_execute arguments must be an object".to_string())?;
+    let alias = object
+        .get("operator")
+        .or_else(|| object.get("program"))
+        .or_else(|| object.get("id"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "operator_execute requires operator/program/id".to_string())?
+        .to_string();
+    let resolved = resolve_operator_alias(&alias).map_err(|error| error.message)?;
+    let invocation = OperatorInvocation {
+        operation: object
+            .get("operation")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        inputs: object_map_to_btree(object.get("inputs")),
+        params: object_map_to_btree(object.get("params")),
+        resources: object_map_to_btree(object.get("resources")),
+        metadata: object_map_to_btree(object.get("metadata")),
+    };
+    Ok((alias, resolved, invocation, value))
+}
+
+fn object_map_to_btree(value: Option<&JsonValue>) -> BTreeMap<String, JsonValue> {
+    value
+        .and_then(JsonValue::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn apply_operator_preflight_answers_for_spec(
@@ -2789,6 +3524,8 @@ fn resources_object_schema(resources: &BTreeMap<String, OperatorResourceSpec>) -
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorInvocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
     #[serde(default)]
     pub inputs: BTreeMap<String, JsonValue>,
     #[serde(default)]
@@ -3717,6 +4454,12 @@ async fn execute_resolved_operator(
     invocation: OperatorInvocation,
     run_context: Option<OperatorRunContext>,
 ) -> Result<OperatorRunResult, OperatorToolError> {
+    let operation_id = operator_operation_from_invocation(&resolved.spec, &invocation)?;
+    let mut resolved = resolved;
+    resolved.spec = operator_spec_for_operation(&resolved.spec, &operation_id)?;
+    let mut invocation = invocation;
+    invocation.params.remove("operation");
+
     if !runtime_supported(ctx, &resolved.spec) {
         return Err(OperatorToolError::new(
             "runtime_unsupported",
@@ -3753,6 +4496,7 @@ async fn execute_resolved_operator(
     let supplied_param_names = invocation.params.keys().cloned().collect::<BTreeSet<_>>();
     let mut effective_params = apply_param_defaults(&resolved.spec, invocation.params);
     validate_field_values("params", &resolved.spec.interface.params, &effective_params)?;
+    effective_params.insert("operation".to_string(), json!(operation_id));
     let effective_resources =
         apply_resource_defaults_and_overrides(&resolved.spec, invocation.resources)?;
     apply_equal_bindings(&resolved.spec, &mut effective_params, &effective_resources)?;
@@ -5808,7 +6552,7 @@ fn operator_uses_slurm_scheduler(
     spec: &OperatorSpec,
     ctx: &crate::domain::tools::ToolContext,
 ) -> bool {
-    if ctx.execution_environment.trim().to_ascii_lowercase() != "ssh" {
+    if !ctx.execution_environment.trim().eq_ignore_ascii_case("ssh") {
         return false;
     }
     let Some(runtime) = spec.runtime.as_ref() else {
@@ -5987,7 +6731,7 @@ fn sacct_suggested_action(
     match category {
         SacctFailureCategory::Oom => {
             let max_rss_kb = max_rss_kb?;
-            let suggested_mb = (((max_rss_kb as u128) * 3) + 2047) / 2048;
+            let suggested_mb = ((max_rss_kb as u128) * 3).div_ceil(2048);
             Some(format!("Re-run with --mem={}MB", suggested_mb.max(1)))
         }
         SacctFailureCategory::Timeout => {
@@ -9322,38 +10066,289 @@ mod tests {
         assert_eq!(success.suggested_action, None);
     }
 
-    fn bundled_smoke_operator_paths() -> (PathBuf, PathBuf) {
-        bundled_operator_manifest_path("write-text-report")
+    fn write_smoke_operator_plugin(tmp: &TempDir) -> PathBuf {
+        let plugin_root = tmp.path().join("operator-smoke");
+        fs::create_dir_all(plugin_root.join("operators/write-text-report")).unwrap();
+        fs::create_dir_all(plugin_root.join("operators/container-text-report")).unwrap();
+        fs::create_dir_all(plugin_root.join("scripts")).unwrap();
+        fs::write(
+            plugin_root.join("plugin.json"),
+            r#"{"name":"operator-smoke","version":"0.1.0","operators":"./operators"}"#,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("operators/write-text-report/operator.yaml"),
+            WRITE_TEXT_REPORT_OPERATOR,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("operators/container-text-report/operator.yaml"),
+            CONTAINER_TEXT_REPORT_OPERATOR,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("scripts/write_text_report.sh"),
+            WRITE_TEXT_REPORT_SCRIPT,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join("scripts/write_container_report.sh"),
+            WRITE_CONTAINER_REPORT_SCRIPT,
+        )
+        .unwrap();
+        plugin_root
     }
 
-    fn bundled_container_operator_paths() -> (PathBuf, PathBuf) {
-        bundled_operator_manifest_path("container-text-report")
+    fn smoke_operator_paths(tmp: &TempDir) -> (PathBuf, PathBuf) {
+        smoke_operator_manifest_path(tmp, "write-text-report")
     }
 
-    fn bundled_operator_manifest_path(operator_dir: &str) -> (PathBuf, PathBuf) {
-        bundled_plugin_operator_manifest_path("operator-smoke", operator_dir)
+    fn container_operator_paths(tmp: &TempDir) -> (PathBuf, PathBuf) {
+        smoke_operator_manifest_path(tmp, "container-text-report")
     }
 
-    fn bundled_plugin_operator_manifest_path(
-        plugin_name: &str,
-        operator_dir: &str,
-    ) -> (PathBuf, PathBuf) {
-        let plugin_root = match plugin_name {
-            "operator-seqtk" | "ngs-alignment" => Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("repo root")
-                .join(".omiga/plugins")
-                .join(plugin_name),
-            _ => Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("fixtures/plugins/legacy")
-                .join(plugin_name),
-        };
+    fn smoke_operator_manifest_path(tmp: &TempDir, operator_dir: &str) -> (PathBuf, PathBuf) {
+        let plugin_root = write_smoke_operator_plugin(tmp);
         let manifest = plugin_root
             .join("operators")
             .join(operator_dir)
             .join("operator.yaml");
         (plugin_root, manifest)
     }
+
+    fn curated_marketplace_root() -> PathBuf {
+        let marketplace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins");
+        marketplace_root
+    }
+
+    fn curated_marketplace_plugin_roots() -> Vec<(String, PathBuf)> {
+        let marketplace_root = curated_marketplace_root();
+        let raw = std::fs::read_to_string(marketplace_root.join("marketplace.json"))
+            .expect("marketplace manifest");
+        let manifest_json: serde_json::Value =
+            serde_json::from_str(&raw).expect("marketplace json");
+        manifest_json
+            .get("plugins")
+            .and_then(|plugins| plugins.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.get("name")?.as_str()?.to_string();
+                let source_path = entry.get("source")?.get("path")?.as_str()?;
+                Some((
+                    name,
+                    marketplace_root.join(source_path.trim_start_matches("./")),
+                ))
+            })
+            .collect()
+    }
+
+    fn curated_operator_loaded_plugins() -> Vec<crate::domain::plugins::LoadedPlugin> {
+        curated_marketplace_plugin_roots()
+            .into_iter()
+            .filter_map(|(plugin_name, plugin_root)| {
+                let manifest = crate::domain::plugins::load_plugin_manifest(&plugin_root)?;
+                manifest.operators.as_ref()?;
+                Some(crate::domain::plugins::LoadedPlugin {
+                    id: format!("{plugin_name}@omiga-curated"),
+                    manifest_name: Some(plugin_name),
+                    display_name: None,
+                    description: None,
+                    root: plugin_root,
+                    enabled: true,
+                    skill_roots: Vec::new(),
+                    mcp_servers: HashMap::new(),
+                    apps: Vec::new(),
+                    retrieval: None,
+                    error: None,
+                })
+            })
+            .collect()
+    }
+
+    const WRITE_TEXT_REPORT_OPERATOR: &str = r#"apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: write_text_report
+  version: 0.1.0
+  name: Write Text Report
+  description: Write a deterministic text artifact from a message parameter.
+  tags:
+    - smoke-test
+    - text
+interface:
+  params:
+    message:
+      kind: string
+      description: Text to write into the generated report artifact.
+      default: hello from Omiga operator
+    repeat:
+      kind: integer
+      description: Number of report lines to write.
+      default: 1
+      minimum: 1
+      maximum: 20
+  outputs:
+    report:
+      kind: file
+      description: Generated text report.
+      glob: operator-report.txt
+      required: true
+smokeTests:
+  - id: default
+    name: Write text report smoke
+    description: Generates a deterministic two-line report artifact.
+    params:
+      message: hello operator smoke
+      repeat: 2
+    resources: {}
+runtime:
+  placement:
+    supported:
+      - local
+      - ssh
+  container:
+    supported:
+      - none
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 60s
+    exposed: true
+execution:
+  argv:
+    - /bin/sh
+    - ./scripts/write_text_report.sh
+    - ${outdir}
+    - ${params.message}
+    - ${params.repeat}
+"#;
+
+    const CONTAINER_TEXT_REPORT_OPERATOR: &str = r#"apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: container_text_report
+  version: 0.1.0
+  name: Container Text Report
+  description: Write a deterministic text artifact from inside Docker or Singularity.
+  tags:
+    - smoke-test
+    - container
+    - docker
+    - singularity
+interface:
+  params:
+    message:
+      kind: string
+      description: Text to write into the generated container report artifact.
+      default: hello from Omiga container operator
+    repeat:
+      kind: integer
+      description: Number of report lines to write before the runtime marker.
+      default: 1
+      minimum: 1
+      maximum: 20
+  outputs:
+    report:
+      kind: file
+      description: Generated container text report.
+      glob: container-operator-report.txt
+      required: true
+smokeTests:
+  - id: default
+    name: Active container smoke
+    description: Runs the operator through the active Docker or Singularity backend and writes a two-line report plus a runtime marker.
+    params:
+      message: hello container operator smoke
+      repeat: 2
+    resources: {}
+runtime:
+  placement:
+    supported:
+      - local
+      - ssh
+  container:
+    supported:
+      - docker
+      - singularity
+    images:
+      docker: alpine:3.19
+      singularity: docker://alpine:3.19
+  scheduler:
+    supported:
+      - none
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 120s
+    exposed: true
+execution:
+  argv:
+    - /bin/sh
+    - ./scripts/write_container_report.sh
+    - ${outdir}
+    - ${params.message}
+    - ${params.repeat}
+"#;
+
+    const WRITE_TEXT_REPORT_SCRIPT: &str = r#"#!/bin/sh
+set -eu
+
+outdir="${1:?missing outdir}"
+message="${2:-hello from Omiga operator}"
+repeat="${3:-1}"
+
+case "$repeat" in
+  ''|*[!0-9]*) repeat=1 ;;
+esac
+if [ "$repeat" -lt 1 ]; then repeat=1; fi
+if [ "$repeat" -gt 20 ]; then repeat=20; fi
+
+mkdir -p "$outdir"
+: > "$outdir/operator-report.txt"
+i=0
+while [ "$i" -lt "$repeat" ]; do
+  printf '%s\n' "$message" >> "$outdir/operator-report.txt"
+  i=$((i + 1))
+done
+
+printf 'wrote %s line(s) to %s\n' "$repeat" "$outdir/operator-report.txt"
+"#;
+
+    const WRITE_CONTAINER_REPORT_SCRIPT: &str = r#"#!/bin/sh
+set -eu
+
+outdir="${1:?missing outdir}"
+message="${2:-hello from Omiga container operator}"
+repeat="${3:-1}"
+
+case "$repeat" in
+  ''|*[!0-9]*) repeat=1 ;;
+esac
+if [ "$repeat" -lt 1 ]; then repeat=1; fi
+if [ "$repeat" -gt 20 ]; then repeat=20; fi
+
+mkdir -p "$outdir"
+report="$outdir/container-operator-report.txt"
+: > "$report"
+i=0
+while [ "$i" -lt "$repeat" ]; do
+  printf '%s\n' "$message" >> "$report"
+  i=$((i + 1))
+done
+
+printf 'container smoke runtime: %s\n' "$(uname -s 2>/dev/null || printf unknown)" >> "$report"
+printf 'wrote %s line(s) plus runtime marker to %s\n' "$repeat" "$report"
+"#;
 
     fn cached_report_operator_spec(
         tmp: &TempDir,
@@ -9390,6 +10385,7 @@ mod tests {
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec![
@@ -9416,6 +10412,42 @@ mod tests {
         }
     }
 
+    fn simple_operator_spec(
+        tmp: &TempDir,
+        id: &str,
+        version: &str,
+        source_plugin: &str,
+    ) -> OperatorSpec {
+        OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: id.to_string(),
+                version: version.to_string(),
+                name: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec!["true".to_string()],
+            },
+            preflight: None,
+            runtime: None,
+            cache: None,
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: source_plugin.to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        }
+    }
+
     fn argv_operator_spec(tmp: &TempDir, argv: &[&str]) -> OperatorSpec {
         OperatorSpec {
             api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
@@ -9428,6 +10460,7 @@ mod tests {
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: argv.iter().map(|value| value.to_string()).collect(),
@@ -9448,6 +10481,7 @@ mod tests {
 
     fn input_file_invocation(input: &str) -> OperatorInvocation {
         OperatorInvocation {
+            operation: None,
             inputs: BTreeMap::from([("input".to_string(), JsonValue::String(input.to_string()))]),
             params: BTreeMap::new(),
             resources: BTreeMap::new(),
@@ -9770,8 +10804,9 @@ execution:
     }
 
     #[test]
-    fn discovers_bundled_smoke_operator_from_active_plugin() {
-        let (plugin_root, manifest) = bundled_smoke_operator_paths();
+    fn discovers_temp_smoke_operator_from_active_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) = smoke_operator_paths(&tmp);
         assert!(manifest.is_file());
 
         let plugin = crate::domain::plugins::LoadedPlugin {
@@ -9792,7 +10827,7 @@ execution:
         let smoke = candidates
             .iter()
             .find(|candidate| candidate.metadata.id == "write_text_report")
-            .expect("bundled smoke operator should be discovered");
+            .expect("temp smoke operator should be discovered");
         assert_eq!(smoke.source.source_plugin, "operator-smoke@omiga-curated");
         assert_eq!(smoke.metadata.version, "0.1.0");
         assert_eq!(smoke.execution.argv[0], "/bin/sh");
@@ -9807,7 +10842,7 @@ execution:
         let container = candidates
             .iter()
             .find(|candidate| candidate.metadata.id == "container_text_report")
-            .expect("bundled container smoke operator should be discovered");
+            .expect("temp container smoke operator should be discovered");
         assert_eq!(
             container.source.source_plugin,
             "operator-smoke@omiga-curated"
@@ -9842,175 +10877,69 @@ execution:
     }
 
     #[test]
-    fn discovers_atomic_bundled_analysis_operator_plugins() {
-        let cases = [
-            (
-                "operator-pca-r",
-                "pca-matrix",
-                "omics_pca_matrix",
-                "Rscript",
-            ),
-            (
-                "operator-differential-expression-r",
-                "differential-expression-basic",
-                "omics_differential_expression_basic",
-                "Rscript",
-            ),
-            (
-                "operator-enrichment-r",
-                "functional-enrichment-basic",
-                "omics_functional_enrichment_basic",
-                "Rscript",
-            ),
-            (
-                "operator-seqtk",
-                "seqtk-sample",
-                "seqtk_sample_reads",
-                "/bin/sh",
-            ),
-            (
-                "operator-pubmed-search",
-                "pubmed-search",
-                "pubmed_search",
-                "python3",
-            ),
-            ("operator-geo-search", "geo-search", "geo_search", "python3"),
-            (
-                "operator-uniprot-search",
-                "uniprot-search",
-                "uniprot_search",
-                "python3",
-            ),
-        ];
+    fn discovers_curated_operator_plugins_without_core_plugin_name_assumptions() {
+        let plugins = curated_operator_loaded_plugins();
+        assert!(
+            !plugins.is_empty(),
+            "external marketplace should provide operator plugins"
+        );
+        let plugin_refs = plugins.iter().collect::<Vec<_>>();
+        let candidates = discover_operator_candidates_from_plugins(plugin_refs);
+        assert!(
+            !candidates.is_empty(),
+            "operator plugins should expose operator candidates"
+        );
 
-        for (plugin_name, operator_dir, operator_id, first_argv) in cases {
-            let (plugin_root, manifest) =
-                bundled_plugin_operator_manifest_path(plugin_name, operator_dir);
-            assert!(manifest.is_file(), "{plugin_name} manifest should exist");
-
-            let plugin = crate::domain::plugins::LoadedPlugin {
-                id: format!("{plugin_name}@omiga-curated"),
-                manifest_name: Some(plugin_name.to_string()),
-                display_name: None,
-                description: None,
-                root: plugin_root,
-                enabled: true,
-                skill_roots: Vec::new(),
-                mcp_servers: HashMap::new(),
-                apps: Vec::new(),
-                retrieval: None,
-                error: None,
-            };
-
-            let candidates = discover_operator_candidates_from_plugins([&plugin]);
-            // Plugins may bundle multiple operators (e.g. `operator-seqtk` ships
-            // several subcommand wrappers). Look up the one this test case targets.
-            let operator = candidates
-                .iter()
-                .find(|c| c.metadata.id == operator_id)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{plugin_name} should expose operator id {operator_id}, found: {:?}",
-                        candidates
-                            .iter()
-                            .map(|c| &c.metadata.id)
-                            .collect::<Vec<_>>()
-                    )
-                });
-            assert_eq!(operator.execution.argv[0], first_argv);
-            assert!(matches!(
-                operator.interface.outputs["summary"].kind,
-                OperatorFieldKind::Json
-            ));
-            if plugin_name == "operator-differential-expression-r" {
-                let preflight = operator
-                    .preflight
-                    .as_ref()
-                    .expect("differential expression choices should live in manifest preflight");
-                assert_eq!(preflight.questions.len(), 4);
-                assert!(preflight.questions.iter().any(|question| {
-                    question.param == "de_method"
-                        && question
-                            .options
-                            .iter()
-                            .any(|option| option.value == json!("deseq2"))
-                }));
-                assert!(preflight.questions.iter().any(|question| {
-                    question.param == "pvalue_threshold"
-                        && question
-                            .options
-                            .iter()
-                            .any(|option| option.custom && option.custom_placeholder.is_some())
-                }));
-                let schema = operator_parameters_schema(operator);
-                assert!(schema["required"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|value| value == "params"));
-                let required_params = schema["properties"]["params"]["required"]
-                    .as_array()
-                    .unwrap();
-                assert!(required_params.iter().any(|value| value == "group_column"));
-                assert!(!required_params.iter().any(|value| value == "de_method"));
-                assert!(!required_params
-                    .iter()
-                    .any(|value| value == "input_data_type"));
-                assert!(
-                    schema["properties"]["params"]["properties"]["de_method"]["description"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Ask state")
-                );
-                let ask_state_schema = schema["properties"]["params"]["properties"]["de_method"]
-                    ["oneOf"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|candidate| candidate["enum"] == json!(["ask"]))
-                    .expect("preflight params should allow explicit ask state");
-                assert_eq!(ask_state_schema["type"], "string");
-            }
-            assert_eq!(
-                operator.source.source_plugin,
-                format!("{plugin_name}@omiga-curated")
+        let mut aliases = HashSet::new();
+        let mut operation_count = 0usize;
+        for candidate in &candidates {
+            assert!(
+                aliases.insert(candidate.metadata.id.clone()),
+                "duplicate marketplace operator id `{}`",
+                candidate.metadata.id
             );
+            assert!(
+                candidate.source.source_plugin.ends_with("@omiga-curated"),
+                "candidate source should stay scoped to its plugin: {}",
+                candidate.source.source_plugin
+            );
+            assert!(
+                !candidate.operations.is_empty(),
+                "operator `{}` should expose at least one operation",
+                candidate.metadata.id
+            );
+            operation_count += candidate.operations.len();
         }
+        assert!(operation_count >= candidates.len());
     }
 
     #[test]
-    fn transcriptomics_analysis_plugin_does_not_expose_operator_units() {
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .join(".omiga/plugins/transcriptomics");
-        assert!(
-            !plugin_root.join("operators").exists(),
-            "transcriptomics keeps template-only public units"
-        );
-        assert!(
-            plugin_root.join("template_backing_operators").is_dir(),
-            "private backing specs preserve template validation without exposing operators"
-        );
-        let plugin = crate::domain::plugins::LoadedPlugin {
-            id: "transcriptomics@omiga-curated".to_string(),
-            manifest_name: Some("transcriptomics".to_string()),
-            display_name: Some("Transcriptomics".to_string()),
-            description: None,
-            root: plugin_root,
-            enabled: true,
-            skill_roots: Vec::new(),
-            mcp_servers: HashMap::new(),
-            apps: Vec::new(),
-            retrieval: None,
-            error: None,
-        };
+    fn marketplace_plugins_without_operator_roots_do_not_expose_operator_units() {
+        let plugin = curated_marketplace_plugin_roots()
+            .into_iter()
+            .find_map(|(plugin_name, plugin_root)| {
+                let manifest = crate::domain::plugins::load_plugin_manifest(&plugin_root)?;
+                if manifest.operators.is_some() {
+                    return None;
+                }
+                Some(crate::domain::plugins::LoadedPlugin {
+                    id: format!("{plugin_name}@omiga-curated"),
+                    manifest_name: Some(plugin_name),
+                    display_name: None,
+                    description: None,
+                    root: plugin_root,
+                    enabled: true,
+                    skill_roots: Vec::new(),
+                    mcp_servers: HashMap::new(),
+                    apps: Vec::new(),
+                    retrieval: None,
+                    error: None,
+                })
+            })
+            .expect("marketplace plugin without operators");
 
         let candidates = discover_operator_candidates_from_plugins([&plugin]);
-        assert!(
-            candidates.is_empty(),
-            "Transcriptomics should expose templates only; operator versions are private backing specs"
-        );
+        assert!(candidates.is_empty());
     }
 
     #[test]
@@ -10434,9 +11363,9 @@ execution:
     }
 
     #[test]
-    fn bundled_container_smoke_operator_builds_docker_command() {
+    fn temp_container_smoke_operator_builds_docker_command() {
         let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) = bundled_container_operator_paths();
+        let (plugin_root, manifest) = container_operator_paths(&tmp);
         let spec =
             load_operator_manifest(&manifest, "operator-smoke@omiga-curated", plugin_root).unwrap();
         assert_eq!(spec.metadata.id, "container_text_report");
@@ -10487,9 +11416,9 @@ execution:
 
     #[tokio::test]
     #[ignore = "requires a running Docker daemon and access to the alpine:3.19 image"]
-    async fn executes_bundled_container_smoke_operator_with_docker_runtime() {
+    async fn executes_temp_container_smoke_operator_with_docker_runtime() {
         let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) = bundled_container_operator_paths();
+        let (plugin_root, manifest) = container_operator_paths(&tmp);
         let spec =
             load_operator_manifest(&manifest, "operator-smoke@omiga-curated", plugin_root).unwrap();
         let smoke_invocation = spec
@@ -10599,76 +11528,164 @@ execution:
     }
 
     #[test]
+    fn active_plugin_operator_auto_exposes_with_default_alias() {
+        let tmp = TempDir::new().unwrap();
+        let spec = simple_operator_spec(&tmp, "fastqc", "1", "bio@builtin");
+
+        let resolved = resolve_enabled_operators_from(vec![spec], OperatorRegistryFile::default());
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].alias, "fastqc");
+        assert_eq!(resolved[0].spec.source.source_plugin, "bio@builtin");
+    }
+
+    #[test]
+    fn disabled_registry_entry_does_not_suppress_plugin_auto_exposure() {
+        let tmp = TempDir::new().unwrap();
+        let spec = simple_operator_spec(&tmp, "fastqc", "1", "bio@builtin");
+        let registry = OperatorRegistryFile {
+            enabled: BTreeMap::from([(
+                "fastqc".to_string(),
+                OperatorRegistryEntry::Full {
+                    operator_id: Some("fastqc".to_string()),
+                    source_plugin: Some("bio@builtin".to_string()),
+                    version: Some("1".to_string()),
+                    enabled: Some(false),
+                },
+            )]),
+        };
+
+        let resolved = resolve_enabled_operators_from(vec![spec], registry);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].alias, "fastqc");
+    }
+
+    #[test]
+    fn explicit_registry_alias_does_not_duplicate_same_operator() {
+        let tmp = TempDir::new().unwrap();
+        let spec = simple_operator_spec(&tmp, "fastqc", "1", "bio@builtin");
+        let registry = OperatorRegistryFile {
+            enabled: BTreeMap::from([(
+                "fastqc_legacy".to_string(),
+                OperatorRegistryEntry::Full {
+                    operator_id: Some("fastqc".to_string()),
+                    source_plugin: Some("bio@builtin".to_string()),
+                    version: Some("1".to_string()),
+                    enabled: Some(true),
+                },
+            )]),
+        };
+
+        let resolved = resolve_enabled_operators_from(vec![spec], registry);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].alias, "fastqc_legacy");
+    }
+
+    #[test]
+    fn operator_system_section_tells_agents_to_use_operator_execute() {
+        let tmp = TempDir::new().unwrap();
+        let section =
+            format_enabled_operator_tools_system_section_from_resolved(vec![ResolvedOperator {
+                alias: "demo_program".to_string(),
+                spec: simple_operator_spec(&tmp, "demo_program", "1", "demo-plugin@test-market"),
+            }])
+            .expect("operator tools prompt section");
+
+        assert!(section.contains("Plugin operator execution"));
+        assert!(section.contains("operator_execute"));
+        assert!(section.contains("Subcommands are operations, not separate tools"));
+        assert!(section.contains("do not ask the user to manually register"));
+    }
+
+    #[test]
+    fn operator_tool_schema_uses_dynamic_operator_prefix_for_compatibility() {
+        let tmp = TempDir::new().unwrap();
+        let schema = operator_tool_schema(ResolvedOperator {
+            alias: "fastqc".to_string(),
+            spec: simple_operator_spec(&tmp, "fastqc", "1", "bio@builtin"),
+        });
+
+        assert_eq!(schema.name, "operator__fastqc");
+    }
+
+    #[test]
+    fn operator_parameters_schema_adds_operation_enum_for_multi_operation_specs() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = tmp.path().join("operator.yaml");
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: demo_program
+  version: "1"
+operations:
+  sample:
+    description: Sample reads
+    category: ngs/sequence-processing
+    group: Sequence Processing
+    stage: NGS / Sequence Processing
+  comp:
+    description: Summarize composition
+    category: ngs/quality-control
+    group: Quality Control
+    stage: NGS / Quality Control
+interface:
+  inputs:
+    reads:
+      kind: file_array
+      required: true
+execution:
+  argv: ["demo-program", "${params.operation}", "${inputs.reads}"]
+"#,
+        )
+        .unwrap();
+
+        let spec = load_operator_manifest(&manifest, "p@m", tmp.path()).unwrap();
+        let schema = operator_parameters_schema(&spec);
+        let operation = &schema["properties"]["params"]["properties"]["operation"];
+
+        assert_eq!(operation["type"], "string");
+        assert_eq!(operation["enum"], json!(["comp", "sample"]));
+        assert_eq!(
+            spec.operations["sample"].category.as_deref(),
+            Some("ngs/sequence-processing")
+        );
+        assert_eq!(
+            operator_operation_groups_for_spec(&spec)
+                .iter()
+                .map(|group| group.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["NGS / Quality Control", "NGS / Sequence Processing"]
+        );
+    }
+
+    #[test]
     fn registry_requires_disambiguation_for_conflicts() {
         let tmp = TempDir::new().unwrap();
-        let source = |plugin: &str| OperatorSpec {
-            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
-            kind: OPERATOR_KIND.to_string(),
-            metadata: OperatorMetadata {
-                id: "fastqc".to_string(),
-                version: "1".to_string(),
-                name: None,
-                description: None,
-                tags: Vec::new(),
-            },
-            interface: OperatorInterfaceSpec::default(),
-            smoke_tests: Vec::new(),
-            execution: OperatorExecutionSpec {
-                argv: vec!["true".to_string()],
-            },
-            preflight: None,
-            runtime: None,
-            cache: None,
-            resources: BTreeMap::new(),
-            bindings: Vec::new(),
-            permissions: None,
-            source: OperatorSource {
-                source_plugin: plugin.to_string(),
-                plugin_root: tmp.path().to_path_buf(),
-                manifest_path: tmp.path().join("operator.yaml"),
-            },
-        };
         let registry = OperatorRegistryFile {
             enabled: BTreeMap::from([(
                 "fastqc".to_string(),
                 OperatorRegistryEntry::Version("1".to_string()),
             )]),
         };
-        assert!(
-            resolve_enabled_operators_from(vec![source("a"), source("b")], registry).is_empty()
-        );
+        assert!(resolve_enabled_operators_from(
+            vec![
+                simple_operator_spec(&tmp, "fastqc", "1", "a"),
+                simple_operator_spec(&tmp, "fastqc", "1", "b")
+            ],
+            registry
+        )
+        .is_empty());
     }
 
     #[test]
     fn registry_update_pins_resolved_source_and_version() {
         let tmp = TempDir::new().unwrap();
-        let spec = OperatorSpec {
-            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
-            kind: OPERATOR_KIND.to_string(),
-            metadata: OperatorMetadata {
-                id: "fastqc".to_string(),
-                version: "0.12.1".to_string(),
-                name: None,
-                description: None,
-                tags: Vec::new(),
-            },
-            interface: OperatorInterfaceSpec::default(),
-            smoke_tests: Vec::new(),
-            execution: OperatorExecutionSpec {
-                argv: vec!["true".to_string()],
-            },
-            preflight: None,
-            runtime: None,
-            cache: None,
-            resources: BTreeMap::new(),
-            bindings: Vec::new(),
-            permissions: None,
-            source: OperatorSource {
-                source_plugin: "bio@builtin".to_string(),
-                plugin_root: tmp.path().to_path_buf(),
-                manifest_path: tmp.path().join("operator.yaml"),
-            },
-        };
+        let spec = simple_operator_spec(&tmp, "fastqc", "0.12.1", "bio@builtin");
         let mut registry = OperatorRegistryFile::default();
         apply_operator_registry_update(
             &mut registry,
@@ -10798,6 +11815,7 @@ execution:
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
@@ -10862,6 +11880,7 @@ execution:
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
@@ -11015,6 +12034,7 @@ execution:
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["/bin/cat".to_string(), "${inputs.input}".to_string()],
@@ -11078,6 +12098,7 @@ execution:
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["/bin/true".to_string()],
@@ -11135,14 +12156,14 @@ runtime:
   type: conda
   condaEnvFile: ./conda.yaml
 diagnostics:
-  checkCommand: [bwa, --version]
+  checkCommand: [demoalign, --version]
 "#
             ),
         )
         .unwrap();
         fs::write(
             env_dir.join("conda.yaml"),
-            "channels:\n  - conda-forge\n  - bioconda\ndependencies:\n  - bwa =0.7.17\n",
+            "channels:\n  - conda-forge\n  - bioconda\ndependencies:\n  - demoalign =1.0\n",
         )
         .unwrap();
     }
@@ -11150,10 +12171,10 @@ diagnostics:
     #[test]
     fn local_operator_command_wraps_conda_environment_ref() {
         let tmp = TempDir::new().unwrap();
-        write_conda_environment_profile(tmp.path(), "ngs-bwa");
-        let mut spec = argv_operator_spec(&tmp, &["bwa", "index", "ref.fa"]);
+        write_conda_environment_profile(tmp.path(), "alignment-env");
+        let mut spec = argv_operator_spec(&tmp, &["demoalign", "index", "ref.fa"]);
         spec.runtime = Some(json!({
-            "envRef": "ngs-bwa",
+            "envRef": "alignment-env",
             "placement": { "supported": ["local"] },
             "container": { "supported": ["none"] }
         }));
@@ -11174,7 +12195,7 @@ diagnostics:
         assert!(command.contains("env create -y -p"));
         assert!(command.contains("run -p"));
         assert!(command.contains(".omiga/operator-envs/conda"));
-        assert!(command.contains("bwa"));
+        assert!(command.contains("demoalign"));
         assert!(command.contains("ref.fa"));
     }
 
@@ -11196,8 +12217,8 @@ runtime:
 "#,
         )
         .unwrap();
-        fs::write(env_dir.join("requirements.txt"), "bwa\n").unwrap();
-        let mut spec = argv_operator_spec(&tmp, &["bwa", "index", "ref.fa"]);
+        fs::write(env_dir.join("requirements.txt"), "demoalign\n").unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["demoalign", "index", "ref.fa"]);
         spec.runtime = Some(json!({
             "envRef": "bad-conda",
             "placement": { "supported": ["local"] }
@@ -11378,29 +12399,6 @@ runtime:
     }
 
     #[test]
-    fn ngs_alignment_wrapper_smoke_fixture_runs_with_mock_tools() {
-        let (plugin_root, _) = bundled_plugin_operator_manifest_path("ngs-alignment", "bwa-index");
-        let script = plugin_root
-            .join("scripts")
-            .join("test_ngs_alignment_smoke.py");
-
-        let output = std::process::Command::new("python3")
-            .arg(&script)
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .current_dir(plugin_root)
-            .output()
-            .expect("run ngs alignment smoke test");
-
-        assert!(
-            output.status.success(),
-            "ngs alignment smoke failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("smoke fixture passed"));
-    }
-
-    #[test]
     fn local_runtime_prefers_no_container_when_manifest_allows_none() {
         let tmp = TempDir::new().unwrap();
         let spec = OperatorSpec {
@@ -11414,6 +12412,7 @@ runtime:
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["/bin/true".to_string()],
@@ -11782,9 +12781,9 @@ runtime:
     }
 
     #[tokio::test]
-    async fn executes_bundled_smoke_operator_locally() {
+    async fn executes_temp_smoke_operator_locally() {
         let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) = bundled_smoke_operator_paths();
+        let (plugin_root, manifest) = smoke_operator_paths(&tmp);
         let spec =
             load_operator_manifest(&manifest, "operator-smoke@omiga-curated", plugin_root).unwrap();
         let smoke_invocation = spec.smoke_tests[0].arguments.clone();
@@ -11982,179 +12981,6 @@ runtime:
     }
 
     #[tokio::test]
-    async fn executes_pubmed_operator_with_offline_fixture() {
-        let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) =
-            bundled_plugin_operator_manifest_path("operator-pubmed-search", "pubmed-search");
-        let spec = load_operator_manifest(
-            &manifest,
-            "operator-pubmed-search@omiga-curated",
-            plugin_root.clone(),
-        )
-        .unwrap();
-        let fixture = plugin_root.join("examples").join("pubmed_fixture.json");
-        let invocation = OperatorInvocation {
-            inputs: BTreeMap::new(),
-            params: BTreeMap::from([
-                ("query".to_string(), json!("TP53 cancer")),
-                ("limit".to_string(), json!(2)),
-                ("mode".to_string(), json!("offline_fixture")),
-                (
-                    "fixture_json".to_string(),
-                    json!(fixture.to_string_lossy().to_string()),
-                ),
-                ("email".to_string(), json!("")),
-            ]),
-            resources: BTreeMap::new(),
-            metadata: BTreeMap::new(),
-        };
-        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
-
-        let result = execute_resolved_operator(
-            &ctx,
-            ResolvedOperator {
-                alias: "pubmed_search".to_string(),
-                spec,
-            },
-            invocation,
-            Some(OperatorRunContext {
-                kind: Some("operator-pilot".to_string()),
-                smoke_test_id: Some("offline-fixture".to_string()),
-                smoke_test_name: Some("PubMed offline fixture".to_string()),
-                parent_execution_id: None,
-                bypass_cache: false,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.status, "succeeded");
-        let structured_outputs = result.structured_outputs.as_ref().unwrap();
-        assert_eq!(structured_outputs["summary"]["count"], 2);
-        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
-        let results_path = Path::new(&result.outputs["results"][0].path);
-        let results = fs::read_to_string(results_path).expect("results");
-        assert!(results.contains("31452104"));
-        assert!(results.contains("25772236"));
-    }
-
-    #[tokio::test]
-    async fn executes_geo_operator_with_offline_fixture() {
-        let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) =
-            bundled_plugin_operator_manifest_path("operator-geo-search", "geo-search");
-        let spec = load_operator_manifest(
-            &manifest,
-            "operator-geo-search@omiga-curated",
-            plugin_root.clone(),
-        )
-        .unwrap();
-        let fixture = plugin_root.join("examples").join("geo_fixture.json");
-        let invocation = OperatorInvocation {
-            inputs: BTreeMap::new(),
-            params: BTreeMap::from([
-                ("query".to_string(), json!("TP53 cancer")),
-                ("limit".to_string(), json!(2)),
-                ("mode".to_string(), json!("offline_fixture")),
-                (
-                    "fixture_json".to_string(),
-                    json!(fixture.to_string_lossy().to_string()),
-                ),
-                ("email".to_string(), json!("")),
-            ]),
-            resources: BTreeMap::new(),
-            metadata: BTreeMap::new(),
-        };
-        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
-
-        let result = execute_resolved_operator(
-            &ctx,
-            ResolvedOperator {
-                alias: "geo_search".to_string(),
-                spec,
-            },
-            invocation,
-            Some(OperatorRunContext {
-                kind: Some("operator-pilot".to_string()),
-                smoke_test_id: Some("offline-fixture".to_string()),
-                smoke_test_name: Some("GEO offline fixture".to_string()),
-                parent_execution_id: None,
-                bypass_cache: false,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.status, "succeeded");
-        let structured_outputs = result.structured_outputs.as_ref().unwrap();
-        assert_eq!(structured_outputs["summary"]["count"], 2);
-        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
-        let results_path = Path::new(&result.outputs["results"][0].path);
-        let results = fs::read_to_string(results_path).expect("results");
-        assert!(results.contains("GSE123456"));
-        assert!(results.contains("GSE123457"));
-    }
-
-    #[tokio::test]
-    async fn executes_uniprot_operator_with_offline_fixture() {
-        let tmp = TempDir::new().unwrap();
-        let (plugin_root, manifest) =
-            bundled_plugin_operator_manifest_path("operator-uniprot-search", "uniprot-search");
-        let spec = load_operator_manifest(
-            &manifest,
-            "operator-uniprot-search@omiga-curated",
-            plugin_root.clone(),
-        )
-        .unwrap();
-        let fixture = plugin_root.join("examples").join("uniprot_fixture.json");
-        let invocation = OperatorInvocation {
-            inputs: BTreeMap::new(),
-            params: BTreeMap::from([
-                ("query".to_string(), json!("TP53")),
-                ("limit".to_string(), json!(2)),
-                ("mode".to_string(), json!("offline_fixture")),
-                (
-                    "fixture_json".to_string(),
-                    json!(fixture.to_string_lossy().to_string()),
-                ),
-                ("organism".to_string(), json!("")),
-                ("taxon_id".to_string(), json!("9606")),
-                ("reviewed".to_string(), json!("true")),
-            ]),
-            resources: BTreeMap::new(),
-            metadata: BTreeMap::new(),
-        };
-        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
-
-        let result = execute_resolved_operator(
-            &ctx,
-            ResolvedOperator {
-                alias: "uniprot_search".to_string(),
-                spec,
-            },
-            invocation,
-            Some(OperatorRunContext {
-                kind: Some("operator-pilot".to_string()),
-                smoke_test_id: Some("offline-fixture".to_string()),
-                smoke_test_name: Some("UniProt offline fixture".to_string()),
-                parent_execution_id: None,
-                bypass_cache: false,
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.status, "succeeded");
-        let structured_outputs = result.structured_outputs.as_ref().unwrap();
-        assert_eq!(structured_outputs["summary"]["count"], 2);
-        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
-        let results_path = Path::new(&result.outputs["results"][0].path);
-        let results = fs::read_to_string(results_path).expect("results");
-        assert!(results.contains("P04637"));
-        assert!(results.contains("P38398"));
-    }
-
-    #[tokio::test]
     async fn executes_local_operator_and_collects_outputs() {
         let tmp = TempDir::new().unwrap();
         let input = tmp.path().join("input.txt");
@@ -12203,6 +13029,7 @@ runtime:
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec![
@@ -12231,6 +13058,7 @@ runtime:
                 spec,
             },
             OperatorInvocation {
+                operation: None,
                 inputs: BTreeMap::from([(
                     "input".to_string(),
                     JsonValue::String("input.txt".to_string()),
@@ -12342,6 +13170,7 @@ runtime:
                 ]),
                 ..OperatorInterfaceSpec::default()
             },
+            operations: BTreeMap::new(),
             smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
@@ -12428,6 +13257,7 @@ runtime:
                     )]),
                     ..OperatorInterfaceSpec::default()
                 },
+                operations: BTreeMap::new(),
                 smoke_tests: Vec::new(),
                 execution: OperatorExecutionSpec {
                     argv: vec!["true".to_string()],

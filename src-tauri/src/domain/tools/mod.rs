@@ -72,6 +72,8 @@ pub mod monitor;
 pub mod notebook_edit;
 #[path = "operator/describe.rs"]
 pub mod operator_describe;
+#[path = "operator/execute.rs"]
+pub mod operator_execute;
 #[path = "operator/list.rs"]
 pub mod operator_list;
 pub mod push_notification;
@@ -152,6 +154,7 @@ pub enum ToolKind {
     NotebookEdit,
     OperatorList,
     OperatorDescribe,
+    OperatorExecute,
     UnitList,
     UnitSearch,
     UnitDescribe,
@@ -238,6 +241,7 @@ impl fmt::Display for ToolKind {
             ToolKind::NotebookEdit => write!(f, "notebook_edit"),
             ToolKind::OperatorList => write!(f, "operator_list"),
             ToolKind::OperatorDescribe => write!(f, "operator_describe"),
+            ToolKind::OperatorExecute => write!(f, "operator_execute"),
             ToolKind::UnitList => write!(f, "unit_list"),
             ToolKind::UnitSearch => write!(f, "unit_search"),
             ToolKind::UnitDescribe => write!(f, "unit_describe"),
@@ -319,6 +323,7 @@ pub enum Tool {
     NotebookEdit(notebook_edit::NotebookEditArgs),
     OperatorList(operator_list::OperatorListArgs),
     OperatorDescribe(operator_describe::OperatorDescribeArgs),
+    OperatorExecute(operator_execute::OperatorExecuteArgs),
     UnitList(unit_list::UnitListArgs),
     UnitSearch(unit_search::UnitSearchArgs),
     UnitDescribe(unit_describe::UnitDescribeArgs),
@@ -399,6 +404,7 @@ impl Tool {
             Tool::NotebookEdit(_) => ToolKind::NotebookEdit,
             Tool::OperatorList(_) => ToolKind::OperatorList,
             Tool::OperatorDescribe(_) => ToolKind::OperatorDescribe,
+            Tool::OperatorExecute(_) => ToolKind::OperatorExecute,
             Tool::UnitList(_) => ToolKind::UnitList,
             Tool::UnitSearch(_) => ToolKind::UnitSearch,
             Tool::UnitDescribe(_) => ToolKind::UnitDescribe,
@@ -468,6 +474,7 @@ impl Tool {
             Tool::NotebookEdit(_) => "NotebookEdit",
             Tool::OperatorList(_) => "operator_list",
             Tool::OperatorDescribe(_) => "operator_describe",
+            Tool::OperatorExecute(_) => "operator_execute",
             Tool::UnitList(_) => "unit_list",
             Tool::UnitSearch(_) => "unit_search",
             Tool::UnitDescribe(_) => "unit_describe",
@@ -535,6 +542,7 @@ impl Tool {
             Tool::NotebookEdit(_) => notebook_edit::DESCRIPTION,
             Tool::OperatorList(_) => operator_list::DESCRIPTION,
             Tool::OperatorDescribe(_) => operator_describe::DESCRIPTION,
+            Tool::OperatorExecute(_) => operator_execute::DESCRIPTION,
             Tool::UnitList(_) => unit_list::DESCRIPTION,
             Tool::UnitSearch(_) => unit_search::DESCRIPTION,
             Tool::UnitDescribe(_) => unit_describe::DESCRIPTION,
@@ -614,6 +622,9 @@ impl Tool {
             Tool::OperatorList(args) => operator_list::OperatorListTool::execute(ctx, args).await?,
             Tool::OperatorDescribe(args) => {
                 operator_describe::OperatorDescribeTool::execute(ctx, args).await?
+            }
+            Tool::OperatorExecute(args) => {
+                operator_execute::OperatorExecuteTool::execute(ctx, args).await?
             }
             Tool::UnitList(args) => unit_list::UnitListTool::execute(ctx, args).await?,
             Tool::UnitSearch(args) => unit_search::UnitSearchTool::execute(ctx, args).await?,
@@ -857,6 +868,12 @@ impl Tool {
                     message: format!("Invalid operator_describe arguments: {}", e),
                 })?;
                 Ok(Tool::OperatorDescribe(args))
+            }
+            ToolKind::OperatorExecute => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid operator_execute arguments: {}", e),
+                })?;
+                Ok(Tool::OperatorExecute(args))
             }
             ToolKind::UnitList => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
@@ -1172,6 +1189,7 @@ impl Tool {
             "notebook_edit" => ToolKind::NotebookEdit,
             "operator_list" | "OperatorList" => ToolKind::OperatorList,
             "operator_describe" | "OperatorDescribe" => ToolKind::OperatorDescribe,
+            "operator_execute" | "OperatorExecute" => ToolKind::OperatorExecute,
             "unit_list" | "UnitList" => ToolKind::UnitList,
             "unit_search" | "UnitSearch" => ToolKind::UnitSearch,
             "unit_describe" | "UnitDescribe" => ToolKind::UnitDescribe,
@@ -1876,6 +1894,7 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         todo_write::schema(),
         operator_list::schema(),
         operator_describe::schema(),
+        operator_execute::schema(),
         unit_list::schema(),
         unit_search::schema(),
         unit_describe::schema(),
@@ -1964,21 +1983,28 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "learning_proposal_list" => (1, 16),
         "learning_preference_candidate_list" => (1, 17),
         "environment_profile_check" => (1, 18),
+        "browser_snapshot" => (1, 19),
+        "browser_screenshot" => (1, 20),
 
         // Mutating tools.
         "file_edit" => (2, 0),
         "file_write" => (2, 1),
         "notebook_edit" => (2, 2),
         "todo_write" => (2, 3),
-        "template_execute" => (2, 4),
-        "learning_proposal_decide" => (2, 5),
-        "learning_proposal_apply" => (2, 6),
+        "operator_execute" => (2, 4),
+        "template_execute" => (2, 5),
+        "learning_proposal_decide" => (2, 6),
+        "learning_proposal_apply" => (2, 7),
         "learning_preference_candidate_promote" => (2, 7),
         "execution_archive_suggestion_write" => (2, 8),
         "environment_profile_prepare_plan" => (2, 9),
         "learning_self_evolution_report" => (2, 10),
         "learning_self_evolution_draft_write" => (2, 11),
         "learning_self_evolution_creator" => (2, 12),
+        "browser_open" => (2, 13),
+        "browser_click" => (2, 14),
+        "browser_fill" => (2, 15),
+        "browser_close" => (2, 16),
 
         // Orchestration and app-specific tools.
         "agent" | "Agent" => (3, 0),
@@ -2203,6 +2229,7 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
 #[cfg(test)]
 mod tool_enum_tests {
     use super::*;
+    use crate::domain::operators::OPERATOR_TOOL_PREFIX;
     use crate::domain::retrieval_registry::{self, RetrievalCapability};
     use std::collections::HashSet;
 
@@ -2418,6 +2445,33 @@ mod tool_enum_tests {
         assert!(
             !names.contains("web_fetch"),
             "legacy web_fetch must remain an execution compatibility alias, not a model-visible schema"
+        );
+    }
+
+    #[test]
+    fn tool_schema_catalog_keeps_dynamic_operator_compatibility_tools_out_of_default_builtin_list()
+    {
+        let names: HashSet<_> = all_tool_schemas(true)
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect();
+
+        assert!(
+            names.iter().all(|name| !name.starts_with(OPERATOR_TOOL_PREFIX)),
+            "dynamic operator__ compatibility tools should not be part of the default builtin schema catalog"
+        );
+    }
+
+    #[test]
+    fn tool_schema_catalog_exposes_generic_operator_execute_tool() {
+        let names: HashSet<_> = all_tool_schemas(true)
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect();
+
+        assert!(
+            names.contains("operator_execute"),
+            "operator progressive disclosure should expose a generic operator_execute schema"
         );
     }
 

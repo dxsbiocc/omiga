@@ -75,7 +75,7 @@ import {
 interface SettingsProps {
   open: boolean;
   onClose: () => void;
-  /** See `openSettingsTabMap.ts`: 0–14 */
+  /** See `openSettingsTabMap.ts`: 0–15 */
   initialTab?: number;
   /** When `initialTab` is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
   initialExecutionSubTab?: number;

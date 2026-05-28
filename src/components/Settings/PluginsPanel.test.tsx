@@ -1,6 +1,229 @@
-import { describe, expect, it } from "vitest";
+import type { ReactElement, ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
+import type {
+  HookRuntimeApi,
+  RenderedNode,
+} from "../../test/__tests__/componentHarness";
 import {
+  ComponentHarness,
+  createHookRuntime,
+  findAllNodes,
+  installComponentTestWindow,
+  textContent,
+} from "../../test/__tests__/componentHarness";
+
+const hookRuntimeRef = vi.hoisted(() => ({
+  current: null as HookRuntimeApi | null,
+}));
+
+const pluginStoreMock = vi.hoisted(() => ({
+  state: {
+    marketplaceSources: [] as unknown[],
+    marketplaceSourceViews: [] as unknown[],
+    marketplaces: [] as unknown[],
+    operators: [] as unknown[],
+    operatorRuns: [] as unknown[],
+    retrievalStatuses: [] as unknown[],
+    processPoolStatuses: [] as unknown[],
+    remoteMarketplaceChecks: [] as unknown[],
+    pluginMigrationStatus: null as {
+      migrationNeeded: boolean;
+      configRewriteNeeded: boolean;
+      legacyCacheEntriesToMigrate: number;
+      legacyCacheEntriesToRemove: number;
+      builtinRootsToRefresh: number;
+      warnings: string[];
+    } | null,
+    builtinMarketplaceStatus: null as {
+      ok: boolean;
+      source: string;
+      path?: string | null;
+      message: string;
+    } | null,
+    isLoading: false,
+    isMutating: false,
+    bootstrapInProgress: false,
+    error: null as string | null,
+    ensureBuiltinMarketplace: vi.fn().mockResolvedValue({
+      ok: true,
+      source: "github",
+      path: "/builtin",
+      message: "Built-in marketplace ready.",
+    }),
+    loadPlugins: vi.fn().mockResolvedValue(undefined),
+    loadOperatorRuns: vi.fn().mockResolvedValue(undefined),
+    readOperatorRun: vi.fn(),
+    readOperatorRunLog: vi.fn(),
+    verifyOperatorRun: vi.fn(),
+    clearProcessPool: vi.fn().mockResolvedValue(0),
+    migratePluginState: vi.fn(),
+    installPlugin: vi.fn(),
+    syncPlugin: vi.fn(),
+    checkRemoteMarketplaces: vi.fn(),
+    addMarketplaceSource: vi.fn(),
+    removeMarketplaceSource: vi.fn(),
+    setMarketplaceSourceEnabled: vi.fn(),
+    refreshMarketplaceSource: vi.fn(),
+    uninstallPlugin: vi.fn(),
+    setPluginEnabled: vi.fn(),
+    setTemplateEnabled: vi.fn(),
+    setRetrievalResourceEnabled: vi.fn(),
+    setEnvironmentEnabled: vi.fn(),
+    checkPluginEnvironment: vi.fn(),
+  },
+}));
+
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    useEffect: (effect: () => void | (() => void), deps?: readonly unknown[]) =>
+      hookRuntimeRef.current?.useEffect(effect, deps),
+    useMemo: <T,>(factory: () => T, deps?: readonly unknown[]) =>
+      hookRuntimeRef.current?.useMemo(factory, deps),
+    useState: <T,>(initial: T | (() => T)) =>
+      hookRuntimeRef.current?.useState(initial),
+  };
+});
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  revealItemInDir: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../../state/pluginStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../state/pluginStore")>();
+  const usePluginStore = (() => pluginStoreMock.state) as typeof actual.usePluginStore;
+  usePluginStore.setState = (partial: unknown) => {
+    const next =
+      typeof partial === "function"
+        ? (partial as (state: typeof pluginStoreMock.state) => Partial<typeof pluginStoreMock.state>)(
+            pluginStoreMock.state,
+          )
+        : partial;
+    if (next && typeof next === "object") {
+      Object.assign(pluginStoreMock.state, next);
+    }
+  };
+  return {
+    ...actual,
+    usePluginStore,
+  };
+});
+
+vi.mock("../../state/chatComposerStore", () => ({
+  useChatComposerStore: <T,>(selector: (state: {
+    environment: string;
+    sshServer: string | null;
+    sandboxBackend: string;
+  }) => T): T =>
+    selector({
+      environment: "local",
+      sshServer: null,
+      sandboxBackend: "docker",
+    }),
+}));
+
+vi.mock("../../state/sessionStore", () => ({
+  useSessionStore: <T,>(selector: (state: { currentSession: { id: string } | null }) => T): T =>
+    selector({ currentSession: null }),
+}));
+
+vi.mock("@mui/material", async () => {
+  const React = await import("react");
+  const { createMuiMaterialMock } = await import("../../test/__tests__/muiMocks");
+  const base = createMuiMaterialMock();
+  const passthrough = (type: string) => {
+    const Component = ({ children, ...props }: Record<string, unknown> & { children?: ReactNode }) =>
+      React.createElement(type, props, children);
+    Component.displayName = `Mock${type}`;
+    return Component;
+  };
+  const Snackbar = ({
+    children,
+    open,
+    ...props
+  }: Record<string, unknown> & { children?: ReactNode; open?: boolean }) =>
+    open ? React.createElement("snackbar", props, children) : null;
+  const Switch = ({
+    inputProps,
+    checked,
+    ...props
+  }: Record<string, unknown> & { inputProps?: Record<string, unknown>; checked?: boolean }) =>
+    React.createElement("input", {
+      ...props,
+      ...inputProps,
+      type: "checkbox",
+      checked,
+    });
+
+  return {
+    ...base,
+    Accordion: passthrough("accordion"),
+    AccordionDetails: passthrough("accordion-details"),
+    AccordionSummary: passthrough("accordion-summary"),
+    Collapse: passthrough("collapse"),
+    InputAdornment: passthrough("input-adornment"),
+    Portal: passthrough("portal"),
+    Snackbar,
+    Switch,
+    ToggleButton: passthrough("toggle-button"),
+    ToggleButtonGroup: passthrough("toggle-button-group"),
+  };
+});
+
+vi.mock("@mui/material/styles", async () => {
+  const React = await import("react");
+  const theme = {
+    palette: {
+      mode: "light",
+      common: { black: "#000", white: "#fff" },
+      primary: { main: "#1976d2" },
+      secondary: { main: "#7b1fa2" },
+      success: { main: "#2e7d32" },
+      warning: { main: "#ed6c02" },
+      error: { main: "#d32f2f" },
+      info: { main: "#0288d1" },
+      text: { primary: "#111", secondary: "#555" },
+      background: { paper: "#fff", default: "#fafafa" },
+      action: { hover: "#f5f5f5" },
+      divider: "#ddd",
+    },
+    shadows: Array.from({ length: 25 }, () => "none"),
+    zIndex: { drawer: 1200, tooltip: 1500 },
+  };
+  return {
+    __esModule: true,
+    ThemeProvider: ({ children }: { children?: ReactNode }) =>
+      React.createElement("theme-provider", {}, children),
+    alpha: (color: string, value: number) => `${color}/${value}`,
+    createTheme: () => theme,
+    useTheme: () => theme,
+  };
+});
+
+vi.mock("@mui/icons-material", async () => {
+  const { createIconMock } = await import("../../test/__tests__/muiMocks");
+  return createIconMock([
+    "AddRounded",
+    "ClearRounded",
+    "CloseRounded",
+    "ContentCopyRounded",
+    "DeleteOutlineRounded",
+    "DescriptionOutlined",
+    "ExtensionRounded",
+    "ExpandMoreRounded",
+    "KeyboardArrowDownRounded",
+    "PublishedWithChangesRounded",
+    "RefreshRounded",
+    "SearchRounded",
+    "SettingsRounded",
+    "SyncRounded",
+    "TroubleshootRounded",
+  ]);
+});
+import {
+  PluginsPanel,
   displayName,
   filterPluginsForCatalog,
   groupPluginsByCatalogGroup,
@@ -142,7 +365,7 @@ function remoteMarketplaceCheck(
 ): MarketplaceRemoteCheckResult {
   return {
     name: "omiga-curated",
-    path: "/project/.omiga/plugins/marketplace.json",
+    path: "/workspace/omiga-plugins/marketplace.json",
     remote: {
       url: "https://raw.githubusercontent.com/dxsbiocc/omiga-plugins/main/marketplace.json",
     },
@@ -158,25 +381,336 @@ function remoteMarketplaceCheck(
   };
 }
 
-describe("PluginsPanel diagnostics helpers", () => {
-  it("keeps raw tool registry and run diagnostics behind the development diagnostics gate", () => {
-    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+const resetPanelStore = () => {
+  pluginStoreMock.state.marketplaceSources = [];
+  pluginStoreMock.state.marketplaceSourceViews = [];
+  pluginStoreMock.state.marketplaces = [];
+  pluginStoreMock.state.operators = [];
+  pluginStoreMock.state.operatorRuns = [];
+  pluginStoreMock.state.retrievalStatuses = [];
+  pluginStoreMock.state.processPoolStatuses = [];
+  pluginStoreMock.state.remoteMarketplaceChecks = [];
+  pluginStoreMock.state.pluginMigrationStatus = {
+    migrationNeeded: false,
+    configRewriteNeeded: false,
+    legacyCacheEntriesToMigrate: 0,
+    legacyCacheEntriesToRemove: 0,
+    builtinRootsToRefresh: 0,
+    warnings: [],
+  };
+  pluginStoreMock.state.builtinMarketplaceStatus = null;
+  pluginStoreMock.state.isLoading = false;
+  pluginStoreMock.state.isMutating = false;
+  pluginStoreMock.state.bootstrapInProgress = false;
+  pluginStoreMock.state.error = null;
+  pluginStoreMock.state.ensureBuiltinMarketplace = vi.fn().mockResolvedValue({
+    ok: true,
+    source: "github",
+    path: "/builtin",
+    message: "Built-in marketplace ready.",
+  });
+  pluginStoreMock.state.loadPlugins = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.loadOperatorRuns = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.readOperatorRun = vi.fn();
+  pluginStoreMock.state.readOperatorRunLog = vi.fn();
+  pluginStoreMock.state.verifyOperatorRun = vi.fn();
+  pluginStoreMock.state.clearProcessPool = vi.fn().mockResolvedValue(0);
+  pluginStoreMock.state.migratePluginState = vi.fn().mockResolvedValue({
+    configRewritten: false,
+    legacyCacheEntriesMigrated: 0,
+    builtinRootsRefreshed: 0,
+    warnings: [],
+  });
+  pluginStoreMock.state.installPlugin = vi.fn();
+  pluginStoreMock.state.syncPlugin = vi.fn();
+  pluginStoreMock.state.checkRemoteMarketplaces = vi.fn();
+  pluginStoreMock.state.addMarketplaceSource = vi.fn().mockResolvedValue({
+    id: "source-local",
+    kind: "local",
+    location: "/tmp/omiga-plugins",
+    label: null,
+    enabled: true,
+    addedAt: "2026-05-27T00:00:00Z",
+  });
+  pluginStoreMock.state.removeMarketplaceSource = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.setMarketplaceSourceEnabled = vi.fn().mockResolvedValue(undefined);
+  pluginStoreMock.state.refreshMarketplaceSource = vi.fn().mockResolvedValue({
+    id: "source-local",
+    ok: true,
+    message: "Refreshed",
+    marketplaceName: "omiga-curated",
+    pluginCount: 1,
+  });
+  pluginStoreMock.state.uninstallPlugin = vi.fn();
+  pluginStoreMock.state.setPluginEnabled = vi.fn();
+  pluginStoreMock.state.setTemplateEnabled = vi.fn();
+  pluginStoreMock.state.setRetrievalResourceEnabled = vi.fn();
+  pluginStoreMock.state.setEnvironmentEnabled = vi.fn();
+  pluginStoreMock.state.checkPluginEnvironment = vi.fn();
+};
 
-    expect(source).toContain("SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS = import.meta.env.DEV");
-    expect(source).toContain("SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS && (");
-    expect(source).toMatch(/<OperatorCatalogSection[\s\S]*onSmokeRun=/);
-    expect(source).not.toContain("{false && (\n      <OperatorCatalogSection");
+const createPanelHarness = () => {
+  installComponentTestWindow();
+  const runtime = createHookRuntime();
+  hookRuntimeRef.current = runtime;
+  const harness = new ComponentHarness(
+    runtime,
+    (): ReactElement => <PluginsPanel projectPath="/project" />,
+  );
+  harness.render();
+  return harness;
+};
+
+const getNodeByAriaLabel = (
+  harness: ComponentHarness,
+  label: string,
+): RenderedNode => {
+  const node = findAllNodes(
+    harness.tree,
+    (candidate) => candidate.props["aria-label"] === label,
+  )[0];
+  if (!node) throw new Error(`Unable to find node labelled "${label}".`);
+  return node;
+};
+
+const getButtonByText = (
+  harness: ComponentHarness,
+  label: string,
+): RenderedNode => {
+  const button = findAllNodes(
+    harness.tree,
+    (candidate) =>
+      candidate.type === "button" && textContent(candidate).includes(label),
+  )[0];
+  if (!button) throw new Error(`Unable to find button containing "${label}".`);
+  return button;
+};
+
+beforeEach(() => {
+  resetPanelStore();
+});
+
+afterEach(() => {
+  hookRuntimeRef.current?.cleanup();
+  hookRuntimeRef.current = null;
+  vi.clearAllMocks();
+});
+
+describe("PluginsPanel marketplace sources UI", () => {
+  it("renders the sources section and invokes the add source action", () => {
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain("Marketplace Sources");
+    expect(textContent(harness.tree)).toContain("Add");
+
+    harness.change(getNodeByAriaLabel(harness, "Local path"), "/tmp/omiga-plugins");
+    harness.click(getButtonByText(harness, "Add"));
+
+    expect(pluginStoreMock.state.addMarketplaceSource).toHaveBeenCalledWith(
+      "local",
+      "/tmp/omiga-plugins",
+      undefined,
+      "/project",
+    );
   });
 
-  it("keeps advanced tool registration behind product-oriented wording", () => {
+  it("offers an explicit migration CTA and renders the latest migration summary", async () => {
+    pluginStoreMock.state.migratePluginState = vi.fn().mockResolvedValue({
+      configRewritten: true,
+      legacyCacheEntriesMigrated: 2,
+      builtinRootsRefreshed: 3,
+      warnings: ["Skipped one stale cache entry."],
+    });
+
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain(
+      "Plugin migration status is current. Run migration only if plugins still look inconsistent.",
+    );
+
+    await harness.click(getButtonByText(harness, "Run migration"));
+    harness.flush();
+
+    expect(pluginStoreMock.state.migratePluginState).toHaveBeenCalledWith("/project");
+    expect(textContent(harness.tree)).toContain(
+      "Last migration: config rewritten · 2 legacy cache entries migrated · 3 built-in roots refreshed",
+    );
+    expect(textContent(harness.tree)).toContain("Skipped one stale cache entry.");
+  });
+
+  it("surfaces migration status before running migration", () => {
+    pluginStoreMock.state.pluginMigrationStatus = {
+      migrationNeeded: true,
+      configRewriteNeeded: true,
+      legacyCacheEntriesToMigrate: 2,
+      legacyCacheEntriesToRemove: 1,
+      builtinRootsToRefresh: 3,
+      warnings: ["Legacy duplicate can be cleaned."],
+    };
+
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain(
+      "Migration recommended: config rewrite needed · 2 legacy cache entries to migrate · 1 legacy cache duplicate to remove · 3 built-in roots to refresh.",
+    );
+    expect(textContent(harness.tree)).toContain("Legacy duplicate can be cleaned.");
+    expect(pluginStoreMock.state.migratePluginState).not.toHaveBeenCalled();
+  });
+
+  it("disables marketplace source mutations while initial loading is active", () => {
+    pluginStoreMock.state.isLoading = true;
+    pluginStoreMock.state.marketplaceSourceViews = [
+      {
+        id: "source-remote",
+        kind: "remote",
+        location: "https://example.com/omiga-plugins.git",
+        label: "Remote Marketplace",
+        enabled: true,
+        removable: true,
+        addedAt: "2026-05-27T00:00:00Z",
+      },
+    ];
+
+    const harness = createPanelHarness();
+
+    expect(getButtonByText(harness, "Add").props.disabled).toBe(true);
+    expect(
+      getNodeByAriaLabel(
+        harness,
+        "Refresh marketplace source Remote Marketplace",
+      ).props.disabled,
+    ).toBe(true);
+    expect(
+      getNodeByAriaLabel(
+        harness,
+        "Remove marketplace source Remote Marketplace",
+      ).props.disabled,
+    ).toBe(true);
+  });
+
+  it("renders a built-in source without remove controls", () => {
+    pluginStoreMock.state.marketplaceSourceViews = [
+      {
+        id: "builtin",
+        kind: "builtin",
+        location: "/workspace/omiga-plugins",
+        label: "Built-in Marketplace",
+        enabled: true,
+        removable: false,
+        addedAt: null,
+      },
+    ];
+
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain("Built-in Marketplace");
+    expect(textContent(harness.tree)).toContain("Always enabled");
+    expect(textContent(harness.tree)).toContain("Refresh");
+    expect(
+      findAllNodes(
+        harness.tree,
+        (candidate) =>
+          candidate.props["aria-label"] ===
+          "Remove marketplace source Built-in Marketplace",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("shows built-in bootstrap failure details and retries bootstrap", async () => {
+    pluginStoreMock.state.marketplaceSourceViews = [
+      {
+        id: "builtin",
+        kind: "builtin",
+        location: "/workspace/omiga-plugins",
+        label: "Built-in Marketplace",
+        enabled: true,
+        removable: false,
+        addedAt: null,
+      },
+    ];
+    pluginStoreMock.state.builtinMarketplaceStatus = {
+      ok: false,
+      source: "github",
+      path: null,
+      message: "Install git or connect to the network, then retry.",
+    };
+
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain(
+      "Install git or connect to the network, then retry.",
+    );
+    await harness.click(getNodeByAriaLabel(
+      harness,
+      "Refresh marketplace source Built-in Marketplace",
+    ));
+    await harness.click(getButtonByText(harness, "Retry"));
+
+    expect(pluginStoreMock.state.ensureBuiltinMarketplace).toHaveBeenCalledTimes(2);
+    expect(pluginStoreMock.state.ensureBuiltinMarketplace).toHaveBeenCalledWith("/project");
+  });
+
+  it("disables built-in source refresh while bootstrap is in progress", () => {
+    pluginStoreMock.state.bootstrapInProgress = true;
+    pluginStoreMock.state.marketplaceSourceViews = [
+      {
+        id: "builtin",
+        kind: "builtin",
+        location: "/workspace/omiga-plugins",
+        label: "Built-in Marketplace",
+        enabled: true,
+        removable: false,
+        addedAt: null,
+      },
+    ];
+
+    const harness = createPanelHarness();
+    const refreshButton = getNodeByAriaLabel(
+      harness,
+      "Refresh marketplace source Built-in Marketplace",
+    );
+
+    expect(refreshButton.props.disabled).toBe(true);
+    expect(getButtonByText(harness, "Add").props.disabled).toBe(true);
+    expect(textContent(harness.tree)).toContain("Refreshing built-in marketplace");
+  });
+});
+
+describe("PluginsPanel diagnostics helpers", () => {
+  it("removes the duplicate global operator registration surface", () => {
     const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
 
-    expect(source).toContain("Agent tools");
-    expect(source).toContain("Advanced controls for plugin-defined tools");
-    expect(source).toContain("Register to run smoke test");
-    expect(source).not.toContain(">Operators<");
-    expect(source).not.toContain(" exposed`");
+    expect(source).not.toContain("OperatorCatalogSection");
+    expect(source).not.toContain("SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS");
+    expect(source).not.toContain("onOperatorRegistrationChange");
+    expect(source).not.toContain("New Script Operator");
+  });
+
+  it("keeps operator exposure plugin-owned instead of manually registered", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("operations exposed");
+    expect(source).toContain("Exposed by plugin");
+    expect(source).toContain("Exposed");
+    expect(source).toContain('plugin.enabled ? "Disable" : "Enable"');
+    expect(source).toContain('plugin.enabled ? "Enabled" : "Disabled"');
+    expect(source).toContain("Operator programs are exposed automatically while this plugin is enabled");
+    expect(source).toContain("operation categories come from the plugin manifest");
+    expect(source).not.toContain("Agent tools");
+    expect(source).not.toContain("Register to run smoke test");
+    expect(source).not.toContain("Register");
+    expect(source).not.toContain("Unregister");
     expect(source).not.toContain("Operators are plugin-defined tools");
+  });
+
+  it("keeps run history explained without another operator catalog", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+    const timelineSource = readFileSync(new URL("./OperatorRunsTimeline.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("<OperatorRunsTimeline");
+    expect(timelineSource).toContain("Operator run history");
+    expect(timelineSource).toContain("Chronological history for smoke tests");
+    expect(timelineSource).not.toContain('position: "sticky"');
   });
 
   it("keeps plugin technical content out of the default capability summary", () => {
@@ -195,6 +729,24 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(source).not.toContain("Operator details");
     expect(source).not.toContain("<OperatorBundleContentList operators={operators}");
     expect(source).not.toContain("Included content");
+  });
+
+  it("keeps plugin feedback visible above modal dialogs", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("<Portal>");
+    expect(source).toContain("t.zIndex.tooltip + 1");
+    expect(source).toContain("Rendered through Portal and lifted above Dialog + Backdrop");
+  });
+
+  it("derives bioinformatics subgroups from marketplace paths instead of hard-coded plugin content", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("pluginMarketplaceTaxonomySegments");
+    expect(source).toContain("marketplace directory taxonomy");
+    expect(source).not.toContain("NGS ·");
+    expect(source).not.toContain("ngs-sequence-processing");
+    expect(source).not.toContain("ngs-quality-control");
   });
 
   it("summarizes remote marketplace updates as durable UI state", () => {
@@ -472,7 +1024,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const bioinformaticsPlugin = pluginSummary({
       id: "ngs-alignment@omiga-curated",
       name: "ngs-alignment",
-      sourcePath: "/plugins/ngs-alignment",
+      sourcePath: "/plugins/bioinformatics/ngs/alignment",
       interface: {
         displayName: "Alignment",
         shortDescription: "BWA, Bowtie2, STAR, and HISAT2 alignment",
@@ -676,7 +1228,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const analysisPlugin = pluginSummary({
       id: "transcriptomics@omiga-curated",
       name: "transcriptomics",
-      sourcePath: "/plugins/transcriptomics",
+      sourcePath: "/plugins/bioinformatics/ngs/transcriptomics",
       interface: {
         displayName: "Transcriptomics",
         shortDescription: null,
@@ -697,7 +1249,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     const bioinformaticsPlugin = pluginSummary({
       id: "ngs-alignment@omiga-curated",
       name: "ngs-alignment",
-      sourcePath: "/plugins/ngs-alignment",
+      sourcePath: "/plugins/bioinformatics/ngs/alignment",
       interface: {
         displayName: "Alignment",
         shortDescription: "BWA, Bowtie2, STAR, and HISAT2 alignment",
@@ -820,7 +1372,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     ).toEqual(["R visualization"]);
     expect(
       groupPluginsByCatalogSection("bioinformatics", [bioinformaticsPlugin, analysisPlugin]).map((section) => section.title),
-    ).toEqual(["NGS", "Transcriptomics"]);
+    ).toEqual(["NGS"]);
     expect(
       groupPluginsByCatalogSection("resource", [geo, literatureSearchPlugin, providerSourcePlugin]).map((section) => section.title),
     ).toEqual(["Provider resources", "Dataset resources", "Literature resources"]);
@@ -830,6 +1382,326 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(
       groupPluginsByCatalogSection("other", [notebook]).map((section) => section.title),
     ).toEqual(["Notebook"]);
+  });
+
+  it("does not let domain keywords move resources or visualization into analysis/bioinformatics", () => {
+    const visualizationWithGeneTemplates = pluginSummary({
+      id: "visualization-r@omiga-curated",
+      name: "visualization-r",
+      interface: {
+        displayName: "R Visualization",
+        shortDescription: "Publication figure templates",
+        longDescription: "Includes enrichment dot plots, gene terms, volcano plots, and heatmaps.",
+        developerName: null,
+        category: "Visualization",
+        capabilities: ["Rscript", "Static Figures", "Publication Figures"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const pathwayDatabaseResource = pluginSummary({
+      id: "resource-pathways@omiga-curated",
+      name: "resource-pathways",
+      retrieval: {
+        protocolVersion: 1,
+        resources: [
+          {
+            id: "reactome",
+            category: "knowledge",
+            label: "Reactome",
+            description: "Pathway and gene-set lookup.",
+            subcategories: ["pathway"],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: false,
+            replacesBuiltin: true,
+          },
+        ],
+      },
+      interface: {
+        displayName: "Pathway Databases",
+        shortDescription: "4 Knowledge routes",
+        longDescription: "Pathway analysis and annotation database retrieval.",
+        developerName: null,
+        category: "Analysis",
+        capabilities: ["Knowledge", "Analysis", "Retrieval"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const ncbiProviderResource = pluginSummary({
+      id: "resource-ncbi@omiga-curated",
+      name: "resource-ncbi",
+      retrieval: {
+        protocolVersion: 1,
+        resources: [
+          {
+            id: "ncbi_gene",
+            category: "knowledge",
+            label: "NCBI Gene",
+            description: "Gene, variant, and assembly metadata lookup.",
+            subcategories: ["gene", "variant"],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: false,
+            replacesBuiltin: true,
+          },
+          {
+            id: "geo",
+            category: "dataset",
+            label: "NCBI GEO",
+            description: "Gene expression datasets.",
+            subcategories: ["expression"],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: false,
+            replacesBuiltin: true,
+          },
+        ],
+      },
+      interface: {
+        displayName: "NCBI",
+        shortDescription: "PubMed, GEO, BioSample, Datasets, and Gene retrieval",
+        longDescription: "Aggregates literature, datasets, gene, variant, and genome assembly routes.",
+        developerName: null,
+        category: "Retrieval",
+        capabilities: ["Provider", "Dataset", "Knowledge", "Retrieval"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+
+    expect(pluginCatalogGroupId(visualizationWithGeneTemplates)).toBe("visualization");
+    expect(pluginCatalogGroupId(pathwayDatabaseResource)).toBe("resource");
+    expect(pluginCatalogGroupId(ncbiProviderResource)).toBe("resource");
+    expect(
+      groupPluginsByCatalogSection("resource", [pathwayDatabaseResource, ncbiProviderResource]).map(
+        (section) => section.title,
+      ),
+    ).toEqual(["Provider resources", "Knowledge resources"]);
+  });
+
+  it("groups NGS bioinformatics plugins by marketplace directory taxonomy instead of hard-coded stages", () => {
+    const sequenceProcessingPlugin = pluginSummary({
+      id: "seqtk-convert@omiga-curated",
+      name: "seqtk-convert",
+      sourcePath: "/plugins/bioinformatics/ngs/sequence-processing",
+      interface: {
+        displayName: "Seqtk Convert",
+        shortDescription: "Convert FASTQ and FASTA reads for downstream analysis.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const qualityControlPlugin = pluginSummary({
+      id: "multiqc-reports@omiga-curated",
+      name: "multiqc-reports",
+      sourcePath: "/plugins/bioinformatics/ngs/quality-control",
+      interface: {
+        displayName: "MultiQC Reports",
+        shortDescription: "Aggregate FastQC and fqchk quality control summaries.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const alignmentPlugin = pluginSummary({
+      id: "alignment-bundle@omiga-curated",
+      name: "alignment-bundle",
+      sourcePath: "/plugins/bioinformatics/ngs/alignment",
+      interface: {
+        displayName: "Alignment",
+        shortDescription: "BWA, Bowtie2, STAR, and HISAT2 alignment",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS", "Alignment", "SAM/BAM"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const quantificationPlugin = pluginSummary({
+      id: "salmon-quant@omiga-curated",
+      name: "salmon-quant",
+      sourcePath: "/plugins/bioinformatics/ngs/quantification",
+      interface: {
+        displayName: "Salmon Quant",
+        shortDescription: "Transcript abundance quantification with Salmon.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS", "Quantification"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const variantCallingPlugin = pluginSummary({
+      id: "deepvariant-caller@omiga-curated",
+      name: "deepvariant-caller",
+      sourcePath: "/plugins/bioinformatics/ngs/variant-calling",
+      interface: {
+        displayName: "DeepVariant Caller",
+        shortDescription: null,
+        longDescription: "DeepVariant variant calling for germline small variants.",
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const fusionPlugin = pluginSummary({
+      id: "star-fusion@omiga-curated",
+      name: "star-fusion",
+      sourcePath: "/plugins/bioinformatics/ngs/fusion-sv",
+      interface: {
+        displayName: "STAR-Fusion",
+        shortDescription: "Detect fusion transcripts and structural variants.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const copyNumberVariationPlugin = pluginSummary({
+      id: "somatic-workflow@omiga-curated",
+      name: "somatic-workflow",
+      sourcePath: "/plugins/bioinformatics/ngs/copy-number-variation",
+      interface: {
+        displayName: "Somatic Workflow",
+        shortDescription: "Somatic DNA analysis workflow.",
+        longDescription: null,
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+      operators: [
+        operatorSummary({
+          id: "cnvkit",
+          name: "CNVkit",
+          description: "Copy-number segmentation",
+          tags: ["cnvkit", "copy number"],
+        }),
+      ],
+    });
+    const assemblyAnnotationPlugin = pluginSummary({
+      id: "assembly-annotation@omiga-curated",
+      name: "assembly-annotation",
+      sourcePath: "/plugins/bioinformatics/ngs/assembly-annotation",
+      interface: {
+        displayName: "Assembly Annotation",
+        shortDescription: null,
+        longDescription: "Genome assembly and annotation with SPAdes and Prokka.",
+        developerName: null,
+        category: "Bioinformatics",
+        capabilities: ["NGS"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+
+    const sections = groupPluginsByCatalogSection("bioinformatics", [
+      sequenceProcessingPlugin,
+      qualityControlPlugin,
+      alignmentPlugin,
+      quantificationPlugin,
+      variantCallingPlugin,
+      fusionPlugin,
+      copyNumberVariationPlugin,
+      assemblyAnnotationPlugin,
+    ]);
+
+    expect(sections.map((section) => section.title)).toEqual(["NGS"]);
+    expect(sections[0]?.plugins.map(displayName)).toEqual([
+      "Seqtk Convert",
+      "MultiQC Reports",
+      "Alignment",
+      "Salmon Quant",
+      "DeepVariant Caller",
+      "STAR-Fusion",
+      "Somatic Workflow",
+      "Assembly Annotation",
+    ]);
   });
 
   it("detects stale runtime records whose plugin id is no longer catalogued", () => {
@@ -1306,14 +2178,14 @@ describe("PluginsPanel diagnostics helpers", () => {
     ).toContain("<path");
     expect(
       operatorPluginIconSpec(pluginSummary({
-        name: "operator-seqtk",
+        name: "c-program-adapter",
         interface: {
-          displayName: "seqtk",
-          shortDescription: "FASTQ/FASTA subsampling with seqtk",
+          displayName: "C Program",
+          shortDescription: "Adapter for a C-based command-line program",
           longDescription: null,
           developerName: null,
           category: "Operator",
-          capabilities: ["Operator", "seqtk"],
+          capabilities: ["Operator", "C"],
           websiteUrl: null,
           privacyPolicyUrl: null,
           termsOfServiceUrl: null,

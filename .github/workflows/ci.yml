@@ -54,6 +54,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Checkout curated plugin marketplace
+        run: git clone --depth 1 https://github.com/dxsbiocc/omiga-plugins.git ../omiga-plugins
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:

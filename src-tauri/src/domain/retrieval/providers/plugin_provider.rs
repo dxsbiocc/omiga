@@ -577,21 +577,13 @@ mod tests {
     }
 
     fn source_registration(plugin_id: &str, plugin_dir: &str) -> PluginRetrievalRegistration {
-        let root = match plugin_dir {
-            "resource-ncbi"
-            | "resource-embl-ebi"
-            | "retrieval-dataset-gtex"
-            | "retrieval-dataset-cbioportal"
-            | "retrieval-literature-semantic-scholar"
-            | "retrieval-knowledge-uniprot" => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("repo root")
-                .join(".omiga/plugins")
-                .join(plugin_dir),
-            _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("fixtures/plugins/legacy")
-                .join(plugin_dir),
-        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .parent()
+            .expect("workspace root")
+            .join("omiga-plugins/plugins/resources")
+            .join(plugin_dir);
         let manifest = crate::domain::plugins::load_plugin_manifest(&root)
             .and_then(|manifest| manifest.retrieval)
             .expect("retrieval manifest");

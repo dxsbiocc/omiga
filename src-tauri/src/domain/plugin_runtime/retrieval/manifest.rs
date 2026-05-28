@@ -328,8 +328,56 @@ mod tests {
         dir
     }
 
-    fn documented_basic_fixture_root() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval-plugins/basic")
+    fn documented_basic_example_root() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        fs::write(
+            dir.path().join("scripts/basic_retrieval_plugin.py"),
+            "#!/usr/bin/env python3\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("plugin.json"),
+            r#"{
+              "name": "retrieval-protocol-example",
+              "version": "0.1.0",
+              "description": "Runnable example for the Omiga local retrieval plugin protocol.",
+              "retrieval": {
+                "protocolVersion": 1,
+                "runtime": {
+                  "command": "./scripts/basic_retrieval_plugin.py",
+                  "args": [],
+                  "cwd": ".",
+                  "idleTtlMs": 30000,
+                  "requestTimeoutMs": 5000,
+                  "cancelGraceMs": 500,
+                  "concurrency": 1
+                },
+                "resources": [{
+                  "id": "example_dataset",
+                  "category": "dataset",
+                  "label": "Example Dataset",
+                  "description": "Local example source that demonstrates search, query, and fetch responses.",
+                  "aliases": ["example data"],
+                  "subcategories": ["sample metadata"],
+                  "capabilities": ["search", "query", "fetch"],
+                  "requiredCredentialRefs": [],
+                  "optionalCredentialRefs": ["pubmed_email"],
+                  "riskLevel": "low",
+                  "riskNotes": ["Example only: does not perform network access or mutate local files."],
+                  "defaultEnabled": false,
+                  "replacesBuiltin": false,
+                  "parameters": [{
+                    "name": "organism",
+                    "type": "string",
+                    "description": "Optional organism label echoed into example metadata."
+                  }]
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+        dir
     }
 
     #[test]
@@ -384,7 +432,8 @@ mod tests {
 
     #[test]
     fn parses_documented_basic_retrieval_fixture_manifest() {
-        let root = documented_basic_fixture_root();
+        let dir = documented_basic_example_root();
+        let root = dir.path();
         let plugin_json: JsonValue =
             serde_json::from_str(&fs::read_to_string(root.join("plugin.json")).unwrap()).unwrap();
         let retrieval = plugin_json

@@ -129,6 +129,7 @@ pub(super) struct ToolExecutionRequest<'a> {
     pub local_venv_name: String,
     pub env_store: crate::domain::tools::env_store::EnvStore,
     pub computer_use_enabled: bool,
+    pub browser_use_enabled: bool,
     /// Optional session artifact registry for tracking file_write/file_edit operations.
     pub artifact_registry: Option<Arc<crate::domain::session::artifacts::ArtifactRegistry>>,
 }
@@ -155,6 +156,7 @@ struct ToolExecutionShared {
     local_venv_name: String,
     env_store: crate::domain::tools::env_store::EnvStore,
     computer_use_enabled: bool,
+    browser_use_enabled: bool,
     artifact_registry: Option<Arc<crate::domain::session::artifacts::ArtifactRegistry>>,
 }
 
@@ -192,6 +194,7 @@ pub(super) async fn execute_tool_calls(
         local_venv_name,
         env_store,
         computer_use_enabled,
+        browser_use_enabled,
         artifact_registry,
     } = request;
 
@@ -218,6 +221,7 @@ pub(super) async fn execute_tool_calls(
         local_venv_name,
         env_store,
         computer_use_enabled,
+        browser_use_enabled,
         artifact_registry,
     };
 
@@ -674,6 +678,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
         local_venv_name,
         env_store,
         computer_use_enabled,
+        browser_use_enabled,
         artifact_registry: _artifact_registry,
     } = shared;
     let tool_use_id = &tool_use_id;
@@ -725,6 +730,11 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             crate::domain::operators::operator_preflight_question_with_project_preferences(
                 project_root,
                 tool_name,
+                &effective_arguments,
+            )
+        } else if tool_name == crate::domain::operators::OPERATOR_EXECUTE_TOOL_NAME {
+            crate::domain::operators::operator_execute_preflight_question_with_project_preferences(
+                project_root,
                 &effective_arguments,
             )
         } else if tool_name == "template_execute" {
@@ -823,6 +833,11 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                     &effective_arguments,
                     &ask_output_json,
                 )
+            } else if tool_name == crate::domain::operators::OPERATOR_EXECUTE_TOOL_NAME {
+                crate::domain::operators::apply_operator_execute_preflight_answers(
+                    &effective_arguments,
+                    &ask_output_json,
+                )
             } else if tool_name == "template_execute" {
                 crate::domain::templates::apply_template_preflight_answers(
                     &effective_arguments,
@@ -852,6 +867,27 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
 
     let arguments = &effective_arguments;
 
+    if crate::domain::browser_operator::is_facade_tool_name(tool_name) && !browser_use_enabled {
+        let args_value: serde_json::Value = serde_json::from_str(arguments)
+            .unwrap_or_else(|_| serde_json::json!({"raw": arguments}));
+        let display_input =
+            crate::domain::browser_operator::redact_arguments_for_display(&args_value).to_string();
+        let error_msg = format!(
+            "Browser Operator facade tool `{tool_name}` is not enabled for this task. Enable Browser Use as `task` or `session` before using `browser_*` tools."
+        );
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                input: display_input,
+                output: error_msg.clone(),
+                is_error: true,
+            },
+        );
+        return (tool_use_id.clone(), error_msg, true);
+    }
+
     if crate::domain::mcp::names::is_reserved_computer_mcp_tool(tool_name) {
         let error_msg = format!(
             "Raw Computer Use MCP backend tool `{tool_name}` is not directly callable. Enable Computer Use for the task and use the `computer_*` facade tools so Omiga can enforce permissions, audit logging, stop handling, and target-window validation."
@@ -878,13 +914,21 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
 
     if needs_permission_check {
         let Some(app_state) = app.try_state::<OmigaAppState>() else {
+            let display_input = if crate::domain::browser_operator::is_facade_tool_name(tool_name) {
+                let args_value: serde_json::Value = serde_json::from_str(arguments)
+                    .unwrap_or_else(|_| serde_json::json!({"raw": arguments}));
+                crate::domain::browser_operator::redact_arguments_for_display(&args_value)
+                    .to_string()
+            } else {
+                arguments.clone()
+            };
             let error_msg = "内部错误：无法获取应用状态".to_string();
             let _ = app.emit(
                 &format!("chat-stream-{}", message_id),
                 &StreamOutputItem::ToolResult {
                     tool_use_id: tool_use_id.clone(),
                     name: tool_name.clone(),
-                    input: arguments.clone(),
+                    input: display_input,
                     output: error_msg.clone(),
                     is_error: true,
                 },
@@ -895,6 +939,17 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
 
         let args_value: serde_json::Value = serde_json::from_str(arguments)
             .unwrap_or_else(|_| serde_json::json!({"raw": arguments}));
+        let redacted_args_value_for_display =
+            if crate::domain::browser_operator::is_facade_tool_name(tool_name) {
+                crate::domain::browser_operator::redact_arguments_for_display(&args_value)
+            } else {
+                args_value.clone()
+            };
+        let arguments_display = if crate::domain::browser_operator::is_facade_tool_name(tool_name) {
+            redacted_args_value_for_display.to_string()
+        } else {
+            arguments.clone()
+        };
 
         loop {
             let perm_decision = permission_manager
@@ -904,8 +959,8 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             match perm_decision {
                 crate::domain::permissions::PermissionDecision::Deny(ref reason) => {
                     let project_root_label = project_root.to_string_lossy().to_string();
-                    let arguments_json =
-                        serde_json::to_string(&args_value).unwrap_or_else(|_| "{}".to_string());
+                    let arguments_json = serde_json::to_string(&redacted_args_value_for_display)
+                        .unwrap_or_else(|_| "{}".to_string());
                     crate::commands::permissions::append_permission_audit_event(
                         &app_state,
                         session_id,
@@ -929,7 +984,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                         &StreamOutputItem::ToolResult {
                             tool_use_id: tool_use_id.clone(),
                             name: tool_name.clone(),
-                            input: arguments.clone(),
+                            input: arguments_display.clone(),
                             output: error_msg.clone(),
                             is_error: true,
                         },
@@ -950,7 +1005,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                         tool_use_id,
                         stream_tool_name: tool_name,
                         tool_name_for_event: tool_name,
-                        arguments_display: arguments,
+                        arguments_display: &arguments_display,
                         args_value: &args_value,
                         req,
                         cancel_flag: cancel_flag.clone(),
@@ -964,7 +1019,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                                 &StreamOutputItem::ToolResult {
                                     tool_use_id: tool_use_id.clone(),
                                     name: tool_name.clone(),
-                                    input: arguments.clone(),
+                                    input: arguments_display.clone(),
                                     output: e.clone(),
                                     is_error: true,
                                 },
@@ -2351,6 +2406,111 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                 (tool_use_id.clone(), error_msg, true)
             }
         }
+    } else if crate::domain::browser_operator::is_facade_tool_name(tool_name) {
+        if !browser_use_enabled {
+            let args_value: serde_json::Value = serde_json::from_str(arguments)
+                .unwrap_or_else(|_| serde_json::json!({"raw": arguments}));
+            let display_input =
+                crate::domain::browser_operator::redact_arguments_for_display(&args_value)
+                    .to_string();
+            let error_msg = format!(
+                "Browser Operator facade tool `{tool_name}` is not enabled for this task. Enable Browser Use as `task` or `session` before using `browser_*` tools."
+            );
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: display_input,
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id.clone(), error_msg, true);
+        }
+        let Some(facade_tool) =
+            crate::domain::browser_operator::BrowserFacadeTool::from_model_name(tool_name)
+        else {
+            let args_value: serde_json::Value = serde_json::from_str(arguments)
+                .unwrap_or_else(|_| serde_json::json!({"raw": arguments}));
+            let display_input =
+                crate::domain::browser_operator::redact_arguments_for_display(&args_value)
+                    .to_string();
+            let error_msg = format!("Unknown Browser Operator facade tool: {tool_name}");
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: display_input,
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id.clone(), error_msg, true);
+        };
+        let Some(app_state) = app.try_state::<crate::app_state::OmigaAppState>() else {
+            let args_value: serde_json::Value = serde_json::from_str(arguments)
+                .unwrap_or_else(|_| serde_json::json!({"raw": arguments}));
+            let display_input =
+                crate::domain::browser_operator::redact_arguments_for_display(&args_value)
+                    .to_string();
+            let error_msg = "Browser Operator manager is unavailable in app state.".to_string();
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: display_input,
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id.clone(), error_msg, true);
+        };
+        let manager = app_state.chat.browser_operator_manager.clone();
+        let execution = crate::domain::browser_operator::execute_facade_tool(
+            manager.as_ref(),
+            session_id,
+            facade_tool,
+            arguments,
+        )
+        .await;
+        let output_text = execution.output.to_string();
+        let safe_input = execution.redacted_arguments.to_string();
+        let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+            let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+            format!(
+                "{}\n\n[Output truncated... {} total characters]",
+                prefix,
+                output_text.len()
+            )
+        } else {
+            output_text.clone()
+        };
+        let display_input = if safe_input.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+            let prefix = truncate_utf8_prefix(&safe_input, TOOL_DISPLAY_MAX_INPUT_CHARS);
+            format!(
+                "{}\n\n[Input truncated... {} total characters]",
+                prefix,
+                safe_input.len()
+            )
+        } else {
+            safe_input
+        };
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                input: display_input,
+                output: display_output,
+                is_error: execution.is_error,
+            },
+        );
+        let model_output =
+            process_tool_output_for_model(output_text.clone(), tool_use_id, tool_results_dir).await;
+        (tool_use_id.clone(), model_output, execution.is_error)
     } else if tool_name.starts_with("mcp__") {
         let timeout = std::time::Duration::from_secs(120);
         // Use the session-aware MCP connection manager to avoid spawning new processes

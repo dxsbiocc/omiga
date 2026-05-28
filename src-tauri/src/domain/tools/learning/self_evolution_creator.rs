@@ -155,6 +155,7 @@ impl ToolImpl for LearningSelfEvolutionCreatorTool {
         let unit = units.iter().find(|unit| unit.id == CREATOR_SKILL_NAME);
         let unit_index_kind = unit.map(|entry| match entry.kind {
             crate::domain::unit_index::UnitKind::Operator => "operator",
+            crate::domain::unit_index::UnitKind::Operation => "operation",
             crate::domain::unit_index::UnitKind::Template => "template",
             crate::domain::unit_index::UnitKind::Skill => "skill",
         });
@@ -708,7 +709,7 @@ Create an **Operator** draft when the reusable behavior is atomic:
 - one command/script or API wrapper;
 - stable input/output contract;
 - deterministic offline fixture or smoke path;
-- suitable for `operator__*` exposure after promotion.
+- suitable for Operator/Operation discovery and `operator_execute` after promotion.
 
 Create a **Template** draft when the reusable behavior is workflow-shaped:
 

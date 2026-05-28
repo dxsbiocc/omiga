@@ -50,6 +50,7 @@ import {
   useChatComposerStore,
   type PermissionMode,
   type ComputerUseMode,
+  type BrowserUseMode,
   type SandboxBackend,
   type ExecutionEnvironment,
   type Message as StoreMessage,
@@ -515,6 +516,7 @@ interface QueuedMainSend {
   composerAgentType: string;
   permissionMode: PermissionMode;
   computerUseMode: ComputerUseMode;
+  browserUseMode: BrowserUseMode;
   /** 发送入队时的运行环境（与 composer 一致） */
   environment: ExecutionEnvironment;
   /** SSH 服务器名称（仅在 environment === "ssh" 时有效） */
@@ -2541,6 +2543,7 @@ export function Chat({ sessionId }: ChatProps) {
         st.setComposerAgentType(item.composerAgentType);
         st.setPermissionMode(item.permissionMode);
         st.setComputerUseMode(item.computerUseMode);
+        st.setBrowserUseMode(item.browserUseMode);
         st.setEnvironment(item.environment);
         st.setSshServer(item.sshServer);
       });
@@ -2690,6 +2693,7 @@ export function Chat({ sessionId }: ChatProps) {
         composerAgentType: "general-purpose",
         permissionMode: st.permissionMode,
         computerUseMode: "off",
+        browserUseMode: "off",
         environment: st.environment,
         sshServer: st.sshServer,
         sandboxBackend: st.sandboxBackend,
@@ -5685,6 +5689,7 @@ export function Chat({ sessionId }: ChatProps) {
       localVenvType: storeVenvType,
       localVenvName: storeVenvName,
       computerUseMode: storeComputerUseMode,
+      browserUseMode: storeBrowserUseMode,
     } = useChatComposerStore.getState();
 
     const composerAgentType = flushPayload
@@ -5696,6 +5701,9 @@ export function Chat({ sessionId }: ChatProps) {
     const computerUseMode = flushPayload
       ? flushPayload.computerUseMode
       : storeComputerUseMode;
+    const browserUseMode = flushPayload
+      ? flushPayload.browserUseMode
+      : storeBrowserUseMode;
     const environment = flushPayload ? flushPayload.environment : storeEnv;
     const sshServer = flushPayload ? flushPayload.sshServer : storeSsh;
     const sandboxBackend = flushPayload ? flushPayload.sandboxBackend : storeSb;
@@ -5753,6 +5761,7 @@ export function Chat({ sessionId }: ChatProps) {
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
       useChatComposerStore.getState().resetTaskComputerUseMode();
+      useChatComposerStore.getState().resetTaskBrowserUseMode();
       try {
         const response = await invoke<{
           message_id: string;
@@ -5816,6 +5825,7 @@ export function Chat({ sessionId }: ChatProps) {
         composerAgentType,
         permissionMode,
         computerUseMode,
+        browserUseMode,
         environment,
         sshServer: useChatComposerStore.getState().sshServer,
         sandboxBackend: useChatComposerStore.getState().sandboxBackend,
@@ -5825,6 +5835,7 @@ export function Chat({ sessionId }: ChatProps) {
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
       useChatComposerStore.getState().resetTaskComputerUseMode();
+      useChatComposerStore.getState().resetTaskBrowserUseMode();
       return;
     }
 
@@ -5921,6 +5932,7 @@ export function Chat({ sessionId }: ChatProps) {
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
       useChatComposerStore.getState().resetTaskComputerUseMode();
+      useChatComposerStore.getState().resetTaskBrowserUseMode();
 
       const requestSessionId = sessionId;
       try {
@@ -6132,6 +6144,7 @@ export function Chat({ sessionId }: ChatProps) {
     useChatComposerStore.getState().clearComposerAttachedPaths();
     useChatComposerStore.getState().clearComposerSelectedPluginIds();
     useChatComposerStore.getState().resetTaskComputerUseMode();
+    useChatComposerStore.getState().resetTaskBrowserUseMode();
 
     const requestSessionId = sessionId;
     try {
@@ -6176,6 +6189,7 @@ export function Chat({ sessionId }: ChatProps) {
           activeProviderEntryName,
           selectedPluginIds: composerSelectedPluginIds,
           computerUseMode,
+          browserUseMode,
         },
       });
 
@@ -6475,11 +6489,13 @@ export function Chat({ sessionId }: ChatProps) {
       flushSync(() => {
         useChatComposerStore.getState().setComposerAgentType(composeAgent);
       });
-      const { permissionMode, computerUseMode } = useChatComposerStore.getState();
+      const { permissionMode, computerUseMode, browserUseMode } =
+        useChatComposerStore.getState();
 
       const userMessageId = message.id;
       const requestSessionId = sessionId;
       useChatComposerStore.getState().resetTaskComputerUseMode();
+      useChatComposerStore.getState().resetTaskBrowserUseMode();
 
       try {
         const response = await invoke<{
@@ -6508,6 +6524,7 @@ export function Chat({ sessionId }: ChatProps) {
             activeProviderEntryName,
             selectedPluginIds: message.composerSelectedPluginIds ?? [],
             computerUseMode,
+            browserUseMode,
             ...(isPersistedMessageIdForRetry(message.id)
               ? { retryFromUserMessageId: message.id }
               : {}),
@@ -6766,6 +6783,7 @@ export function Chat({ sessionId }: ChatProps) {
       st.setComposerAgentType(next.composerAgentType);
       st.setPermissionMode(next.permissionMode);
       st.setComputerUseMode(next.computerUseMode);
+      st.setBrowserUseMode(next.browserUseMode);
       st.setEnvironment(next.environment);
       st.setSshServer(next.sshServer);
       st.setSandboxBackend(next.sandboxBackend);
@@ -7046,6 +7064,7 @@ export function Chat({ sessionId }: ChatProps) {
       composerAgentType,
       permissionMode,
       computerUseMode,
+      browserUseMode,
       environment,
       sshServer,
       sandboxBackend,
@@ -7053,6 +7072,8 @@ export function Chat({ sessionId }: ChatProps) {
       useChatComposerStore.getState();
     const resumeComputerUseMode =
       computerUseMode === "session" ? computerUseMode : "off";
+    const resumeBrowserUseMode =
+      browserUseMode === "session" ? browserUseMode : "off";
     const requestSessionId = sessionId;
 
     try {
@@ -7078,6 +7099,7 @@ export function Chat({ sessionId }: ChatProps) {
           localVenvName: useChatComposerStore.getState().localVenvName,
           activeProviderEntryName,
           computerUseMode: resumeComputerUseMode,
+          browserUseMode: resumeBrowserUseMode,
         },
       });
 

@@ -917,6 +917,9 @@ pub struct SendMessageRequest {
     /// `off` | `task` | `session` — explicit user gate for Computer Use facade tools.
     #[serde(default, rename = "computerUseMode")]
     pub computer_use_mode: Option<String>,
+    /// `off` | `task` | `session` — explicit user gate for native Browser Operator facade tools.
+    #[serde(default, rename = "browserUseMode")]
+    pub browser_use_mode: Option<String>,
     /// `local` | `ssh` | `sandbox` — chat composer execution surface (tools / terminal).
     #[serde(default, rename = "executionEnvironment")]
     pub execution_environment: Option<String>,

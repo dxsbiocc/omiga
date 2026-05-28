@@ -7,6 +7,9 @@ export type PermissionMode = "ask" | "auto" | "bypass";
 /** Computer Use 显式开启范围：默认关闭，task 发送后自动回到 off。 */
 export type ComputerUseMode = "off" | "task" | "session";
 
+/** Browser Operator 显式开启范围：默认关闭，task 发送后自动回到 off。 */
+export type BrowserUseMode = "off" | "task" | "session";
+
 /** 与 `omiga/src-tauri/src/execution/types.rs` `EnvironmentType` 对齐（不含 Local）。 */
 export type SandboxBackend = "modal" | "daytona" | "docker" | "singularity";
 
@@ -94,6 +97,7 @@ export function normalizeSessionConfig(
 interface ChatComposerState {
   permissionMode: PermissionMode;
   computerUseMode: ComputerUseMode;
+  browserUseMode: BrowserUseMode;
   /** 注册表中的 Agent id，如 Explore、Plan、general-purpose */
   composerAgentType: string;
   /** `@` 选择器选中的工作区相对路径（仅内存，不持久化） */
@@ -118,6 +122,8 @@ interface ChatComposerState {
   setPermissionMode: (m: PermissionMode) => void;
   setComputerUseMode: (m: ComputerUseMode) => void;
   resetTaskComputerUseMode: () => void;
+  setBrowserUseMode: (m: BrowserUseMode) => void;
+  resetTaskBrowserUseMode: () => void;
   setComposerAgentType: (t: string) => void;
   addComposerAttachedPath: (relativePath: string) => void;
   removeComposerAttachedPath: (relativePath: string) => void;
@@ -146,6 +152,7 @@ function defaults() {
   return {
     permissionMode: "auto" as PermissionMode,
     computerUseMode: "off" as ComputerUseMode,
+    browserUseMode: "off" as BrowserUseMode,
     composerAgentType: "auto",
     composerAttachedPaths: [] as string[],
     composerSelectedPluginIds: [] as string[],
@@ -164,6 +171,8 @@ async function saveSessionConfig(
     setPermissionMode: unknown;
     setComputerUseMode: unknown;
     resetTaskComputerUseMode: unknown;
+    setBrowserUseMode: unknown;
+    resetTaskBrowserUseMode: unknown;
     setComposerAgentType: unknown;
     addComposerAttachedPath: unknown;
     removeComposerAttachedPath: unknown;
@@ -222,6 +231,12 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
   },
   resetTaskComputerUseMode: () => {
     if (get().computerUseMode === "task") set({ computerUseMode: "off" });
+  },
+  setBrowserUseMode: (browserUseMode) => {
+    set({ browserUseMode });
+  },
+  resetTaskBrowserUseMode: () => {
+    if (get().browserUseMode === "task") set({ browserUseMode: "off" });
   },
   setComposerAgentType: (composerAgentType) => {
     set({ composerAgentType });
@@ -302,6 +317,7 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       activeSessionId: sessionId,
       permissionMode: normalized.permission_mode as PermissionMode,
       computerUseMode: "off",
+      browserUseMode: "off",
       composerAgentType: normalized.composer_agent_type || "auto",
       environment: normalized.execution_environment as ExecutionEnvironment,
       sshServer: normalized.ssh_server,
@@ -320,6 +336,7 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       ...defaults(),
       activeSessionId: null,
       computerUseMode: "off",
+      browserUseMode: "off",
       composerAttachedPaths: [],
       composerSelectedPluginIds: [],
     });

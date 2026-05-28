@@ -1,8 +1,8 @@
 //! Read-only Unit Index over installed Operator / Template / Skill entries.
 //!
-//! The Unit Index is a routing/catalog view. It deliberately does not create
-//! new execution tools or change existing `operator__*`, `skill`, or retrieval
-//! runtime behavior.
+//! The Unit Index is a routing/catalog view. It deliberately separates
+//! discovery from execution: callers narrow Operator/Operation/Template/Skill
+//! candidates here, then use the corresponding generic execution tool.
 
 use crate::domain::operators::OperatorCandidateSummary;
 use crate::domain::skills::{SkillEntry, SkillSource};
@@ -18,6 +18,7 @@ const STAGE_INFERENCE_READ_LIMIT_BYTES: u64 = 16 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum UnitKind {
     Operator,
+    Operation,
     Template,
     Skill,
 }
@@ -26,6 +27,7 @@ impl UnitKind {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "operator" | "operators" => Some(Self::Operator),
+            "operation" | "operations" => Some(Self::Operation),
             "template" | "templates" => Some(Self::Template),
             "skill" | "skills" => Some(Self::Skill),
             _ => None,
@@ -35,6 +37,7 @@ impl UnitKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Operator => "operator",
+            Self::Operation => "operation",
             Self::Template => "template",
             Self::Skill => "skill",
         }
@@ -619,6 +622,7 @@ pub fn describe_unit_by_entry(
 ) -> Option<UnitDescription> {
     match unit.kind {
         UnitKind::Operator => describe_operator_unit(unit),
+        UnitKind::Operation => describe_operation_unit(unit),
         UnitKind::Template => describe_template_unit(unit),
         UnitKind::Skill => describe_skill_unit(unit, skills),
     }
@@ -629,9 +633,10 @@ pub fn operator_units_from_summaries(
 ) -> Vec<UnitIndexEntry> {
     summaries
         .into_iter()
-        .map(|summary| {
+        .flat_map(|summary| {
             let mut tags = summary.tags.clone();
             push_unique(&mut tags, "operator");
+            push_unique(&mut tags, "program");
             let stage_input = summary
                 .interface
                 .inputs
@@ -644,7 +649,7 @@ pub fn operator_units_from_summaries(
                 .keys()
                 .cloned()
                 .collect::<Vec<String>>();
-            UnitIndexEntry {
+            let operator_unit = UnitIndexEntry {
                 canonical_id: canonical_unit_id(
                     &summary.source_plugin,
                     UnitKind::Operator,
@@ -652,8 +657,8 @@ pub fn operator_units_from_summaries(
                 ),
                 id: summary.id.clone(),
                 kind: UnitKind::Operator,
-                provider_plugin: summary.source_plugin,
-                aliases: summary.enabled_aliases,
+                provider_plugin: summary.source_plugin.clone(),
+                aliases: summary.enabled_aliases.clone(),
                 classification: UnitClassification {
                     category: infer_operator_category(&summary.tags),
                     tags,
@@ -663,17 +668,99 @@ pub fn operator_units_from_summaries(
                 exposure: UnitExposure {
                     expose_to_agent: summary.exposed,
                 },
-                source_path: summary.manifest_path,
+                source_path: summary.manifest_path.clone(),
                 migration_target: None,
                 status: if summary.exposed {
                     "available".to_string()
                 } else {
                     "installed".to_string()
                 },
-                name: summary.name,
-                version: Some(summary.version),
-                description: summary.description,
-            }
+                name: summary.name.clone(),
+                version: Some(summary.version.clone()),
+                description: summary.description.clone(),
+            };
+            let operation_units = summary
+                .operations
+                .iter()
+                .map(|operation| {
+                    let mut tags = summary.tags.clone();
+                    extend_unique(&mut tags, operation.tags.clone());
+                    extend_unique(
+                        &mut tags,
+                        [
+                            operation.category.clone(),
+                            operation.group.clone(),
+                            operation.stage.clone(),
+                        ]
+                        .into_iter()
+                        .flatten(),
+                    );
+                    push_unique(&mut tags, "operator");
+                    push_unique(&mut tags, "operation");
+                    let stage_input = operation
+                        .interface
+                        .inputs
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<String>>();
+                    let stage_output = operation
+                        .interface
+                        .outputs
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<String>>();
+                    UnitIndexEntry {
+                        canonical_id: canonical_unit_id(
+                            &summary.source_plugin,
+                            UnitKind::Operation,
+                            &format!("{}#{}", summary.id, operation.id),
+                        ),
+                        id: format!("{}.{}", summary.id, operation.id),
+                        kind: UnitKind::Operation,
+                        provider_plugin: summary.source_plugin.clone(),
+                        aliases: summary
+                            .enabled_aliases
+                            .iter()
+                            .map(|alias| format!("{alias}.{}", operation.id))
+                            .collect(),
+                        classification: UnitClassification {
+                            category: operation
+                                .category
+                                .clone()
+                                .or_else(|| operation.group.clone())
+                                .or_else(|| operation.stage.clone())
+                                .or_else(|| infer_operator_category(&tags)),
+                            tags,
+                            stage_input,
+                            stage_output,
+                        },
+                        exposure: UnitExposure {
+                            expose_to_agent: operation.exposed,
+                        },
+                        source_path: summary.manifest_path.clone(),
+                        migration_target: None,
+                        status: if operation.exposed {
+                            "available".to_string()
+                        } else {
+                            "installed".to_string()
+                        },
+                        name: operation.name.clone().or_else(|| {
+                            summary
+                                .name
+                                .clone()
+                                .map(|name| format!("{name} {}", operation.id))
+                        }),
+                        version: Some(summary.version.clone()),
+                        description: operation
+                            .description
+                            .clone()
+                            .or_else(|| summary.description.clone()),
+                    }
+                })
+                .collect::<Vec<_>>();
+            std::iter::once(operator_unit)
+                .chain(operation_units)
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -803,9 +890,51 @@ fn describe_operator_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
         details: serde_json::json!({
             "schemaKind": "OperatorCandidateSummary",
             "operator": summary,
-            "note": "Read-only Unit Index description. Execute atomic operators with existing operator__* tools; prefer template_execute when a Template wraps this operator as a higher-level workflow."
+            "note": "Read-only Unit Index description. Use operator_describe for operation schemas, then execute with operator_execute. Prefer template_execute when a Template wraps this operator as a higher-level workflow."
         }),
     })
+}
+
+fn describe_operation_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
+    let (operator_id, operation_id) = split_operation_unit_id(&unit.id)?;
+    let summary = crate::domain::operators::list_operator_summaries()
+        .into_iter()
+        .find(|summary| {
+            summary.source_plugin == unit.provider_plugin && summary.id == operator_id
+        })?;
+    let operation = summary
+        .operations
+        .iter()
+        .find(|operation| operation.id == operation_id)?;
+    Some(UnitDescription {
+        unit,
+        details: serde_json::json!({
+            "schemaKind": "OperatorOperationSummary",
+            "operator": {
+                "id": summary.id,
+                "name": summary.name,
+                "description": summary.description,
+                "sourcePlugin": summary.source_plugin,
+            },
+            "operation": operation,
+            "execute": {
+                "tool": "operator_execute",
+                "arguments": {
+                    "operator": summary.enabled_aliases.first().cloned().unwrap_or(summary.id),
+                    "operation": operation.id,
+                    "inputs": {},
+                    "params": {},
+                    "resources": {}
+                }
+            },
+            "note": "Read-only Operation description. Execute with operator_execute by passing the Operator program id/alias and this operation name."
+        }),
+    })
+}
+
+fn split_operation_unit_id(id: &str) -> Option<(String, String)> {
+    id.split_once('.')
+        .map(|(operator, operation)| (operator.to_string(), operation.to_string()))
 }
 
 fn describe_template_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
@@ -857,30 +986,21 @@ fn canonical_unit_id(provider: &str, kind: UnitKind, id: &str) -> String {
 }
 
 fn infer_operator_category(tags: &[String]) -> Option<String> {
-    let normalized = tags.iter().map(|tag| normalize(tag)).collect::<Vec<_>>();
-    if normalized
-        .iter()
-        .any(|tag| tag.contains("differential") || tag.contains("rnaseq") || tag.contains("rna"))
-    {
-        Some("omics/transcriptomics/differential".to_string())
-    } else if normalized
-        .iter()
-        .any(|tag| tag.contains("enrichment") || tag.contains("gsea") || tag.contains("pathway"))
-    {
-        Some("omics/enrichment".to_string())
-    } else if normalized
-        .iter()
-        .any(|tag| tag.contains("pca") || tag.contains("dimension"))
-    {
-        Some("omics/dimensionality_reduction".to_string())
-    } else if normalized
-        .iter()
-        .any(|tag| tag.contains("retrieval") || tag.contains("pubmed") || tag.contains("uniprot"))
-    {
-        Some("utility/data_retrieval".to_string())
-    } else {
-        Some("operator".to_string())
-    }
+    tags.iter()
+        .map(|tag| normalize(tag))
+        .find(|tag| {
+            !tag.is_empty()
+                && !matches!(
+                    tag.as_str(),
+                    "operator"
+                        | "operation"
+                        | "tool"
+                        | "tools"
+                        | "local-execution"
+                        | "ssh-execution"
+                )
+        })
+        .or_else(|| Some("operator".to_string()))
 }
 
 fn skill_plugin_providers() -> Vec<(std::path::PathBuf, String)> {
@@ -967,8 +1087,9 @@ fn sort_units(units: &mut [UnitIndexEntry]) {
 fn unit_kind_order(kind: UnitKind) -> u8 {
     match kind {
         UnitKind::Operator => 0,
-        UnitKind::Template => 1,
-        UnitKind::Skill => 2,
+        UnitKind::Operation => 1,
+        UnitKind::Template => 2,
+        UnitKind::Skill => 3,
     }
 }
 
@@ -1034,6 +1155,68 @@ mod tests {
         }
     }
 
+    fn load_visualization_template_fixture(
+        tmp: &tempfile::TempDir,
+    ) -> crate::domain::templates::TemplateSpecWithSource {
+        let plugin_root = tmp.path().join("visualization-r");
+        let template_dir = plugin_root.join("templates").join("scatter").join("basic");
+        std::fs::create_dir_all(&template_dir).expect("mkdir template fixture");
+        std::fs::write(template_dir.join("example.tsv"), "x_value\ty_value\n1\t2\n")
+            .expect("write example");
+        std::fs::write(
+            template_dir.join("template.yaml"),
+            r#"apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_basic
+  version: 0.1.0
+  name: Basic Scatter Plot
+  description: Publication-style scatter plot for tabular data.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+classification:
+  category: visualization/scatter
+  stageInput: [table]
+  stageOutput: [static_figure]
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table: {kind: file, required: true, description: Input TSV table.}
+  params:
+    x_column: {kind: string, default: x_value}
+    y_column: {kind: string, default: y_value}
+    title: {kind: string, default: Basic scatter plot}
+  outputs:
+    figure_png: {kind: file, glob: figure.png, required: true}
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.x_column}
+    - ${params.y_column}
+    - ${params.title}
+"#,
+        )
+        .expect("write template fixture");
+
+        crate::domain::templates::load_template_manifest(
+            &template_dir.join("template.yaml"),
+            "visualization-r@omiga-curated",
+            plugin_root,
+        )
+        .expect("visualization-r template")
+    }
+
     #[test]
     fn filters_units_by_kind_category_tag_stage_and_query() {
         let units = vec![
@@ -1046,7 +1229,7 @@ mod tests {
                 &["diff_results"],
             ),
             unit(
-                "seqtk_sample_reads",
+                "program_sample_reads",
                 UnitKind::Operator,
                 "operator",
                 &["fastq"],
@@ -1204,21 +1387,62 @@ mod tests {
     }
 
     #[test]
+    fn operation_units_use_manifest_operation_taxonomy() {
+        let summary = OperatorCandidateSummary {
+            id: "sequence_program".to_string(),
+            version: "0.2.0".to_string(),
+            name: Some("Sequence Program".to_string()),
+            description: Some("Program adapter".to_string()),
+            tags: vec!["bioinformatics".to_string(), "ngs".to_string()],
+            source_plugin: "sequence-plugin@example".to_string(),
+            manifest_path:
+                "/plugins/bioinformatics/ngs/sequence/operators/sequence_program/operator.yaml"
+                    .to_string(),
+            interface: Default::default(),
+            operations: vec![crate::domain::operators::OperatorOperationSummary {
+                id: "sample".to_string(),
+                name: Some("Sample Reads".to_string()),
+                description: Some("Subsample reads".to_string()),
+                category: Some("ngs/sequence-processing".to_string()),
+                group: Some("Sequence Processing".to_string()),
+                stage: Some("NGS / Sequence Processing".to_string()),
+                tags: vec!["sampling".to_string()],
+                interface: Default::default(),
+                runtime: None,
+                resources: Default::default(),
+                exposed: true,
+            }],
+            execution: Default::default(),
+            preflight: None,
+            runtime: None,
+            resources: Default::default(),
+            smoke_tests: Vec::new(),
+            enabled_aliases: vec!["sequence_program".to_string()],
+            exposed: true,
+            unavailable_reason: None,
+        };
+
+        let units = operator_units_from_summaries(vec![summary]);
+        let operation = units
+            .iter()
+            .find(|unit| unit.kind == UnitKind::Operation)
+            .expect("operation unit");
+
+        assert_eq!(
+            operation.classification.category.as_deref(),
+            Some("ngs/sequence-processing")
+        );
+        assert!(operation
+            .classification
+            .tags
+            .iter()
+            .any(|tag| tag == "NGS / Sequence Processing"));
+    }
+
+    #[test]
     fn indexes_visualization_r_templates_as_template_units() {
-        let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .join(".omiga/plugins/visualization-r");
-        let template = crate::domain::templates::load_template_manifest(
-            &plugin_root
-                .join("templates")
-                .join("scatter")
-                .join("basic")
-                .join("template.yaml"),
-            "visualization-r@omiga-curated",
-            plugin_root,
-        )
-        .expect("visualization-r template");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let template = load_visualization_template_fixture(&tmp);
 
         let units = template_units_from_specs(vec![template]);
 
@@ -1241,20 +1465,8 @@ mod tests {
 
     #[test]
     fn template_descriptions_include_executable_argument_skeleton() {
-        let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .join(".omiga/plugins/visualization-r");
-        let template = crate::domain::templates::load_template_manifest(
-            &plugin_root
-                .join("templates")
-                .join("scatter")
-                .join("basic")
-                .join("template.yaml"),
-            "visualization-r@omiga-curated",
-            plugin_root,
-        )
-        .expect("visualization-r template");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let template = load_visualization_template_fixture(&tmp);
 
         let execute = crate::domain::templates::template_execute_example(
             &template,
@@ -1276,6 +1488,55 @@ mod tests {
         assert_eq!(
             execute["arguments"]["params"]["title"],
             "Basic scatter plot"
+        );
+    }
+
+    #[test]
+    fn operator_unit_descriptions_prefer_operator_execute_over_dynamic_operator_tools() {
+        let summary = crate::domain::operators::list_operator_summaries()
+            .into_iter()
+            .next();
+        let Some(summary) = summary else {
+            // Minimal test environments may not have a plugin marketplace mounted.
+            return;
+        };
+        let unit = UnitIndexEntry {
+            canonical_id: canonical_unit_id(
+                &summary.source_plugin,
+                UnitKind::Operator,
+                &summary.id,
+            ),
+            id: summary.id.clone(),
+            kind: UnitKind::Operator,
+            provider_plugin: summary.source_plugin.clone(),
+            aliases: summary.enabled_aliases.clone(),
+            classification: UnitClassification {
+                category: Some("operator".to_string()),
+                tags: summary.tags.clone(),
+                stage_input: summary.interface.inputs.keys().cloned().collect(),
+                stage_output: summary.interface.outputs.keys().cloned().collect(),
+            },
+            exposure: UnitExposure {
+                expose_to_agent: summary.exposed,
+            },
+            source_path: summary.manifest_path.clone(),
+            migration_target: None,
+            status: "available".to_string(),
+            name: summary.name.clone(),
+            version: Some(summary.version.clone()),
+            description: summary.description.clone(),
+        };
+
+        let description = describe_operator_unit(unit).expect("operator description");
+        let note = description.details["note"].as_str().expect("note");
+
+        assert!(
+            note.contains("operator_execute"),
+            "unit_describe operator notes should prefer generic operator_execute guidance"
+        );
+        assert!(
+            !note.contains("operator__"),
+            "unit_describe operator notes should stop steering callers toward operator__* by default"
         );
     }
 }

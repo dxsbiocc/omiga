@@ -593,13 +593,14 @@ Completed in the first version:
   ExecutionRecords into archive, fix, cleanup, lineage-inspection, and reusable
   choice promotion recommendations
 
-Deferred from first version:
+Deferred from first version (historical list; items called out as completed in
+the second-version status below are no longer current gaps):
 
 - full rendered R implementation for bulk DE, PCA, and enrichment templates
 - fixture-based DE parity comparison between rendered Template and legacy
   operator output
 - parent/child linking between a Template ExecutionRecord and the delegated
-  Operator ExecutionRecord
+  Operator ExecutionRecord (completed in the second version below)
 - environment profile resolver and automatic environment preparation
 - retrieval-to-Operator migration for GEO / PubMed / UniProt
 - self-evolution graph mining and auto-registration

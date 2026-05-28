@@ -27,16 +27,17 @@ flaky。人类的做法是"第一次深思,之后变成反射"。我们要把这
 
 ---
 
-## 2. 实现状态审计(2026-05-25,动工前基线)
+## 2. 实现状态审计(2026-05-27,文档真相校准)
 
-设计必须建在"既真实又已接线"的模块上。下表是动工前对相关代码的核实结论。
+设计必须建在"既真实又已接线"的模块上。下表是当前对相关代码的核实结论。
 
 | 模块 | 状态 | 证据 / 位置 |
 |---|---|---|
-| operator 运行 + chain | ✅ 真实现 & 已接线,🟡 **不写 ExecutionRecord** | `commands/operators.rs::run_operator(_chain)` 无 `record_execution` 调用 |
-| template 运行 | ✅ 真实现 & 已接线 & **唯一真实记录者** | `domain/templates.rs` 真实写 `ExecutionRecord`(`kind:"template"`) |
-| ExecutionRecord 捕获 | 🟡 **仅 template** | 生产 `kind` 只有 `"template"`;所有 `"operator"` 仅出现在测试 |
-| ExecutionRecord 字段完整度 | 🟡 **无 version、无完整 params** | 只存 `param_hash`(哈希),不存可重放参数;`canonical_id` 不含版本 |
+| operator 运行 + chain | ✅ 真实现 & 已接线 & 写 `ExecutionRecord` | operator runtime 成功/失败路径 best-effort 写 `kind:"operator"` 记录 |
+| template 运行 | ✅ 真实现 & 已接线 & 写 `ExecutionRecord` | `domain/templates.rs` 创建/更新 `kind:"template"` 记录 |
+| template → backing operator 血缘 | ✅ 已接线 | Template 父记录会通过 `runContext.parentExecutionId` 传给 delegated/rendered backing Operator |
+| ExecutionRecord 捕获 | ✅ operator/template 已捕获; daily/planner ❌ | 生产路径已有 `"operator"` 与 `"template"`;日常 chat/turn 和 planner 轨迹仍未统一捕获 |
+| ExecutionRecord 字段完整度 | 🟡 **仍非完整重放载体** | 有 `param_hash`、`input_hash`、metadata/runtime/output summary 等;仍缺稳定 version 字段和完整、脱敏、可重放 params payload |
 | learning_proposals 治理流 | ✅ 真实现 & 已接线 | `domain/learning_proposals.rs::generate_learning_proposals_from_records`;lib.rs 注册 `learning_proposal_*` |
 | self_evolution 草稿/晋升 | ✅ 真实现 & 已接线 | lib.rs 注册 `self_evolution_drafts::*`(草稿 placeholder 是设计上要求人工替换) |
 | TaskGraph 数据模型 | ✅ 真(类型可复用) | `research_system/models.rs::TaskGraph` |
@@ -46,17 +47,17 @@ flaky。人类的做法是"第一次深思,之后变成反射"。我们要把这
 | `LlmProviderAgentRunner` | ❌ 孤儿代码 | 定义存在,生产路径零实例化 |
 | 日常 chat/turn 轨迹捕获 | ❌ 完全没有 | `commands/chat/` 内零个 `record_execution` |
 | `crystallize_workflow` proposal + 血缘蒸馏 | ❌ 没有 | 现有 proposal 只基于**单条**记录 |
-| Fingerprint 结构 / PlaybookStore | ❌ 没有 | `param_hash`/`canonical_id` 原料齐备,但 **version 需在执行当下从活 spec 采集** |
+| Fingerprint 结构 / PlaybookStore | ❌ 没有 | `param_hash`/`canonical_id` 原料齐备,但 **version 与可重放 payload 需在执行当下从活 spec/invocation 采集** |
 
-### 审计带来的硬性约束(动工前已落实到契约)
+### 审计带来的硬性约束
 
-1. **MVP 只能建在 template 执行 + learning_proposals 上**——template 是唯一真实写
-   ExecutionRecord 的路径(operator 标准执行不写记录)。"operator 域"在 MVP 中实指
-   **template 执行域**(template 携带 `OperatorInvocation`)。
+1. **MVP 可以建在 operator/template ExecutionRecord 上**——二者都已是生产捕获路径。
+   但 chat/turn 与 planner 轨迹仍未统一捕获,所以日常任务固化仍只能作为后续阶段接入。
 2. **指纹 / 可重放数据在"执行成功的当下"从活 spec + invocation 采集**,不从历史
-   `ExecutionRecord` 反推。原因:记录里无 version、无完整 params。`ExecutionRecord`
-   只作 provenance 指针。因此 Phase 0 的接口是 `Fingerprint::from_parts(canonical_id,
-   version, param_hash, env)`,**不是** `fingerprint_from_execution(&ExecutionRecord)`。
+   `ExecutionRecord` 反推。原因:记录里仍无稳定 version 字段、无完整脱敏 params payload。
+   `ExecutionRecord` 可作 provenance 与哈希来源,但不能独自承担 replay。
+   因此 Phase 0 的接口应优先是 `Fingerprint::from_parts(canonical_id, version,
+   param_hash, env)`,或显式接收活 spec/invocation 的 builder,而不是只靠历史记录。
 3. **`TaskGraph` 不直接作重放载体**:它是规划结构(goal/constraints),不含具体
    operator params。MVP 用 operator 原生的可重放模型(`canonical_id` + 完整 `params`
    + `PlaybookVerification`)。`VerificationSpec` 等规划类型留待 Phase 2+ 评估复用。
@@ -197,8 +198,9 @@ struct Playbook {
 - [ ] 定义 `Playbook` / `ParamSlot` / `Provenance` / `Health`,`graph` 复用 `TaskGraph`
 - [ ] 实现 `PlaybookStore`(`.omiga/playbooks/`,照搬 `JsonFileTaskGraphStore`),
       CRUD + **按指纹哈希建索引**(O(1) 查表)
-- [ ] `fingerprint_from_execution(&ExecutionRecord)`:用现成 `canonical_id`+`param_hash`+
-      operator `metadata.version` 计算
+- [ ] `fingerprint_from_execution(...)`:显式接收 `ExecutionRecord` + 活 operator/template
+      spec,用 `canonical_id`、`param_hash`、spec version/env 计算;不要假设历史记录本身
+      含完整 replay payload
 - [ ] 单测:指纹稳定性、版本变更→指纹变化、store round-trip、O(1) 查表
 
 ### Phase 1 — L2 精确重放 MVP(operator 域,验证核心假设)
@@ -254,7 +256,6 @@ struct Playbook {
 固化能力的等级由**指纹质量**决定,而非任务走哪条路径。operator 先行,因为它指纹最干净
 且已被捕获;planner 与日常任务各自补不同缺口接入。本质是"把验证过的轨迹逐步晋升为
 确定性流程",而不是"用相似度跳过思考"。
-
 ---
 
 ## 11. Phase 1 实现决议(MVP,Wave 2)

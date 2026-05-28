@@ -187,6 +187,58 @@ export interface PluginMarketplaceEntry {
   plugins: PluginSummary[];
 }
 
+export type MarketplaceSourceKind = "local" | "remote";
+
+export interface UserMarketplaceSource {
+  id: string;
+  kind: MarketplaceSourceKind;
+  location: string;
+  label?: string | null;
+  enabled: boolean;
+  addedAt: string;
+}
+
+export type MarketplaceSourceView = {
+  id: string;
+  kind: "builtin" | "local" | "remote";
+  location: string;
+  label?: string | null;
+  enabled: boolean;
+  removable: boolean;
+  addedAt?: string | null;
+};
+
+export interface RefreshResult {
+  id: string;
+  ok: boolean;
+  message: string;
+  marketplaceName?: string | null;
+  pluginCount?: number | null;
+}
+
+export interface BuiltinMarketplaceStatus {
+  ok: boolean;
+  source: string;
+  path?: string | null;
+  message: string;
+}
+
+export interface PluginMigrationResult {
+  configRewritten: boolean;
+  legacyCacheEntriesMigrated: number;
+  builtinRootsRefreshed: number;
+  warnings: string[];
+}
+
+export interface PluginMigrationStatus {
+  migrationNeeded: boolean;
+  configRewriteNeeded: boolean;
+  legacyCacheEntriesToMigrate: number;
+  legacyCacheEntriesToRemove: number;
+  builtinRootsToRefresh: number;
+  warnings: string[];
+}
+
 export interface PluginInstallResult {
   pluginId: string;
   installedPath: string;
@@ -225,6 +277,7 @@ export interface OperatorSummary {
   sourcePlugin: string;
   manifestPath: string;
   interface?: OperatorInterfaceSpec;
+  operations?: OperatorOperationSummary[];
   execution?: OperatorExecutionSpec;
   runtime?: Record<string, unknown> | null;
   resources?: Record<string, OperatorResourceSpec>;
@@ -232,6 +285,20 @@ export interface OperatorSummary {
   enabledAliases: string[];
   exposed: boolean;
   unavailableReason?: string | null;
+}
+
+export interface OperatorOperationSummary {
+  id: string;
+  name?: string | null;
+  description?: string | null;
+  category?: string | null;
+  group?: string | null;
+  stage?: string | null;
+  tags?: string[];
+  interface?: OperatorInterfaceSpec;
+  runtime?: Record<string, unknown> | null;
+  resources?: Record<string, OperatorResourceSpec>;
+  exposed?: boolean;
 }
 
 export interface OperatorRuntimeResourceProfile {
@@ -521,6 +588,8 @@ export interface RetrievalRuntimeDiagnosticsPayload {
 }
 
 interface PluginState {
+  marketplaceSources: UserMarketplaceSource[];
+  marketplaceSourceViews: MarketplaceSourceView[];
   marketplaces: PluginMarketplaceEntry[];
   operators: OperatorSummary[];
   operatorDiagnostics: OperatorManifestDiagnostic[];
@@ -532,9 +601,27 @@ interface PluginState {
   retrievalStatuses: PluginRetrievalRouteStatus[];
   processPoolStatuses: PluginProcessPoolRouteStatus[];
   remoteMarketplaceChecks: MarketplaceRemoteCheckResult[];
+  builtinMarketplaceStatus: BuiltinMarketplaceStatus | null;
+  pluginMigrationStatus: PluginMigrationStatus | null;
   isLoading: boolean;
   isMutating: boolean;
+  bootstrapInProgress: boolean;
   error: string | null;
+  ensureBuiltinMarketplace: (projectRoot?: string) => Promise<BuiltinMarketplaceStatus>;
+  loadMarketplaceSources: () => Promise<void>;
+  addMarketplaceSource: (
+    kind: MarketplaceSourceKind,
+    location: string,
+    label?: string | null,
+    projectRoot?: string,
+  ) => Promise<UserMarketplaceSource>;
+  removeMarketplaceSource: (id: string, projectRoot?: string) => Promise<void>;
+  setMarketplaceSourceEnabled: (
+    id: string,
+    enabled: boolean,
+    projectRoot?: string,
+  ) => Promise<void>;
+  refreshMarketplaceSource: (id: string, projectRoot?: string) => Promise<RefreshResult>;
   loadPlugins: (projectRoot?: string, surface?: OperatorExecutionSurfaceArgs) => Promise<void>;
   loadOperators: (projectRoot?: string) => Promise<void>;
   loadFavoriteOperators: () => Promise<void>;
@@ -567,6 +654,8 @@ interface PluginState {
   ) => Promise<OperatorRunCleanupResult>;
   loadRetrievalStatuses: (projectRoot?: string) => Promise<void>;
   loadProcessPoolStatuses: (projectRoot?: string) => Promise<void>;
+  loadPluginMigrationStatus: (projectRoot?: string) => Promise<PluginMigrationStatus | null>;
+  migratePluginState: (projectRoot?: string) => Promise<PluginMigrationResult>;
   clearProcessPool: (projectRoot?: string) => Promise<number>;
   installPlugin: (plugin: PluginSummary, projectRoot?: string) => Promise<PluginInstallResult>;
   syncPlugin: (
@@ -845,6 +934,8 @@ export function updatePluginInstalledInMarketplaces(
 }
 
 function pluginDeclaresOperator(plugin: PluginSummary): boolean {
+  if ((plugin.operators?.length ?? 0) > 0) return true;
+
   const terms = [
     plugin.interface?.category,
     ...(plugin.interface?.capabilities ?? []),
@@ -1195,6 +1286,8 @@ export function summarizeOperatorRunResult(result: Record<string, unknown>): Ope
 }
 
 export const usePluginStore = create<PluginState>((set, get) => ({
+  marketplaceSources: [],
+  marketplaceSourceViews: [],
   marketplaces: [],
   operators: [],
   operatorDiagnostics: [],
@@ -1209,20 +1302,207 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   retrievalStatuses: [],
   processPoolStatuses: [],
   remoteMarketplaceChecks: [],
+  builtinMarketplaceStatus: null,
+  pluginMigrationStatus: null,
   isLoading: false,
   isMutating: false,
+  bootstrapInProgress: false,
   error: null,
+
+  ensureBuiltinMarketplace: async (projectRoot?: string) => {
+    set({ bootstrapInProgress: true });
+    try {
+      const status = await invoke<BuiltinMarketplaceStatus>(
+        "ensure_builtin_marketplace_source",
+        { projectRoot },
+      );
+      set({ builtinMarketplaceStatus: status });
+      if (status.ok) {
+        await get().loadMarketplaceSources();
+        const marketplaces = await invoke<PluginMarketplaceEntry[]>(
+          "list_omiga_plugin_marketplaces",
+          { projectRoot },
+        );
+        set({ marketplaces: [...marketplaces] });
+      }
+      return status;
+    } catch (e) {
+      const status: BuiltinMarketplaceStatus = {
+        ok: false,
+        source: "unknown",
+        message: extractErrorMessage(e),
+      };
+      set({ builtinMarketplaceStatus: status });
+      return status;
+    } finally {
+      set({ bootstrapInProgress: false });
+    }
+  },
+
+  loadMarketplaceSources: async () => {
+    try {
+      const [marketplaceSources, marketplaceSourceViews] = await Promise.all([
+        invoke<UserMarketplaceSource[]>("list_omiga_plugin_marketplace_sources"),
+        invoke<MarketplaceSourceView[]>(
+          "list_omiga_plugin_marketplace_source_views",
+        ),
+      ]);
+      set({
+        marketplaceSources: [...marketplaceSources],
+        marketplaceSourceViews: [...marketplaceSourceViews],
+      });
+    } catch (e) {
+      set({ error: extractErrorMessage(e) });
+    }
+  },
+
+  addMarketplaceSource: async (
+    kind: MarketplaceSourceKind,
+    location: string,
+    label?: string | null,
+    projectRoot?: string,
+  ) => {
+    set({ isMutating: true, error: null });
+    try {
+      const source = await invoke<UserMarketplaceSource>(
+        "add_omiga_plugin_marketplace_source",
+        {
+          kind,
+          location,
+          label: label ?? null,
+          projectRoot,
+        },
+      );
+      const [marketplaceSources, marketplaceSourceViews, marketplaces] = await Promise.all([
+        invoke<UserMarketplaceSource[]>("list_omiga_plugin_marketplace_sources"),
+        invoke<MarketplaceSourceView[]>(
+          "list_omiga_plugin_marketplace_source_views",
+        ),
+        invoke<PluginMarketplaceEntry[]>("list_omiga_plugin_marketplaces", {
+          projectRoot,
+        }),
+      ]);
+      set({
+        marketplaceSources: [...marketplaceSources],
+        marketplaceSourceViews: [...marketplaceSourceViews],
+        marketplaces: [...marketplaces],
+        isMutating: false,
+      });
+      return source;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
+
+  removeMarketplaceSource: async (id: string, projectRoot?: string) => {
+    set({ isMutating: true, error: null });
+    try {
+      await invoke<void>("remove_omiga_plugin_marketplace_source", { id });
+      const [marketplaceSources, marketplaceSourceViews, marketplaces] = await Promise.all([
+        invoke<UserMarketplaceSource[]>("list_omiga_plugin_marketplace_sources"),
+        invoke<MarketplaceSourceView[]>(
+          "list_omiga_plugin_marketplace_source_views",
+        ),
+        invoke<PluginMarketplaceEntry[]>("list_omiga_plugin_marketplaces", {
+          projectRoot,
+        }),
+      ]);
+      set({
+        marketplaceSources: [...marketplaceSources],
+        marketplaceSourceViews: [...marketplaceSourceViews],
+        marketplaces: [...marketplaces],
+        isMutating: false,
+      });
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
+
+  setMarketplaceSourceEnabled: async (
+    id: string,
+    enabled: boolean,
+    projectRoot?: string,
+  ) => {
+    set({ isMutating: true, error: null });
+    try {
+      await invoke<void>("set_omiga_plugin_marketplace_source_enabled", {
+        id,
+        enabled,
+      });
+      const [marketplaceSources, marketplaceSourceViews, marketplaces] = await Promise.all([
+        invoke<UserMarketplaceSource[]>("list_omiga_plugin_marketplace_sources"),
+        invoke<MarketplaceSourceView[]>(
+          "list_omiga_plugin_marketplace_source_views",
+        ),
+        invoke<PluginMarketplaceEntry[]>("list_omiga_plugin_marketplaces", {
+          projectRoot,
+        }),
+      ]);
+      set({
+        marketplaceSources: [...marketplaceSources],
+        marketplaceSourceViews: [...marketplaceSourceViews],
+        marketplaces: [...marketplaces],
+        isMutating: false,
+      });
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
+
+  refreshMarketplaceSource: async (id: string, projectRoot?: string) => {
+    set({ isMutating: true, error: null });
+    try {
+      const result = await invoke<RefreshResult>(
+        "refresh_omiga_plugin_marketplace_source",
+        {
+          id,
+          projectRoot: projectRoot ?? "",
+        },
+      );
+      const [marketplaceSourceViews, marketplaces] = await Promise.all([
+        invoke<MarketplaceSourceView[]>(
+          "list_omiga_plugin_marketplace_source_views",
+        ),
+        invoke<PluginMarketplaceEntry[]>("list_omiga_plugin_marketplaces", {
+          projectRoot,
+        }),
+      ]);
+      set({
+        marketplaceSourceViews: [...marketplaceSourceViews],
+        marketplaces: [...marketplaces],
+        isMutating: false,
+      });
+      return result;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
 
   loadPlugins: async (projectRoot?: string, surface?: OperatorExecutionSurfaceArgs) => {
     set({ isLoading: true, error: null });
     try {
       const [
+        marketplaceSources,
+        marketplaceSourceViews,
         marketplaces,
         retrievalStatuses,
         processPoolStatuses,
         operatorCatalog,
         operatorRuns,
+        pluginMigrationStatus,
       ] = await Promise.all([
+        invoke<UserMarketplaceSource[]>("list_omiga_plugin_marketplace_sources"),
+        invoke<MarketplaceSourceView[]>(
+          "list_omiga_plugin_marketplace_source_views",
+        ),
         invoke<PluginMarketplaceEntry[]>("list_omiga_plugin_marketplaces", {
           projectRoot,
         }),
@@ -1241,15 +1521,21 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           statusFilter: undefined,
           afterMs: undefined,
         }),
+        invoke<PluginMigrationStatus>("get_omiga_plugin_migration_status", {
+          projectRoot,
+        }),
       ]);
       set({
-        marketplaces,
-        retrievalStatuses,
-        processPoolStatuses,
-        operators: operatorCatalog.operators,
-        operatorDiagnostics: operatorCatalog.diagnostics ?? [],
+        marketplaceSources: [...marketplaceSources],
+        marketplaceSourceViews: [...marketplaceSourceViews],
+        marketplaces: [...marketplaces],
+        retrievalStatuses: [...retrievalStatuses],
+        processPoolStatuses: [...processPoolStatuses],
+        operators: [...operatorCatalog.operators],
+        operatorDiagnostics: [...(operatorCatalog.diagnostics ?? [])],
         operatorRegistryPath: operatorCatalog.registryPath,
-        operatorRuns,
+        operatorRuns: [...operatorRuns],
+        pluginMigrationStatus,
         isLoading: false,
       });
     } catch (e) {
@@ -1480,6 +1766,71 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     }
   },
 
+  loadPluginMigrationStatus: async (projectRoot?: string) => {
+    try {
+      const pluginMigrationStatus = await invoke<PluginMigrationStatus>(
+        "get_omiga_plugin_migration_status",
+        { projectRoot },
+      );
+      set({ pluginMigrationStatus });
+      return pluginMigrationStatus;
+    } catch (e) {
+      set({ error: extractErrorMessage(e) });
+      return null;
+    }
+  },
+
+  migratePluginState: async (projectRoot?: string) => {
+    set({ isMutating: true, error: null });
+    try {
+      const result = await invoke<PluginMigrationResult>(
+        "migrate_omiga_plugin_state",
+        { projectRoot },
+      );
+      const [
+        marketplaceSources,
+        marketplaceSourceViews,
+        marketplaces,
+        retrievalStatuses,
+        processPoolStatuses,
+        pluginMigrationStatus,
+      ] = await Promise.all([
+        invoke<UserMarketplaceSource[]>("list_omiga_plugin_marketplace_sources"),
+        invoke<MarketplaceSourceView[]>(
+          "list_omiga_plugin_marketplace_source_views",
+        ),
+        invoke<PluginMarketplaceEntry[]>("list_omiga_plugin_marketplaces", {
+          projectRoot,
+        }),
+        invoke<PluginRetrievalRouteStatus[]>(
+          "list_omiga_plugin_retrieval_statuses",
+          { projectRoot },
+        ),
+        invoke<PluginProcessPoolRouteStatus[]>(
+          "list_omiga_plugin_process_pool_statuses",
+          { projectRoot },
+        ),
+        invoke<PluginMigrationStatus>("get_omiga_plugin_migration_status", {
+          projectRoot,
+        }),
+      ]);
+      set({
+        marketplaceSources: [...marketplaceSources],
+        marketplaceSourceViews: [...marketplaceSourceViews],
+        marketplaces: [...marketplaces],
+        retrievalStatuses: [...retrievalStatuses],
+        processPoolStatuses: [...processPoolStatuses],
+        pluginMigrationStatus,
+        isMutating: false,
+      });
+      return result;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
+
   clearProcessPool: async (projectRoot?: string) => {
     set({ isMutating: true, error: null });
     try {
@@ -1598,6 +1949,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     try {
       await invoke("set_omiga_plugin_enabled", { pluginId, enabled, projectRoot });
       await get().loadRetrievalStatuses(projectRoot);
+      await get().loadOperators(projectRoot);
     } catch (e) {
       const error = extractErrorMessage(e);
       set({ marketplaces: previousMarketplaces, error });

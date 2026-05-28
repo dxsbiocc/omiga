@@ -17,16 +17,21 @@ import {
   buildRetrievalRuntimeDiagnostics,
   flattenMarketplacePlugins,
   summarizeOperatorRunResult,
-  updateOperatorEnabledInCatalog,
   updatePluginEnabledInMarketplaces,
   updatePluginInstalledInMarketplaces,
   updateRetrievalResourceEnabledInMarketplaces,
   usePluginStore,
+  type BuiltinMarketplaceStatus,
   type OperatorSummary,
+  type MarketplaceSourceView,
   type PluginMarketplaceEntry,
+  type PluginMigrationResult,
+  type PluginMigrationStatus,
   type PluginProcessPoolRouteStatus,
   type PluginRetrievalRouteStatus,
   type PluginSummary,
+  type RefreshResult,
+  type UserMarketplaceSource,
 } from "./pluginStore";
 
 function plugin(overrides: Partial<PluginSummary> = {}): PluginSummary {
@@ -55,6 +60,35 @@ function marketplace(
     path,
     interface: null,
     plugins,
+  };
+}
+
+function marketplaceSource(
+  overrides: Partial<UserMarketplaceSource> = {},
+): UserMarketplaceSource {
+  return {
+    id: "source-1",
+    kind: "remote",
+    location: "https://github.com/omiga-dev/omiga-plugins.git",
+    label: "Curated",
+    enabled: true,
+    addedAt: "2026-05-27T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function marketplaceSourceView(
+  overrides: Partial<MarketplaceSourceView> = {},
+): MarketplaceSourceView {
+  return {
+    id: "builtin",
+    kind: "builtin",
+    location: "/workspace/omiga-plugins",
+    label: "Built-in Marketplace",
+    enabled: true,
+    removable: false,
+    addedAt: null,
+    ...overrides,
   };
 }
 
@@ -113,8 +147,8 @@ describe("local plugin catalog updates", () => {
       enabled: false,
     });
     const other = plugin({
-      id: "operator-seqtk@omiga-curated",
-      name: "operator-seqtk",
+      id: "ngs-sequence-processing@omiga-curated",
+      name: "ngs-sequence-processing",
       installed: false,
       enabled: false,
     });
@@ -139,53 +173,6 @@ describe("local plugin catalog updates", () => {
       authPolicy: "ON_USE",
     });
     expect(updated[0].plugins[1]).toBe(other);
-  });
-
-  it("updates one operator registry entry without requiring a full plugin reload", () => {
-    const operator: OperatorSummary = {
-      id: "write_text_report",
-      version: "0.1.0",
-      name: "Write Text Report",
-      description: null,
-      sourcePlugin: "operator-smoke@omiga-curated",
-      manifestPath: "/plugins/operator-smoke/operators/write_text_report.yaml",
-      smokeTests: [],
-      enabledAliases: [],
-      exposed: false,
-      unavailableReason: null,
-    };
-    const other: OperatorSummary = {
-      ...operator,
-      id: "fastqc",
-      sourcePlugin: "bio-operators@local",
-      manifestPath: "/plugins/bio/operators/fastqc.yaml",
-    };
-
-    const enabled = updateOperatorEnabledInCatalog([operator, other], {
-      alias: "write_text_report",
-      operatorId: "write_text_report",
-      sourcePlugin: "operator-smoke@omiga-curated",
-      version: "0.1.0",
-      enabled: true,
-    });
-
-    expect(enabled[0]).toMatchObject({
-      exposed: true,
-      enabledAliases: ["write_text_report"],
-    });
-    expect(enabled[1]).toBe(other);
-
-    const disabled = updateOperatorEnabledInCatalog(enabled, {
-      alias: "write_text_report",
-      operatorId: "write_text_report",
-      sourcePlugin: "operator-smoke@omiga-curated",
-      version: "0.1.0",
-      enabled: false,
-    });
-    expect(disabled[0]).toMatchObject({
-      exposed: false,
-      enabledAliases: [],
-    });
   });
 
   it("updates one retrieval route exposure without rebuilding unrelated plugins", () => {
@@ -358,6 +345,8 @@ describe("usePluginStore operator actions", () => {
     listenTauriEventMock.mockReset();
     listenTauriEventMock.mockResolvedValue(vi.fn());
     usePluginStore.setState({
+      marketplaceSources: [],
+      marketplaceSourceViews: [],
       marketplaces: [],
       operators: [],
       operatorDiagnostics: [],
@@ -369,8 +358,11 @@ describe("usePluginStore operator actions", () => {
       retrievalStatuses: [],
       processPoolStatuses: [],
       remoteMarketplaceChecks: [],
+      builtinMarketplaceStatus: null,
+      pluginMigrationStatus: null,
       isLoading: false,
       isMutating: false,
+      bootstrapInProgress: false,
       error: null,
     });
   });
@@ -383,8 +375,8 @@ describe("usePluginStore operator actions", () => {
       enabled: false,
     });
     const other = plugin({
-      id: "operator-seqtk@omiga-curated",
-      name: "operator-seqtk",
+      id: "ngs-sequence-processing@omiga-curated",
+      name: "ngs-sequence-processing",
       installed: false,
       enabled: false,
     });
@@ -435,6 +427,56 @@ describe("usePluginStore operator actions", () => {
     expect(usePluginStore.getState().isMutating).toBe(false);
   });
 
+  it("refreshes dynamic operator exposure when toggling a plugin", async () => {
+    const exposedOperator: OperatorSummary = {
+      id: "pca_matrix",
+      version: "0.1.0",
+      name: "PCA Matrix",
+      description: null,
+      sourcePlugin: "stats-bundle@omiga-curated",
+      manifestPath: "/plugins/stats-bundle/operators/pca-matrix/operator.yaml",
+      smokeTests: [],
+      enabledAliases: ["pca_matrix"],
+      exposed: true,
+      unavailableReason: null,
+    };
+    const target = plugin({
+      id: "stats-bundle@omiga-curated",
+      name: "stats-bundle",
+      installed: true,
+      enabled: false,
+      operators: [exposedOperator],
+    });
+    usePluginStore.setState({
+      marketplaces: [marketplace("/marketplace.json", [target])],
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "set_omiga_plugin_enabled") return undefined;
+      if (command === "list_omiga_plugin_retrieval_statuses") return [];
+      if (command === "list_operators") {
+        return {
+          registryPath: "/registry.json",
+          operators: [exposedOperator],
+          diagnostics: [],
+        };
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().setPluginEnabled(target.id, true, "/project");
+
+    expect(invokeMock).toHaveBeenCalledWith("set_omiga_plugin_enabled", {
+      pluginId: target.id,
+      enabled: true,
+      projectRoot: "/project",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("list_operators");
+    expect(usePluginStore.getState().operators).toEqual([exposedOperator]);
+    expect(usePluginStore.getState().marketplaces[0].plugins[0]).toMatchObject({
+      enabled: true,
+    });
+  });
+
   it("passes force overwrite when syncing a plugin with local edits", async () => {
     const target = plugin({
       id: "ngs-alignment@omiga-curated",
@@ -464,9 +506,19 @@ describe("usePluginStore operator actions", () => {
           message: "forced",
         };
       }
+      if (command === "ensure_builtin_marketplace_source") {
+        return {
+          ok: false,
+          source: "github",
+          path: null,
+          message: "Offline.",
+        } satisfies BuiltinMarketplaceStatus;
+      }
       if (command === "list_omiga_plugin_marketplaces") {
         return [marketplace("/marketplace.json", [target])];
       }
+      if (command === "list_omiga_plugin_marketplace_sources") return [];
+      if (command === "list_omiga_plugin_marketplace_source_views") return [];
       if (command === "list_omiga_plugin_retrieval_statuses") return [];
       if (command === "list_omiga_plugin_process_pool_statuses") return [];
       if (command === "list_operators") {
@@ -517,6 +569,578 @@ describe("usePluginStore operator actions", () => {
     );
     expect(usePluginStore.getState().remoteMarketplaceChecks).toEqual(result);
     expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("adds marketplace sources and reloads source definitions plus the plugin catalog", async () => {
+    const source = marketplaceSource();
+    const sourceViews = [
+      marketplaceSourceView(),
+      marketplaceSourceView({
+        id: source.id,
+        kind: source.kind,
+        location: source.location,
+        label: source.label,
+        enabled: source.enabled,
+        removable: true,
+        addedAt: source.addedAt,
+      }),
+    ];
+    const catalog = [marketplace("/marketplace.json", [plugin()])];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "add_omiga_plugin_marketplace_source") return source;
+      if (command === "list_omiga_plugin_marketplace_sources") return [source];
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    const result = await usePluginStore
+      .getState()
+      .addMarketplaceSource("remote", source.location, source.label, "/project");
+
+    expect(result).toEqual(source);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "add_omiga_plugin_marketplace_source",
+      {
+        kind: "remote",
+        location: source.location,
+        label: source.label,
+        projectRoot: "/project",
+      },
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_sources",
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_omiga_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("removes marketplace sources and reloads source definitions plus the plugin catalog", async () => {
+    const remaining = marketplaceSource({ id: "source-2", location: "/plugins/local" });
+    const sourceViews = [
+      marketplaceSourceView(),
+      marketplaceSourceView({
+        id: remaining.id,
+        kind: remaining.kind,
+        location: remaining.location,
+        label: remaining.label,
+        enabled: remaining.enabled,
+        removable: true,
+        addedAt: remaining.addedAt,
+      }),
+    ];
+    const catalog = [marketplace("/local/marketplace.json", [])];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "remove_omiga_plugin_marketplace_source") return undefined;
+      if (command === "list_omiga_plugin_marketplace_sources") return [remaining];
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().removeMarketplaceSource("source-1", "/project");
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "remove_omiga_plugin_marketplace_source",
+      { id: "source-1" },
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_sources",
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_omiga_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(usePluginStore.getState().marketplaceSources).toEqual([remaining]);
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("toggles marketplace sources and reloads source definitions plus the plugin catalog", async () => {
+    const source = marketplaceSource({ enabled: false });
+    const sourceViews = [
+      marketplaceSourceView(),
+      marketplaceSourceView({
+        id: source.id,
+        kind: source.kind,
+        location: source.location,
+        label: source.label,
+        enabled: source.enabled,
+        removable: true,
+        addedAt: source.addedAt,
+      }),
+    ];
+    const catalog = [marketplace("/marketplace.json", [])];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "set_omiga_plugin_marketplace_source_enabled") return undefined;
+      if (command === "list_omiga_plugin_marketplace_sources") return [source];
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore
+      .getState()
+      .setMarketplaceSourceEnabled("source-1", false, "/project");
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "set_omiga_plugin_marketplace_source_enabled",
+      { id: "source-1", enabled: false },
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_sources",
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_omiga_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("refreshes marketplace sources and reloads the plugin catalog on success", async () => {
+    const sourceViews = [marketplaceSourceView()];
+    const refreshResult: RefreshResult = {
+      id: "source-1",
+      ok: true,
+      message: "Remote marketplace refreshed.",
+      marketplaceName: "omiga-curated",
+      pluginCount: 2,
+    };
+    const catalog = [marketplace("/cache/marketplace.json", [plugin()])];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "refresh_omiga_plugin_marketplace_source") return refreshResult;
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    const result = await usePluginStore
+      .getState()
+      .refreshMarketplaceSource("source-1", "/project");
+
+    expect(result).toEqual(refreshResult);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "refresh_omiga_plugin_marketplace_source",
+      { id: "source-1", projectRoot: "/project" },
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_omiga_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("refreshes marketplace sources and reloads the plugin catalog on failure", async () => {
+    const sourceViews = [marketplaceSourceView()];
+    const refreshResult: RefreshResult = {
+      id: "source-1",
+      ok: false,
+      message: "invalid remote marketplace cache",
+      marketplaceName: null,
+      pluginCount: null,
+    };
+    const catalog = [marketplace("/cache/marketplace.json", [])];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "refresh_omiga_plugin_marketplace_source") return refreshResult;
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    const result = await usePluginStore
+      .getState()
+      .refreshMarketplaceSource("source-1", "/project");
+
+    expect(result).toEqual(refreshResult);
+    expect(invokeMock).toHaveBeenCalledWith("list_omiga_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("ensures the built-in marketplace and reloads sources plus catalog on success", async () => {
+    const status: BuiltinMarketplaceStatus = {
+      ok: true,
+      source: "github",
+      path: "/home/user/.omiga/marketplaces/builtin",
+      message: "Built-in marketplace ready.",
+    };
+    const source = marketplaceSource({ id: "source-remote" });
+    const sourceViews = [marketplaceSourceView()];
+    const catalog = [marketplace("/builtin/marketplace.json", [plugin()])];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "ensure_builtin_marketplace_source") return status;
+      if (command === "list_omiga_plugin_marketplace_sources") return [source];
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    const result = await usePluginStore
+      .getState()
+      .ensureBuiltinMarketplace("/project");
+
+    expect(result).toEqual(status);
+    expect(invokeMock).toHaveBeenCalledWith("ensure_builtin_marketplace_source", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_sources",
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_omiga_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(usePluginStore.getState().builtinMarketplaceStatus).toEqual(status);
+    expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().bootstrapInProgress).toBe(false);
+  });
+
+  it("stores a failed built-in marketplace status without throwing", async () => {
+    const status: BuiltinMarketplaceStatus = {
+      ok: false,
+      source: "github",
+      path: null,
+      message: "Install git or connect to the network, then retry.",
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "ensure_builtin_marketplace_source") return status;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    const result = await usePluginStore
+      .getState()
+      .ensureBuiltinMarketplace("/project");
+
+    expect(result).toEqual(status);
+    expect(usePluginStore.getState().builtinMarketplaceStatus).toEqual(status);
+    expect(usePluginStore.getState().bootstrapInProgress).toBe(false);
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplaces",
+      expect.anything(),
+    );
+  });
+
+  it("loads marketplace source views with source definitions", async () => {
+    const source = marketplaceSource();
+    const sourceViews = [
+      marketplaceSourceView(),
+      marketplaceSourceView({
+        id: source.id,
+        kind: source.kind,
+        location: source.location,
+        label: source.label,
+        enabled: source.enabled,
+        removable: true,
+        addedAt: source.addedAt,
+      }),
+    ];
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_omiga_plugin_marketplace_sources") return [source];
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().loadMarketplaceSources();
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_sources",
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+  });
+
+  it("loads marketplace sources during the initial plugin refresh", async () => {
+    const source = marketplaceSource();
+    const sourceViews = [
+      marketplaceSourceView(),
+      marketplaceSourceView({
+        id: source.id,
+        kind: source.kind,
+        location: source.location,
+        label: source.label,
+        enabled: source.enabled,
+        removable: true,
+        addedAt: source.addedAt,
+      }),
+    ];
+    const catalog = [marketplace("/marketplace.json", [plugin()])];
+    const migrationStatus: PluginMigrationStatus = {
+      migrationNeeded: true,
+      configRewriteNeeded: true,
+      legacyCacheEntriesToMigrate: 0,
+      legacyCacheEntriesToRemove: 0,
+      builtinRootsToRefresh: 1,
+      warnings: [],
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_omiga_plugin_marketplace_sources") return [source];
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      if (command === "list_omiga_plugin_retrieval_statuses") return [];
+      if (command === "list_omiga_plugin_process_pool_statuses") return [];
+      if (command === "list_operators") {
+        return { registryPath: "/registry.json", operators: [], diagnostics: [] };
+      }
+      if (command === "list_operator_runs") return [];
+      if (command === "get_omiga_plugin_migration_status") return migrationStatus;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().loadPlugins("/project");
+
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_sources",
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "ensure_builtin_marketplace_source",
+      expect.anything(),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "migrate_omiga_plugin_state",
+      expect.anything(),
+    );
+    expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().pluginMigrationStatus).toEqual(migrationStatus);
+    expect(usePluginStore.getState().isLoading).toBe(false);
+  });
+
+  it("migrates plugin state and reloads marketplace sources, catalog, and runtime statuses", async () => {
+    const source = marketplaceSource();
+    const sourceViews = [
+      marketplaceSourceView(),
+      marketplaceSourceView({
+        id: source.id,
+        kind: source.kind,
+        location: source.location,
+        label: source.label,
+        enabled: source.enabled,
+        removable: true,
+        addedAt: source.addedAt,
+      }),
+    ];
+    const catalog = [marketplace("/marketplace.json", [plugin()])];
+    const retrievalStatuses: PluginRetrievalRouteStatus[] = [
+      {
+        pluginId: "resource-ncbi@omiga-curated",
+        category: "literature",
+        resourceId: "pubmed",
+        route: "pubmed.search",
+        state: "healthy",
+        quarantined: false,
+        consecutiveFailures: 0,
+        remainingMs: 0,
+        lastError: null,
+      },
+    ];
+    const processPoolStatuses: PluginProcessPoolRouteStatus[] = [
+      {
+        pluginId: "resource-ncbi@omiga-curated",
+        category: "literature",
+        resourceId: "pubmed",
+        route: "pubmed.search",
+        pluginRoot: "/plugins/resource-ncbi",
+        remainingMs: 0,
+      },
+    ];
+    const result: PluginMigrationResult = {
+      configRewritten: true,
+      legacyCacheEntriesMigrated: 2,
+      builtinRootsRefreshed: 3,
+      warnings: ["Skipped one stale cache entry."],
+    };
+    const migrationStatus: PluginMigrationStatus = {
+      migrationNeeded: false,
+      configRewriteNeeded: false,
+      legacyCacheEntriesToMigrate: 0,
+      legacyCacheEntriesToRemove: 0,
+      builtinRootsToRefresh: 0,
+      warnings: [],
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "migrate_omiga_plugin_state") return result;
+      if (command === "list_omiga_plugin_marketplace_sources") return [source];
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      if (command === "list_omiga_plugin_retrieval_statuses") return retrievalStatuses;
+      if (command === "list_omiga_plugin_process_pool_statuses") return processPoolStatuses;
+      if (command === "get_omiga_plugin_migration_status") return migrationStatus;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await expect(
+      usePluginStore.getState().migratePluginState("/project"),
+    ).resolves.toEqual(result);
+
+    expect(invokeMock).toHaveBeenCalledWith("migrate_omiga_plugin_state", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_sources",
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_omiga_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_retrieval_statuses",
+      { projectRoot: "/project" },
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_process_pool_statuses",
+      { projectRoot: "/project" },
+    );
+    expect(invokeMock).toHaveBeenCalledWith("get_omiga_plugin_migration_status", {
+      projectRoot: "/project",
+    });
+    expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().retrievalStatuses).toEqual(retrievalStatuses);
+    expect(usePluginStore.getState().processPoolStatuses).toEqual(processPoolStatuses);
+    expect(usePluginStore.getState().pluginMigrationStatus).toEqual(migrationStatus);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("loads plugin migration status without mutating plugin state", async () => {
+    const migrationStatus: PluginMigrationStatus = {
+      migrationNeeded: true,
+      configRewriteNeeded: false,
+      legacyCacheEntriesToMigrate: 1,
+      legacyCacheEntriesToRemove: 1,
+      builtinRootsToRefresh: 0,
+      warnings: ["Legacy duplicate will be cleaned up."],
+    };
+    invokeMock.mockResolvedValue(migrationStatus);
+
+    await expect(
+      usePluginStore.getState().loadPluginMigrationStatus("/project"),
+    ).resolves.toEqual(migrationStatus);
+
+    expect(invokeMock).toHaveBeenCalledWith("get_omiga_plugin_migration_status", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "migrate_omiga_plugin_state",
+      expect.anything(),
+    );
+    expect(usePluginStore.getState().pluginMigrationStatus).toEqual(migrationStatus);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+  });
+
+  it("keeps plugin migration status checks read-only when status loading fails", async () => {
+    const previousStatus: PluginMigrationStatus = {
+      migrationNeeded: true,
+      configRewriteNeeded: true,
+      legacyCacheEntriesToMigrate: 1,
+      legacyCacheEntriesToRemove: 0,
+      builtinRootsToRefresh: 0,
+      warnings: ["Previous warning."],
+    };
+    usePluginStore.setState({
+      isMutating: false,
+      pluginMigrationStatus: previousStatus,
+      error: null,
+    });
+    invokeMock.mockRejectedValue(new Error("status unavailable"));
+
+    await expect(
+      usePluginStore.getState().loadPluginMigrationStatus("/project"),
+    ).resolves.toBeNull();
+
+    expect(invokeMock).toHaveBeenCalledWith("get_omiga_plugin_migration_status", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "migrate_omiga_plugin_state",
+      expect.anything(),
+    );
+    expect(usePluginStore.getState().pluginMigrationStatus).toEqual(previousStatus);
+    expect(usePluginStore.getState().isMutating).toBe(false);
+    expect(usePluginStore.getState().error).toBe("status unavailable");
+  });
+
+  it("does not trigger built-in marketplace bootstrap when loading plugins", async () => {
+    usePluginStore.setState({
+      builtinMarketplaceStatus: {
+        ok: false,
+        source: "github",
+        path: null,
+        message: "Previous bootstrap failure.",
+      },
+    });
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_omiga_plugin_marketplace_sources") return [];
+      if (command === "list_omiga_plugin_marketplace_source_views") return [];
+      if (command === "list_omiga_plugin_marketplaces") return [];
+      if (command === "list_omiga_plugin_retrieval_statuses") return [];
+      if (command === "list_omiga_plugin_process_pool_statuses") return [];
+      if (command === "list_operators") {
+        return { registryPath: "/registry.json", operators: [], diagnostics: [] };
+      }
+      if (command === "list_operator_runs") return [];
+      if (command === "get_omiga_plugin_migration_status") {
+        return {
+          migrationNeeded: false,
+          configRewriteNeeded: false,
+          legacyCacheEntriesToMigrate: 0,
+          legacyCacheEntriesToRemove: 0,
+          builtinRootsToRefresh: 0,
+          warnings: [],
+        };
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().loadPlugins("/project");
+
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "ensure_builtin_marketplace_source",
+      expect.anything(),
+    );
+    expect(usePluginStore.getState().builtinMarketplaceStatus).toMatchObject({
+      ok: false,
+      message: "Previous bootstrap failure.",
+    });
+    expect(usePluginStore.getState().isLoading).toBe(false);
   });
 
   it("toggles one retrieval route and refreshes route diagnostics", async () => {
