@@ -53,6 +53,7 @@ import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
 import { PluginsPanel } from "./PluginsPanel";
+import { PlaybooksPanel } from "./PlaybooksPanel";
 import { CronJobsPanel } from "./CronJobsPanel";
 import {
   DEFAULT_WEB_SEARCH_METHODS,
@@ -105,6 +106,7 @@ const SETTINGS_SECTIONS: {
     header: "Integrations",
     items: [
       { index: 4, label: "Plugins" },
+      { index: 16, label: "Playbooks" },
       { index: 14, label: "External" },
       { index: 5, label: "MCP" },
       { index: 6, label: "Skills" },
@@ -128,7 +130,7 @@ const SETTINGS_SECTIONS: {
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 15;
+const SETTINGS_TAB_MAX = 16;
 
 function clampSettingsTab(i: number): number {
   const clamped = Math.min(
@@ -3490,6 +3492,10 @@ export function Settings({
 
             {activeTab === 4 && (
               <PluginsPanel projectPath={projectPath} />
+            )}
+
+            {activeTab === 16 && (
+              <PlaybooksPanel projectPath={projectPath} />
             )}
 
             {activeTab === 14 && (

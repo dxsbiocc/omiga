@@ -256,3 +256,27 @@ struct Playbook {
 固化能力的等级由**指纹质量**决定,而非任务走哪条路径。operator 先行,因为它指纹最干净
 且已被捕获;planner 与日常任务各自补不同缺口接入。本质是"把验证过的轨迹逐步晋升为
 确定性流程",而不是"用相似度跳过思考"。
+---
+
+## 11. Phase 1 实现决议(MVP,Wave 2)
+
+调查链执行流后定下两项决议,破解"匹配/省 token"的循环困境:
+
+**决议一:可重放单元 = operator 链(多步)。** `run_operator_chain(steps: Vec<ChainStep>)`
+是固化目标;省的是"链路规划"——token 成本真正所在。单 template 调用省不了多少(参数已定)。
+
+**决议二:凭引用重放(类 Skill)。**
+- 发现的循环:在 `run_operator_chain` 处挂钩省不了 token(LLM 已把 steps 想好传入);
+  而"意图→链"的预规划匹配是模糊的(= 推迟到 Phase 3 的 L1 难题)。
+- 破解:Playbook 像 Skill 一样**带描述暴露给 agent**;agent 自己识别并调
+  `playbook_replay(id)` 直接重放整条链,**不重新推理重建 steps**。
+- 指纹职责收窄为:① 重放前**失效检测**(算子版本漂移→拒绝重放,回退正常规划);② 重放后**验证**。
+  **不**用于预规划匹配(避开模糊误命中陷阱)。
+
+**Wave 2 模块划分(契约冻结后并行)**:
+- `chain.rs`(Codex C/写侧):`chain_canonical_id` / `chain_composite_version` / `build_chain_playbook`
+  ——`kind="chain"`,`params` 存序列化 `Vec<ChainStep>`,指纹经 `Fingerprint::from_invocation`。
+- `replay.rs`(Codex D/读+反馈侧):`resolve_for_replay`(重算指纹比对→Ready/Invalidated/NotFound/Inactive)、
+  `record_replay_outcome`(health 回写 + 成功率阈值 auto-demote)、`should_explore`(探索阀门)。
+- 集成(orchestrator):`playbook_replay`/`playbook_list` 工具 + 成功链保存 + 算子版本解析 +
+  verify-on-replay 接入实时路径(冲突易发胶水,亲自接线)。
