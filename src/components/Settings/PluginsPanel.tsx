@@ -54,6 +54,7 @@ import {
   type OperatorRunSummary,
   type OperatorSummary,
   type MarketplaceRemoteCheckResult,
+  type PluginMigrationResult,
   type MarketplaceSourceKind,
   type MarketplaceSourceView,
   type PluginEnvironmentSummary,
@@ -1824,6 +1825,30 @@ export function marketplaceSourceRefreshMessage(result: RefreshResult): string {
   return details.length > 0
     ? `${result.message} · ${details.join(" · ")}`
     : result.message;
+}
+
+function pluginMigrationCount(
+  count: number,
+  singular: string,
+  plural: string,
+): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+export function pluginMigrationSummary(result: PluginMigrationResult): string {
+  return [
+    result.configRewritten ? "config rewritten" : "config unchanged",
+    pluginMigrationCount(
+      result.legacyCacheEntriesMigrated,
+      "legacy cache entry migrated",
+      "legacy cache entries migrated",
+    ),
+    pluginMigrationCount(
+      result.builtinRootsRefreshed,
+      "built-in root refreshed",
+      "built-in roots refreshed",
+    ),
+  ].join(" · ");
 }
 
 export function remoteMarketplaceChangedPluginNames(
@@ -4354,6 +4379,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     readOperatorRunLog,
     verifyOperatorRun,
     clearProcessPool,
+    migratePluginState,
     installPlugin,
     syncPlugin,
     checkRemoteMarketplaces,
@@ -4388,6 +4414,8 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const [marketplaceSourceRefreshResults, setMarketplaceSourceRefreshResults] = useState<
     Record<string, RefreshResult | undefined>
   >({});
+  const [pluginMigrationResult, setPluginMigrationResult] = useState<PluginMigrationResult | null>(null);
+  const [pluginMigrationRunning, setPluginMigrationRunning] = useState(false);
   const [dismissedFeedbackKey, setDismissedFeedbackKey] = useState<string | null>(null);
   const [installingPluginId, setInstallingPluginId] = useState<string | null>(null);
   const [checkingRemoteMarketplaces, setCheckingRemoteMarketplaces] = useState(false);
@@ -4684,6 +4712,21 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     setMarketplaceSourceFormError(null);
     const status = await ensureBuiltinMarketplace(projectRoot);
     if (status.ok) setMessage(status.message);
+  };
+
+  const handleMigratePluginState = async () => {
+    setMessage(null);
+    setPluginMigrationResult(null);
+    setPluginMigrationRunning(true);
+    try {
+      const result = await migratePluginState(projectRoot);
+      setPluginMigrationResult(result);
+      setMessage(`Plugin migration completed · ${pluginMigrationSummary(result)}`);
+    } catch {
+      // Store exposes the error banner.
+    } finally {
+      setPluginMigrationRunning(false);
+    }
   };
 
   const handleToggleMarketplaceSource = async (
@@ -5375,6 +5418,60 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         </AccordionSummary>
         <AccordionDetails sx={{ px: 1.5, pt: 0.75, pb: 1.5 }}>
           <Stack spacing={1.25} useFlexGap>
+            <Alert
+              severity={pluginMigrationResult?.warnings.length ? "warning" : "info"}
+              sx={{ borderRadius: 1.5 }}
+            >
+              <Stack spacing={0.75}>
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={1}
+                  alignItems={{ xs: "stretch", sm: "center" }}
+                  justifyContent="space-between"
+                >
+                  <Typography variant="body2">
+                    If you upgraded from an older version or plugins look inconsistent, run migration to refresh config, cache, and built-in roots.
+                  </Typography>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={
+                      pluginMigrationRunning ? (
+                        <CircularProgress size={14} />
+                      ) : (
+                        <PublishedWithChangesRounded />
+                      )
+                    }
+                    disabled={isLoading || isMutating || bootstrapInProgress || pluginMigrationRunning}
+                    onClick={() => void handleMigratePluginState()}
+                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
+                  >
+                    Run migration
+                  </Button>
+                </Stack>
+                {pluginMigrationResult && (
+                  <Box>
+                    <Typography variant="body2" fontWeight={700}>
+                      Last migration: {pluginMigrationSummary(pluginMigrationResult)}
+                    </Typography>
+                    {pluginMigrationResult.warnings.length > 0 && (
+                      <Stack component="ul" spacing={0.25} sx={{ mt: 0.5, mb: 0, pl: 2 }}>
+                        {pluginMigrationResult.warnings.map((warning) => (
+                          <Typography
+                            key={warning}
+                            component="li"
+                            variant="caption"
+                            color="text.secondary"
+                          >
+                            {warning}
+                          </Typography>
+                        ))}
+                      </Stack>
+                    )}
+                  </Box>
+                )}
+              </Stack>
+            </Alert>
             {bootstrapInProgress && (
               <Stack direction="row" spacing={1} alignItems="center">
                 <CircularProgress size={16} />

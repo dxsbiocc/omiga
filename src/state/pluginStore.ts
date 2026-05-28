@@ -223,6 +223,13 @@ export interface BuiltinMarketplaceStatus {
   message: string;
 }
 
+export interface PluginMigrationResult {
+  configRewritten: boolean;
+  legacyCacheEntriesMigrated: number;
+  builtinRootsRefreshed: number;
+  warnings: string[];
+}
+
 export interface PluginInstallResult {
   pluginId: string;
   installedPath: string;
@@ -629,6 +636,7 @@ interface PluginState {
   ) => Promise<OperatorRunCleanupResult>;
   loadRetrievalStatuses: (projectRoot?: string) => Promise<void>;
   loadProcessPoolStatuses: (projectRoot?: string) => Promise<void>;
+  migratePluginState: (projectRoot?: string) => Promise<PluginMigrationResult>;
   clearProcessPool: (projectRoot?: string) => Promise<number>;
   installPlugin: (plugin: PluginSummary, projectRoot?: string) => Promise<PluginInstallResult>;
   syncPlugin: (
@@ -1681,6 +1689,52 @@ export const usePluginStore = create<PluginState>((set, get) => ({
       set({ processPoolStatuses });
     } catch (e) {
       set({ error: extractErrorMessage(e) });
+    }
+  },
+
+  migratePluginState: async (projectRoot?: string) => {
+    set({ isMutating: true, error: null });
+    try {
+      const result = await invoke<PluginMigrationResult>(
+        "migrate_omiga_plugin_state",
+        { projectRoot },
+      );
+      const [
+        marketplaceSources,
+        marketplaceSourceViews,
+        marketplaces,
+        retrievalStatuses,
+        processPoolStatuses,
+      ] = await Promise.all([
+        invoke<UserMarketplaceSource[]>("list_omiga_plugin_marketplace_sources"),
+        invoke<MarketplaceSourceView[]>(
+          "list_omiga_plugin_marketplace_source_views",
+        ),
+        invoke<PluginMarketplaceEntry[]>("list_omiga_plugin_marketplaces", {
+          projectRoot,
+        }),
+        invoke<PluginRetrievalRouteStatus[]>(
+          "list_omiga_plugin_retrieval_statuses",
+          { projectRoot },
+        ),
+        invoke<PluginProcessPoolRouteStatus[]>(
+          "list_omiga_plugin_process_pool_statuses",
+          { projectRoot },
+        ),
+      ]);
+      set({
+        marketplaceSources: [...marketplaceSources],
+        marketplaceSourceViews: [...marketplaceSourceViews],
+        marketplaces: [...marketplaces],
+        retrievalStatuses: [...retrievalStatuses],
+        processPoolStatuses: [...processPoolStatuses],
+        isMutating: false,
+      });
+      return result;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
     }
   },
 

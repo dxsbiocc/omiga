@@ -49,6 +49,7 @@ const pluginStoreMock = vi.hoisted(() => ({
     readOperatorRunLog: vi.fn(),
     verifyOperatorRun: vi.fn(),
     clearProcessPool: vi.fn().mockResolvedValue(0),
+    migratePluginState: vi.fn(),
     installPlugin: vi.fn(),
     syncPlugin: vi.fn(),
     checkRemoteMarketplaces: vi.fn(),
@@ -398,6 +399,12 @@ const resetPanelStore = () => {
   pluginStoreMock.state.readOperatorRunLog = vi.fn();
   pluginStoreMock.state.verifyOperatorRun = vi.fn();
   pluginStoreMock.state.clearProcessPool = vi.fn().mockResolvedValue(0);
+  pluginStoreMock.state.migratePluginState = vi.fn().mockResolvedValue({
+    configRewritten: false,
+    legacyCacheEntriesMigrated: 0,
+    builtinRootsRefreshed: 0,
+    warnings: [],
+  });
   pluginStoreMock.state.installPlugin = vi.fn();
   pluginStoreMock.state.syncPlugin = vi.fn();
   pluginStoreMock.state.checkRemoteMarketplaces = vi.fn();
@@ -489,6 +496,30 @@ describe("PluginsPanel marketplace sources UI", () => {
       undefined,
       "/project",
     );
+  });
+
+  it("offers an explicit migration CTA and renders the latest migration summary", async () => {
+    pluginStoreMock.state.migratePluginState = vi.fn().mockResolvedValue({
+      configRewritten: true,
+      legacyCacheEntriesMigrated: 2,
+      builtinRootsRefreshed: 3,
+      warnings: ["Skipped one stale cache entry."],
+    });
+
+    const harness = createPanelHarness();
+
+    expect(textContent(harness.tree)).toContain(
+      "If you upgraded from an older version or plugins look inconsistent, run migration to refresh config, cache, and built-in roots.",
+    );
+
+    await harness.click(getButtonByText(harness, "Run migration"));
+    harness.flush();
+
+    expect(pluginStoreMock.state.migratePluginState).toHaveBeenCalledWith("/project");
+    expect(textContent(harness.tree)).toContain(
+      "Last migration: config rewritten · 2 legacy cache entries migrated · 3 built-in roots refreshed",
+    );
+    expect(textContent(harness.tree)).toContain("Skipped one stale cache entry.");
   });
 
   it("disables marketplace source mutations while initial loading is active", () => {

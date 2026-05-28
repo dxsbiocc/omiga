@@ -25,6 +25,7 @@ import {
   type OperatorSummary,
   type MarketplaceSourceView,
   type PluginMarketplaceEntry,
+  type PluginMigrationResult,
   type PluginProcessPoolRouteStatus,
   type PluginRetrievalRouteStatus,
   type PluginSummary,
@@ -916,10 +917,101 @@ describe("usePluginStore operator actions", () => {
       "ensure_builtin_marketplace_source",
       expect.anything(),
     );
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "migrate_omiga_plugin_state",
+      expect.anything(),
+    );
     expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
     expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
     expect(usePluginStore.getState().marketplaces).toEqual(catalog);
     expect(usePluginStore.getState().isLoading).toBe(false);
+  });
+
+  it("migrates plugin state and reloads marketplace sources, catalog, and runtime statuses", async () => {
+    const source = marketplaceSource();
+    const sourceViews = [
+      marketplaceSourceView(),
+      marketplaceSourceView({
+        id: source.id,
+        kind: source.kind,
+        location: source.location,
+        label: source.label,
+        enabled: source.enabled,
+        removable: true,
+        addedAt: source.addedAt,
+      }),
+    ];
+    const catalog = [marketplace("/marketplace.json", [plugin()])];
+    const retrievalStatuses: PluginRetrievalRouteStatus[] = [
+      {
+        pluginId: "resource-ncbi@omiga-curated",
+        category: "literature",
+        resourceId: "pubmed",
+        route: "pubmed.search",
+        state: "healthy",
+        quarantined: false,
+        consecutiveFailures: 0,
+        remainingMs: 0,
+        lastError: null,
+      },
+    ];
+    const processPoolStatuses: PluginProcessPoolRouteStatus[] = [
+      {
+        pluginId: "resource-ncbi@omiga-curated",
+        category: "literature",
+        resourceId: "pubmed",
+        route: "pubmed.search",
+        pluginRoot: "/plugins/resource-ncbi",
+        remainingMs: 0,
+      },
+    ];
+    const result: PluginMigrationResult = {
+      configRewritten: true,
+      legacyCacheEntriesMigrated: 2,
+      builtinRootsRefreshed: 3,
+      warnings: ["Skipped one stale cache entry."],
+    };
+
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "migrate_omiga_plugin_state") return result;
+      if (command === "list_omiga_plugin_marketplace_sources") return [source];
+      if (command === "list_omiga_plugin_marketplace_source_views") return sourceViews;
+      if (command === "list_omiga_plugin_marketplaces") return catalog;
+      if (command === "list_omiga_plugin_retrieval_statuses") return retrievalStatuses;
+      if (command === "list_omiga_plugin_process_pool_statuses") return processPoolStatuses;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await expect(
+      usePluginStore.getState().migratePluginState("/project"),
+    ).resolves.toEqual(result);
+
+    expect(invokeMock).toHaveBeenCalledWith("migrate_omiga_plugin_state", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_sources",
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplace_source_views",
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_omiga_plugin_marketplaces", {
+      projectRoot: "/project",
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_retrieval_statuses",
+      { projectRoot: "/project" },
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "list_omiga_plugin_process_pool_statuses",
+      { projectRoot: "/project" },
+    );
+    expect(usePluginStore.getState().marketplaceSources).toEqual([source]);
+    expect(usePluginStore.getState().marketplaceSourceViews).toEqual(sourceViews);
+    expect(usePluginStore.getState().marketplaces).toEqual(catalog);
+    expect(usePluginStore.getState().retrievalStatuses).toEqual(retrievalStatuses);
+    expect(usePluginStore.getState().processPoolStatuses).toEqual(processPoolStatuses);
+    expect(usePluginStore.getState().isMutating).toBe(false);
   });
 
   it("does not trigger built-in marketplace bootstrap when loading plugins", async () => {
