@@ -822,16 +822,35 @@ metadata:
             .iter()
             .find(|profile| profile.spec.metadata.id == "r-base")
             .expect("visualization-r r-base profile");
-        assert_eq!(profile.spec.runtime.kind.as_deref(), Some("conda"));
-        assert_eq!(
-            profile
-                .spec
-                .runtime
-                .extra
-                .get("condaEnvFile")
-                .and_then(JsonValue::as_str),
-            Some("./conda.yaml")
-        );
+        match profile.spec.runtime.kind.as_deref() {
+            Some("conda") => {
+                assert_eq!(
+                    profile
+                        .spec
+                        .runtime
+                        .extra
+                        .get("condaEnvFile")
+                        .and_then(JsonValue::as_str),
+                    Some("./conda.yaml")
+                );
+            }
+            Some("system") => {
+                assert_eq!(profile.spec.runtime.command.as_deref(), Some("Rscript"));
+                assert!(profile
+                    .spec
+                    .requirements
+                    .system
+                    .iter()
+                    .any(|requirement| requirement == "Rscript"));
+                assert!(profile
+                    .spec
+                    .requirements
+                    .r_packages
+                    .iter()
+                    .any(|package| package == "ggplot2"));
+            }
+            other => panic!("unexpected visualization-r runtime kind: {other:?}"),
+        }
         assert_eq!(
             profile.spec.diagnostics.check_command,
             vec!["Rscript".to_string(), "--version".to_string()]

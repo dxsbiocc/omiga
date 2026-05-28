@@ -2122,13 +2122,9 @@ template:
             assert!(ids.contains(id), "missing visualization template `{id}`");
         }
         assert!(candidates.iter().all(|candidate| {
+            let entry = candidate.spec.template.entry.to_string_lossy();
             candidate.spec.runtime.env_ref.as_deref() == Some("r-base")
-                && candidate
-                    .spec
-                    .template
-                    .entry
-                    .to_string_lossy()
-                    .ends_with("template.R")
+                && (entry.ends_with("template.R") || entry.ends_with("template.R.j2"))
                 && candidate.spec.exposure.expose_to_agent
         }));
     }
