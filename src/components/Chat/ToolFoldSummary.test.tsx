@@ -12,6 +12,7 @@ import {
   ToolFoldHeader,
   toolCallPanelTitle,
   toolDisplayOutputText,
+  toolGroupAnyError,
   toolGroupFlowComplete,
 } from "./ToolFoldSummary";
 
@@ -42,8 +43,12 @@ describe("ToolFoldSummary helpers", () => {
 
     expect(summarizeReactFold(fold)).toBe("Reasoning · Ran 1 command, viewed a file");
     expect(firstRunningToolName(fold)).toBe("bash");
+    expect(toolGroupAnyError(fold)).toBe(false);
     expect(toolGroupFlowComplete(fold)).toBe(false);
     expect(toolGroupFlowComplete([{ role: "tool", toolCall: { name: "bash" } }])).toBe(true);
+    expect(
+      toolGroupAnyError([{ role: "tool", toolCall: { name: "bash", status: "error" } }]),
+    ).toBe(true);
   });
 
   it("formats tool details defensively", () => {
@@ -108,6 +113,7 @@ describe("ToolFoldHeader", () => {
         expanded={false}
         summary="Reasoning · Ran 2 commands"
         anyRunning
+        anyError={false}
         runningToolName="bash"
         runningToolCount={2}
         showGroupDone={false}
@@ -131,6 +137,7 @@ describe("ToolFoldHeader", () => {
         expanded={false}
         summary="Reasoning · Ran a command"
         anyRunning={false}
+        anyError={false}
         runningToolName={null}
         runningToolCount={0}
         showGroupDone={false}
@@ -146,5 +153,28 @@ describe("ToolFoldHeader", () => {
     expect(html).not.toContain(":hover&gt;svg");
     expect(html).not.toContain(":hover>svg");
     expect(html).not.toContain("svg:first-of-type");
+  });
+
+  it("renders an error badge instead of Done when completed fold contains errors", () => {
+    const html = renderToStaticMarkup(
+      <ToolFoldHeader
+        foldId="rf-error"
+        expanded
+        summary="Reasoning · Ran 3 commands"
+        anyRunning={false}
+        anyError
+        runningToolName={null}
+        runningToolCount={0}
+        showGroupDone
+        isLastFold={false}
+        activityIsStreaming={false}
+        waitingFirstChunk={false}
+        chat={chat}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Error");
+    expect(html).not.toContain("Done");
   });
 });

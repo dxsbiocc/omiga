@@ -344,6 +344,30 @@ export const ToolCallCard = memo(function ToolCallCard({
     : toolCallPanelTitle(toolCall.input, toolCall.name);
   const prefaceThought = prefaceBeforeTools?.trim() ?? "";
   const toolDurationLabel = formatToolDuration(timestamp, toolCall.completedAt);
+  const statusChip =
+    toolCall.status === "running" ? (
+      <Chip
+        size="small"
+        label={showAskUserPanel ? "等待你的回答" : "Running"}
+        sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
+      />
+    ) : toolCall.status === "error" ? (
+      <Chip
+        size="small"
+        label="Error"
+        color="error"
+        variant="outlined"
+        sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
+      />
+    ) : structuredError ? (
+      <Chip
+        size="small"
+        label={structuredError.recoverable === false ? "Blocked" : "Needs action"}
+        color={structuredError.recoverable === false ? "error" : "warning"}
+        variant="outlined"
+        sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
+      />
+    ) : null;
   const thoughtRow =
     prefaceThought && !previousAssistantHasText ? (
       <CollapsibleThoughtTrace
@@ -429,42 +453,33 @@ export const ToolCallCard = memo(function ToolCallCard({
           >
             {panelTitle}
           </Typography>
-          {toolCall.status === "running" && (
-            <Chip
-              size="small"
-              label={showAskUserPanel ? "等待你的回答" : "Running"}
-              sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
-            />
-          )}
-          {toolCall.status === "error" && (
-            <Chip
-              size="small"
-              label="Error"
-              color="error"
-              variant="outlined"
-              sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
-            />
-          )}
-          {toolCall.status !== "error" && structuredError && (
-            <Chip
-              size="small"
-              label={structuredError.recoverable === false ? "Blocked" : "Needs action"}
-              color={structuredError.recoverable === false ? "error" : "warning"}
-              variant="outlined"
-              sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
-            />
-          )}
-          {toolDurationLabel && (
-            <Typography
+          {(statusChip || toolDurationLabel) && (
+            <Stack
+              direction="row"
+              alignItems="center"
+              justifyContent="flex-end"
+              spacing={0.75}
               sx={{
-                fontSize: 10,
-                color: chat.labelMuted,
                 flexShrink: 0,
-                fontVariantNumeric: "tabular-nums",
+                width: { xs: 118, sm: 136 },
+                minWidth: { xs: 118, sm: 136 },
               }}
             >
-              {toolDurationLabel}
-            </Typography>
+              {statusChip}
+              <Typography
+                sx={{
+                  width: 42,
+                  minWidth: 42,
+                  textAlign: "right",
+                  fontSize: 10,
+                  color: chat.labelMuted,
+                  flexShrink: 0,
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {toolDurationLabel ?? ""}
+              </Typography>
+            </Stack>
           )}
         </Stack>
 

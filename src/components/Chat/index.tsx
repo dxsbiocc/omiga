@@ -27,6 +27,7 @@ import { alpha } from "@mui/material/styles";
 import {
   SmartToy,
   CheckCircle,
+  ErrorOutline,
   ExpandMore,
   FolderOpen,
   Send as SendIcon,
@@ -74,6 +75,7 @@ import {
   getNestedToolPanelOpen,
   summarizeReactFold,
   ToolFoldHeader,
+  toolGroupAnyError,
   toolGroupAnyRunning,
   toolGroupFlowComplete,
 } from "./ToolFoldSummary";
@@ -1457,6 +1459,7 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
   const toolMsgs = fold.filter((m) => m.role === "tool" && m.toolCall);
   const summary = summarizeReactFold(fold);
   const anyRunning = toolGroupAnyRunning(toolMsgs);
+  const anyError = toolGroupAnyError(toolMsgs);
   const showGroupDone = toolGroupFlowComplete(toolMsgs);
   const runningToolName = firstRunningToolName(toolMsgs);
   const runningToolCount = toolMsgs.filter(
@@ -1494,6 +1497,7 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
           expanded={expanded}
           summary={summary}
           anyRunning={anyRunning}
+          anyError={anyError}
           runningToolName={runningToolName}
           runningToolCount={runningToolCount}
           showGroupDone={showGroupDone}
@@ -1581,15 +1585,19 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
 
             {showGroupDone && (
               <Stack direction="row" alignItems="center" spacing={1} sx={{ pt: 0.25 }}>
-                <CheckCircle sx={{ fontSize: 14, color: chat.doneGreen }} />
+                {anyError ? (
+                  <ErrorOutline sx={{ fontSize: 14, color: "error.main" }} />
+                ) : (
+                  <CheckCircle sx={{ fontSize: 14, color: chat.doneGreen }} />
+                )}
                 <Typography
                   sx={{
                     fontSize: 12,
                     fontWeight: 600,
-                    color: chat.toolIcon,
+                    color: anyError ? "error.main" : chat.toolIcon,
                   }}
                 >
-                  Done
+                  {anyError ? "Failed" : "Done"}
                 </Typography>
               </Stack>
             )}

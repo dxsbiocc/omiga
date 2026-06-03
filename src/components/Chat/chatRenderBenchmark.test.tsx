@@ -47,6 +47,7 @@ describe("chat large transcript render benchmark", () => {
                 expanded={index % 2 === 0}
                 summary="Reasoning · Ran 1 command"
                 anyRunning={false}
+                anyError={false}
                 runningToolName={null}
                 runningToolCount={0}
                 showGroupDone

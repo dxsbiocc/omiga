@@ -132,6 +132,10 @@ impl RuntimeConstraintState {
         self.clarification_requested
     }
 
+    pub fn has_used_any_tool(&self) -> bool {
+        !self.seen_tool_names.is_empty()
+    }
+
     pub fn has_used_retrieval_tool(&self) -> bool {
         self.seen_tool_names.iter().any(|name| {
             matches!(
@@ -582,7 +586,7 @@ impl RuntimeConstraint for ClarificationFirstConstraint {
         ctx: &ModelConstraintContext<'_>,
         state: &RuntimeConstraintState,
     ) -> Option<ConstraintNotice> {
-        if !ctx.use_tools || state.clarification_requested() {
+        if !ctx.use_tools || state.clarification_requested() || state.has_used_any_tool() {
             return None;
         }
         if !looks_like_materially_ambiguous(ctx.request_text) {
@@ -630,6 +634,7 @@ impl RuntimeConstraint for ClarificationFirstConstraint {
     ) -> Option<ConstraintToolBlock> {
         if ctx.is_subagent
             || state.clarification_requested()
+            || state.has_used_any_tool()
             || !looks_like_materially_ambiguous(ctx.request_text)
             || !ctx.pending_tool_names.is_empty()
         {
@@ -649,6 +654,7 @@ impl RuntimeConstraint for ClarificationFirstConstraint {
         state: &RuntimeConstraintState,
     ) -> Option<ConstraintPostAction> {
         if state.clarification_requested()
+            || state.has_used_any_tool()
             || !looks_like_materially_ambiguous(ctx.request_text)
             || !ctx.pending_tool_names.is_empty()
             || assistant_is_clarifying(ctx.assistant_text)
@@ -734,11 +740,7 @@ fn build_clarification_first_block(
         tool_result_message,
         assistant_response,
         interactive_question: Some(structured_question),
-        post_answer_response: Some(
-            "Thanks — now please reply in free text with the concrete detail you selected. \
-             Include exact file/module names, desired behavior, and any constraints that matter."
-                .to_string(),
-        ),
+        post_answer_response: None,
     }
 }
 
@@ -861,6 +863,9 @@ fn looks_like_evidence_needed_request(text: &str) -> bool {
 
 fn looks_like_materially_ambiguous(text: &str) -> bool {
     let t = normalize(text);
+    if looks_like_capability_discovery_request(&t) {
+        return false;
+    }
     let has_vague_pointer = contains_any(
         &t,
         &[
@@ -917,6 +922,29 @@ fn looks_like_materially_ambiguous(text: &str) -> bool {
 
     (has_vague_pointer && broad_action && !has_specific_anchor(text))
         || t.len() < 24 && has_vague_pointer
+}
+
+fn looks_like_capability_discovery_request(normalized_text: &str) -> bool {
+    let asks_whether = contains_any(
+        normalized_text,
+        &[
+            "whether",
+            "if it supports",
+            "if this supports",
+            "does it support",
+            "does this support",
+            "是否",
+            "能否",
+            "有没有",
+            "可不可以",
+        ],
+    );
+    let conditional_followup = contains_any(
+        normalized_text,
+        &["if so", "if supported", "如果支持", "若支持", "要是支持"],
+    );
+    (asks_whether || conditional_followup)
+        && contains_any(normalized_text, &["support", "supports", "支持"])
 }
 
 fn looks_like_deliverable_request(text: &str) -> bool {
@@ -1089,6 +1117,37 @@ mod tests {
         assert_eq!(block.id, "clarification_first");
         assert!(block.tool_result_message.contains("ask_user_question"));
         assert!(block.interactive_question.is_some());
+        assert!(block.post_answer_response.is_none());
+    }
+
+    #[test]
+    fn clarification_post_response_does_not_interrupt_after_tool_activity() {
+        let harness = RuntimeConstraintHarness::default();
+        let mut state = RuntimeConstraintState::default();
+        state.record_tool_names(["bash"]);
+        let pending = Vec::<String>::new();
+
+        let block = harness.post_response_block(
+            &PostResponseConstraintContext {
+                request_text: "Please improve this.",
+                assistant_text: "The command failed while checking the project.",
+                pending_tool_names: &pending,
+                is_subagent: false,
+            },
+            &state,
+        );
+
+        assert!(block.is_none());
+    }
+
+    #[test]
+    fn clarification_heuristic_allows_capability_discovery_followups() {
+        assert!(!looks_like_materially_ambiguous(
+            "这个软件是否支持slurm任务提交，如果支持，帮我写一个任务提交脚本"
+        ));
+        assert!(!looks_like_materially_ambiguous(
+            "Does this project support SLURM job submission? If so, write a submission script."
+        ));
     }
 
     #[test]
