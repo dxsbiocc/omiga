@@ -105,26 +105,31 @@ function updatedAtMs(value: string | undefined): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-function formatSidebarRelativeTime(
+function isChineseSidebarLocale(locale: string): boolean {
+  return locale.toLowerCase().replace("_", "-").startsWith("zh");
+}
+
+export function formatSidebarRelativeTime(
   value: string | undefined,
   locale: string,
 ): string {
   const ms = updatedAtMs(value);
   if (!ms) return "";
+  const isChinese = isChineseSidebarLocale(locale);
   const diffMs = Math.max(0, Date.now() - ms);
   const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 1) return locale === "zh-CN" ? "刚刚" : "now";
-  if (minutes < 60) return locale === "zh-CN" ? `${minutes} 分` : `${minutes}m`;
+  if (minutes < 1) return isChinese ? "刚刚" : "now";
+  if (minutes < 60) return isChinese ? `${minutes} 分` : `${minutes}m`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return locale === "zh-CN" ? `${hours} 小时` : `${hours}h`;
+  if (hours < 24) return isChinese ? `${hours} 小时` : `${hours}h`;
   const days = Math.floor(hours / 24);
-  if (days < 7) return locale === "zh-CN" ? `${days} 天` : `${days}d`;
+  if (days < 7) return isChinese ? `${days} 天` : `${days}d`;
   const weeks = Math.floor(days / 7);
-  if (weeks < 5) return locale === "zh-CN" ? `${weeks} 周` : `${weeks}w`;
+  if (weeks < 5) return isChinese ? `${weeks} 周` : `${weeks}w`;
   const months = Math.floor(days / 30);
-  if (months < 12) return locale === "zh-CN" ? `${months} 月` : `${months}mo`;
+  if (months < 12) return isChinese ? `${months} 月` : `${months}mo`;
   const years = Math.floor(days / 365);
-  return locale === "zh-CN" ? `${years} 年` : `${years}y`;
+  return isChinese ? `${years} 年` : `${years}y`;
 }
 
 function sessionProjectLabel(session: {
@@ -161,6 +166,23 @@ interface ProjectSessionGroup {
   latestUpdatedAt: string;
   rows: SessionSearchRow[];
   isCurrent: boolean;
+}
+
+export function compareProjectGroupsForSidebar(
+  a: Pick<ProjectSessionGroup, "key" | "label" | "latestUpdatedAt">,
+  b: Pick<ProjectSessionGroup, "key" | "label" | "latestUpdatedAt">,
+): number {
+  const updatedDelta = updatedAtMs(b.latestUpdatedAt) - updatedAtMs(a.latestUpdatedAt);
+  if (updatedDelta !== 0) return updatedDelta;
+  const labelDelta = a.label.localeCompare(b.label, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+  if (labelDelta !== 0) return labelDelta;
+  return a.key.localeCompare(b.key, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
 }
 
 export function SessionList({ onSelectSession }: SessionListProps) {
@@ -328,7 +350,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   }, [sessions, currentSession?.id, loadSession]);
 
   useEffect(() => {
-    document.documentElement.lang = locale === "zh-CN" ? "zh-CN" : "en";
+    document.documentElement.lang = isChineseSidebarLocale(locale) ? "zh-CN" : "en";
   }, [locale]);
 
   const handleMenuOpen = (
@@ -661,10 +683,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             updatedAtMs(b.session.updatedAt) - updatedAtMs(a.session.updatedAt),
         ),
       }))
-      .sort((a, b) => {
-        if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-        return updatedAtMs(b.latestUpdatedAt) - updatedAtMs(a.latestUpdatedAt);
-      });
+      .sort(compareProjectGroupsForSidebar);
   }, [currentSession?.id, noProjectLabel, sessionRows]);
 
   const currentProjectKey = currentSession

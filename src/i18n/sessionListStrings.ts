@@ -1,4 +1,4 @@
-import type { AppLocale } from "../state/localeStore";
+import { normalizeAppLocale, type AppLocale } from "../state/localeStore";
 
 const STRINGS = {
   en: {
@@ -89,6 +89,6 @@ export function tSessionList(
   locale: AppLocale,
   key: SessionListStringKey,
 ): string {
-  const bundle = STRINGS[locale];
+  const bundle = STRINGS[normalizeAppLocale(locale)];
   return bundle[key] ?? STRINGS.en[key];
 }
