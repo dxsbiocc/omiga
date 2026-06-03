@@ -5,8 +5,10 @@ import {
   useRef,
   useCallback,
 } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { Icon } from "@iconify/react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Box,
   IconButton,
@@ -84,6 +86,28 @@ const TITLE_BAR_CONTROL_CENTER_Y = 25;
 const TITLE_BAR_TITLE_GAP = 16;
 const TITLE_BAR_CHAT_RAIL_INSET = 18;
 const TITLE_BAR_RESIZE_HANDLE_WIDTH = 6;
+const TITLE_BAR_NO_DRAG_SELECTOR = [
+  "button",
+  "a[href]",
+  "input",
+  "textarea",
+  "select",
+  "[role='button']",
+  "[role='menuitem']",
+  "[contenteditable='true']",
+  "[data-titlebar-no-drag='true']",
+].join(",");
+
+function shouldStartTitleBarWindowDrag(
+  event: ReactPointerEvent<HTMLElement>,
+): boolean {
+  if (event.button !== 0 || event.defaultPrevented) return false;
+  if (!("__TAURI_INTERNALS__" in window)) return false;
+  if (typeof Element === "undefined" || !(event.target instanceof Element)) {
+    return false;
+  }
+  return !event.target.closest(TITLE_BAR_NO_DRAG_SELECTOR);
+}
 
 function TitleBarStatus() {
   const isConnecting = useActivityStore((s) => s.isConnecting);
@@ -314,6 +338,19 @@ export default function App() {
       }
     },
     [setCurrentSession, setRightPanelMode, setSettingsOpen],
+  );
+
+  const handleTitlebarPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      if (!shouldStartTitleBarWindowDrag(event)) return;
+      event.preventDefault();
+      void getCurrentWindow().startDragging().catch((error: unknown) => {
+        if (import.meta.env.DEV) {
+          console.debug("[App] window drag unavailable", error);
+        }
+      });
+    },
+    [],
   );
 
   useEffect(() => {
@@ -613,6 +650,8 @@ export default function App() {
       <ConfirmationDialog />
       <Layout>
         <Box
+          data-tauri-drag-region
+          onPointerDown={handleTitlebarPointerDown}
           sx={{
             height: APP_TITLE_BAR_HEIGHT,
             flexShrink: 0,
