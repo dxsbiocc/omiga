@@ -10,6 +10,8 @@ import {
   COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT,
   COMPOSER_PROMPT_OVERLAY_POSITION,
   COMPOSER_PROMPT_OVERLAY_Z_INDEX,
+  COMPOSER_PERMISSION_MENU_MIN_WIDTH,
+  COMPOSER_PERMISSION_MENU_PLACEMENT,
 } from "./ChatComposer";
 
 describe("ChatComposer prompt overlay layout", () => {
@@ -18,9 +20,7 @@ describe("ChatComposer prompt overlay layout", () => {
     expect(COMPOSER_PROMPT_OVERLAY_BOTTOM).toBe("100%");
     expect(COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT).toBe("min(42vh, 420px)");
     expect(COMPOSER_PROMPT_OVERLAY_Z_INDEX).toBeGreaterThan(0);
-    expect(COMPOSER_INPUT_JOINED_Z_INDEX).toBe(
-      COMPOSER_PROMPT_OVERLAY_Z_INDEX,
-    );
+    expect(COMPOSER_INPUT_JOINED_Z_INDEX).toBe(COMPOSER_PROMPT_OVERLAY_Z_INDEX);
     expect(COMPOSER_PROMPT_JOINED_BORDER_RADIUS).toBe("24px 24px 0 0");
     expect(COMPOSER_INPUT_JOINED_BORDER_RADIUS).toBe("0 0 24px 24px");
   });
@@ -29,5 +29,10 @@ describe("ChatComposer prompt overlay layout", () => {
     expect(COMPOSER_CONTEXT_TRAY_PLACEMENT).toBe("above-input");
     expect(COMPOSER_CONTEXT_TRAY_MAX_HEIGHT).toBe("min(28vh, 152px)");
     expect(COMPOSER_CONTEXT_ITEM_MAX_WIDTH).toBe("calc((100% - 16px) / 3)");
+  });
+
+  it("keeps the permission menu compact and above its toolbar button", () => {
+    expect(COMPOSER_PERMISSION_MENU_PLACEMENT).toBe("above-button");
+    expect(COMPOSER_PERMISSION_MENU_MIN_WIDTH).toBeLessThan(220);
   });
 });

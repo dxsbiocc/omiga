@@ -522,6 +522,8 @@ interface QueuedMainSend {
   /** SSH 服务器名称（仅在 environment === "ssh" 时有效） */
   sshServer: string | null;
   sandboxBackend: SandboxBackend;
+  useWorktree: boolean;
+  worktreeBranch: string;
 }
 
 function compactSuggestionLabel(label: string, prompt: string): string {
@@ -2546,6 +2548,12 @@ export function Chat({ sessionId }: ChatProps) {
         st.setBrowserUseMode(item.browserUseMode);
         st.setEnvironment(item.environment);
         st.setSshServer(item.sshServer);
+        st.setUseWorktree(item.useWorktree);
+        if (item.worktreeBranch) {
+          const session = useSessionStore.getState().currentSession;
+          const root = session?.workingDirectory ?? session?.projectPath;
+          if (root) st.setBranchForRoot(root, item.worktreeBranch);
+        }
       });
       queueMicrotask(() => inputRef.current?.focus());
     },
@@ -2697,6 +2705,8 @@ export function Chat({ sessionId }: ChatProps) {
         environment: st.environment,
         sshServer: st.sshServer,
         sandboxBackend: st.sandboxBackend,
+        useWorktree: st.useWorktree && st.environment === "local",
+        worktreeBranch: st.worktreeBranch,
       };
       void handleSendRef.current();
       return true;
@@ -5690,6 +5700,8 @@ export function Chat({ sessionId }: ChatProps) {
       localVenvName: storeVenvName,
       computerUseMode: storeComputerUseMode,
       browserUseMode: storeBrowserUseMode,
+      useWorktree: storeUseWorktree,
+      worktreeBranch: storeWorktreeBranch,
     } = useChatComposerStore.getState();
 
     const composerAgentType = flushPayload
@@ -5709,6 +5721,12 @@ export function Chat({ sessionId }: ChatProps) {
     const sandboxBackend = flushPayload ? flushPayload.sandboxBackend : storeSb;
     const localVenvType = storeVenvType;
     const localVenvName = storeVenvName;
+    const useWorktree =
+      (flushPayload ? flushPayload.useWorktree : storeUseWorktree) &&
+      environment === "local";
+    const worktreeBranch = flushPayload
+      ? flushPayload.worktreeBranch
+      : storeWorktreeBranch;
     const composerAttachedPaths = flushPayload
       ? [...flushPayload.composerAttachedPaths]
       : storePaths;
@@ -5781,6 +5799,10 @@ export function Chat({ sessionId }: ChatProps) {
             sandboxBackend: useChatComposerStore.getState().sandboxBackend,
             localVenvType: useChatComposerStore.getState().localVenvType,
             localVenvName: useChatComposerStore.getState().localVenvName,
+            useWorktree:
+              useChatComposerStore.getState().useWorktree &&
+              useChatComposerStore.getState().environment === "local",
+            worktreeBranch: useChatComposerStore.getState().worktreeBranch,
             selectedPluginIds: composerSelectedPluginIds,
           },
         });
@@ -5829,6 +5851,8 @@ export function Chat({ sessionId }: ChatProps) {
         environment,
         sshServer: useChatComposerStore.getState().sshServer,
         sandboxBackend: useChatComposerStore.getState().sandboxBackend,
+        useWorktree,
+        worktreeBranch,
       });
       bumpQueueUi();
       composerRef.current?.setValue("");
@@ -6186,6 +6210,8 @@ export function Chat({ sessionId }: ChatProps) {
           sandboxBackend,
           localVenvType,
           localVenvName,
+          useWorktree,
+          worktreeBranch,
           activeProviderEntryName,
           selectedPluginIds: composerSelectedPluginIds,
           computerUseMode,
@@ -6521,6 +6547,10 @@ export function Chat({ sessionId }: ChatProps) {
             sandboxBackend: useChatComposerStore.getState().sandboxBackend,
             localVenvType: useChatComposerStore.getState().localVenvType,
             localVenvName: useChatComposerStore.getState().localVenvName,
+            useWorktree:
+              useChatComposerStore.getState().useWorktree &&
+              useChatComposerStore.getState().environment === "local",
+            worktreeBranch: useChatComposerStore.getState().worktreeBranch,
             activeProviderEntryName,
             selectedPluginIds: message.composerSelectedPluginIds ?? [],
             computerUseMode,
@@ -7097,6 +7127,10 @@ export function Chat({ sessionId }: ChatProps) {
           sandboxBackend,
           localVenvType: useChatComposerStore.getState().localVenvType,
           localVenvName: useChatComposerStore.getState().localVenvName,
+          useWorktree:
+            useChatComposerStore.getState().useWorktree &&
+            environment === "local",
+          worktreeBranch: useChatComposerStore.getState().worktreeBranch,
           activeProviderEntryName,
           computerUseMode: resumeComputerUseMode,
           browserUseMode: resumeBrowserUseMode,

@@ -13,7 +13,6 @@ import {
   Menu,
   MenuItem,
   Typography,
-  Tooltip,
   alpha,
   useTheme,
 } from "@mui/material";
@@ -144,8 +143,6 @@ export function ProviderSwitcher({
 
   const getProviderDisplay = (provider: ProviderConfigEntry) => {
     return {
-      /** Raw configuration entry name, used for switching and notifications. */
-      configName: provider.name,
       /** Model identifier shown as the primary label. */
       modelName: provider.model,
     };
@@ -154,100 +151,96 @@ export function ProviderSwitcher({
   const switcherWidth = useMemo(() => {
     const longestLabelWidth = providers.reduce(
       (width, provider) => Math.max(width, estimateLabelWidthCh(provider.model)),
-      estimateLabelWidthCh(CUSTOM_MODEL_MENU_LABEL),
+      estimateLabelWidthCh(activeProvider?.model ?? "Select Model"),
     );
-    return `min(calc(${Math.ceil(longestLabelWidth)}ch + 18px), calc(100vw - 32px))`;
-  }, [providers]);
+    const widthCh = Math.max(13, Math.min(Math.ceil(longestLabelWidth), 26));
+    return `clamp(132px, calc(${widthCh}ch + 28px), min(260px, calc(100vw - 32px)))`;
+  }, [activeProvider?.model, providers]);
 
   // If no providers configured, show a simple button to open settings
   if (providers.length === 0) {
     return (
-      <Tooltip title="Configure Model Providers">
-        <Button
-          size="small"
-          variant="outlined"
-          startIcon={<Settings />}
-          onClick={onOpenSettings}
-          sx={[
-            {
-              borderRadius: 2,
-              textTransform: "none",
-              fontSize: "0.75rem",
-            },
-            ...(Array.isArray(triggerSx) ? triggerSx : triggerSx ? [triggerSx] : []),
-          ]}
-        >
-          Setup Models
-        </Button>
-      </Tooltip>
+      <Button
+        size="small"
+        variant="outlined"
+        startIcon={<Settings />}
+        aria-label="Configure Model Providers"
+        onClick={onOpenSettings}
+        sx={[
+          {
+            borderRadius: 2,
+            textTransform: "none",
+            fontSize: "0.75rem",
+          },
+          ...(Array.isArray(triggerSx) ? triggerSx : triggerSx ? [triggerSx] : []),
+        ]}
+      >
+        Setup Models
+      </Button>
     );
   }
 
   const display = activeProvider ? getProviderDisplay(activeProvider) : null;
-  const triggerTooltip = activeProvider
-    ? activeProvider.model
-    : "Click to switch model provider";
 
   return (
     <Box>
-      <Tooltip title={triggerTooltip}>
-        <Button
-          size="small"
-          variant="outlined"
-          onClick={handleClick}
-          sx={[
-            {
-              borderRadius: 2,
-              textTransform: "none",
-              fontSize: "0.75rem",
-              px: 1.5,
-              py: 0.5,
-              borderColor: "divider",
-              bgcolor: "background.paper",
-              "&:hover": {
-                bgcolor: "action.hover",
-              },
+      <Button
+        size="small"
+        variant="outlined"
+        onClick={handleClick}
+        sx={[
+          {
+            borderRadius: 2,
+            textTransform: "none",
+            fontSize: "0.75rem",
+            px: 1.5,
+            py: 0.5,
+            borderColor: "divider",
+            bgcolor: "background.paper",
+            "&:hover": {
+              bgcolor: "action.hover",
             },
-            {
-              width: switcherWidth,
+          },
+          {
+            width: switcherWidth,
+            minWidth: 0,
+            maxWidth: "calc(100vw - 32px)",
+            px: 1,
+            overflow: "hidden",
+          },
+          ...(Array.isArray(triggerSx) ? triggerSx : triggerSx ? [triggerSx] : []),
+        ]}
+      >
+        {display ? (
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
               minWidth: 0,
-              maxWidth: "calc(100vw - 32px)",
-              px: 1,
-            },
-            ...(Array.isArray(triggerSx) ? triggerSx : triggerSx ? [triggerSx] : []),
-          ]}
-        >
-          {display ? (
-            <Box
+              maxWidth: "100%",
+            }}
+          >
+            <Typography
+              variant="caption"
               sx={{
-                display: "flex",
-                alignItems: "center",
+                flex: 1,
                 minWidth: 0,
+                color: "inherit",
+                textAlign: "left",
+                fontWeight: 600,
                 maxWidth: "100%",
+                overflow: "hidden",
+                textOverflow: "clip",
+                whiteSpace: "nowrap",
               }}
             >
-              <Typography
-                variant="caption"
-                sx={{
-                  flex: 1,
-                  minWidth: 0,
-                  color: "inherit",
-                  textAlign: "left",
-                  fontWeight: 600,
-                  maxWidth: "100%",
-                  overflow: "visible",
-                  textOverflow: "clip",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {display.modelName}
-              </Typography>
-            </Box>
-          ) : (
-            "Select Model"
-          )}
-        </Button>
-      </Tooltip>
+              {display.modelName}
+            </Typography>
+          </Box>
+        ) : (
+          "Select Model"
+        )}
+      </Button>
 
       <Menu
         anchorEl={anchorEl}
@@ -326,7 +319,8 @@ export function ProviderSwitcher({
               <Box
                 sx={{
                   display: "flex",
-                  flexDirection: "column",
+                  flexDirection: "row",
+                  alignItems: "center",
                   justifyContent: "center",
                   minWidth: 0,
                   width: "100%",
@@ -341,26 +335,12 @@ export function ProviderSwitcher({
                     lineHeight: 1.25,
                     color: "text.primary",
                     maxWidth: "100%",
-                    overflow: "visible",
+                    overflow: "hidden",
                     textOverflow: "clip",
                     whiteSpace: "nowrap",
                   }}
                 >
                   {display.modelName}
-                </Typography>
-                <Typography
-                  sx={{
-                    width: "100%",
-                    minWidth: 0,
-                    fontSize: "0.6875rem",
-                    lineHeight: 1.2,
-                    color: "text.secondary",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {display.configName}
                 </Typography>
               </Box>
             </MenuItem>
