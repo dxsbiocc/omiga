@@ -31,7 +31,6 @@ import {
   Visibility,
   VisibilityOff,
   OpenInNew,
-  ArrowBack,
   DragIndicator,
   ExpandMore,
   InfoOutlined,
@@ -1144,7 +1143,6 @@ type ProviderEntryOption = {
 
 export function Settings({
   open,
-  onClose,
   initialTab = 0,
   initialExecutionSubTab = 0,
 }: SettingsProps) {
@@ -1913,7 +1911,7 @@ export function Settings({
   return (
     <Box
       role="dialog"
-      aria-labelledby="omiga-settings-title"
+      aria-label="Settings"
       sx={{
         height: "100%",
         minHeight: 0,
@@ -1923,34 +1921,7 @@ export function Settings({
         color: "text.primary",
       }}
     >
-      {/* Top bar — back + title (matches settings hub pattern) */}
-      <Box
-        sx={{
-          flexShrink: 0,
-          display: "flex",
-          alignItems: "center",
-          gap: 1,
-          px: 1.5,
-          py: 1,
-          borderBottom: 1,
-          borderColor: "divider",
-          bgcolor: "background.default",
-        }}
-      >
-        <IconButton
-          size="small"
-          onClick={onClose}
-          aria-label="Close settings"
-          sx={{ color: "text.secondary" }}
-        >
-          <ArrowBack fontSize="small" />
-        </IconButton>
-        <Typography id="omiga-settings-title" variant="h6" fontWeight={600}>
-          Settings
-        </Typography>
-      </Box>
-
-      {/* Sidebar + main — Claude-style two-column settings */}
+      {/* Sidebar + main — Settings returns through the app titlebar back button. */}
       <Box
         sx={{
           flex: 1,

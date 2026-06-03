@@ -268,6 +268,18 @@ export default function App() {
       ? currentSession.name
       : "Omiga";
 
+  const closeSettingsPanel = useCallback(() => {
+    setSettingsOpen(false);
+    setRightPanelMode("default");
+    setSettingsTabIndex(0);
+    setSettingsExecutionSubTab(0);
+  }, [
+    setRightPanelMode,
+    setSettingsExecutionSubTab,
+    setSettingsOpen,
+    setSettingsTabIndex,
+  ]);
+
   const handleTitlebarNewSession = useCallback(async () => {
     try {
       setRightPanelMode("default");
@@ -653,14 +665,20 @@ export default function App() {
 
             <IconButton
               data-testid="titlebar-previous-session"
-              aria-label="上一个会话"
-              title="上一个会话"
+              aria-label={showSettingsPanel ? "返回会话" : "上一个会话"}
+              title={showSettingsPanel ? "返回会话" : "上一个会话"}
               size="small"
-              disabled={!previousSession}
+              disabled={showSettingsPanel ? false : !previousSession}
               disableRipple
               disableTouchRipple
               disableFocusRipple
-              onClick={() => void handleTitlebarSwitchSession(previousSession?.id)}
+              onClick={() => {
+                if (showSettingsPanel) {
+                  closeSettingsPanel();
+                  return;
+                }
+                void handleTitlebarSwitchSession(previousSession?.id);
+              }}
               sx={{
                 width: TITLE_BAR_CONTROL_SIZE,
                 height: TITLE_BAR_CONTROL_SIZE,
@@ -1076,12 +1094,7 @@ export default function App() {
                       open={true}
                       initialTab={settingsTabIndex}
                       initialExecutionSubTab={settingsExecutionSubTab}
-                      onClose={() => {
-                        setSettingsOpen(false);
-                        setRightPanelMode("default");
-                        setSettingsTabIndex(0);
-                        setSettingsExecutionSubTab(0);
-                      }}
+                      onClose={closeSettingsPanel}
                     />
                   </Suspense>
                 </Box>
