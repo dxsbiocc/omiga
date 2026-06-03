@@ -105,6 +105,28 @@ function updatedAtMs(value: string | undefined): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
+function formatSidebarRelativeTime(
+  value: string | undefined,
+  locale: string,
+): string {
+  const ms = updatedAtMs(value);
+  if (!ms) return "";
+  const diffMs = Math.max(0, Date.now() - ms);
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 1) return locale === "zh-CN" ? "刚刚" : "now";
+  if (minutes < 60) return locale === "zh-CN" ? `${minutes} 分` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return locale === "zh-CN" ? `${hours} 小时` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return locale === "zh-CN" ? `${days} 天` : `${days}d`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return locale === "zh-CN" ? `${weeks} 周` : `${weeks}w`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return locale === "zh-CN" ? `${months} 月` : `${months}mo`;
+  const years = Math.floor(days / 365);
+  return locale === "zh-CN" ? `${years} 年` : `${years}y`;
+}
+
 function sessionProjectLabel(session: {
   workingDirectory?: string;
   projectPath?: string;
@@ -237,8 +259,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
+  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
   const [userMenuAnchorEl, setUserMenuAnchorEl] = useState<null | HTMLElement>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isRenaming, setIsRenaming] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [selectError, setSelectError] = useState<string | null>(null);
@@ -353,8 +377,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   };
 
   const handleRenameClick = () => {
-    const session = sessions.find((s) => s.id === selectedSessionId);
+    const targetSessionId = selectedSessionId;
+    const session = sessions.find((s) => s.id === targetSessionId);
     if (session) {
+      setRenameSessionId(session.id);
       setNewName(session.name);
       setRenameDialogOpen(true);
     }
@@ -362,9 +388,24 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   };
 
   const handleRenameConfirm = async () => {
-    if (!selectedSessionId || !newName.trim()) return;
-    await renameSession(selectedSessionId, newName.trim());
+    const targetSessionId = renameSessionId;
+    const trimmed = newName.trim();
+    if (!targetSessionId || !trimmed) return;
+    setIsRenaming(true);
+    try {
+      await renameSession(targetSessionId, trimmed);
+      setRenameDialogOpen(false);
+      setRenameSessionId(null);
+      setNewName("");
+    } finally {
+      setIsRenaming(false);
+    }
+  };
+
+  const handleRenameDialogClose = () => {
+    if (isRenaming) return;
     setRenameDialogOpen(false);
+    setRenameSessionId(null);
     setNewName("");
   };
 
@@ -790,115 +831,174 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const renderSessionRow = (
     { session, isPlaceholder }: SessionSearchRow,
     opts?: { nested?: boolean },
-  ) => (
-    <Box
-      key={session.id}
-      onClick={() => handleSelectSession(session.id)}
-      onMouseEnter={() => handleSessionMouseEnter(session.id)}
-      onMouseLeave={handleSessionMouseLeave}
-      onMouseDown={() => handleSessionMouseDown(session.id)}
-      sx={{
-        px: opts?.nested ? 1.25 : 1.5,
-        py: 0.9,
-        borderRadius: 1.75,
-        cursor: "pointer",
-        position: "relative",
-        overflow: "hidden",
-        minHeight: 38,
-        bgcolor:
-          currentSession?.id === session.id
-            ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.14 : 0.1)
-            : "transparent",
-        border: "1px solid",
-        borderColor:
-          currentSession?.id === session.id
-            ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.25 : 0.18)
-            : "transparent",
-        transition: "background-color 120ms ease, border-color 120ms ease",
-        "&:hover": {
+  ) => {
+    const relativeTime = formatSidebarRelativeTime(session.updatedAt, locale);
+    return (
+      <Box
+        key={session.id}
+        onClick={() => handleSelectSession(session.id)}
+        onMouseEnter={() => handleSessionMouseEnter(session.id)}
+        onMouseLeave={handleSessionMouseLeave}
+        onMouseDown={() => handleSessionMouseDown(session.id)}
+        sx={{
+          px: opts?.nested ? 1.25 : 1.5,
+          py: 0.9,
+          borderRadius: 1.75,
+          cursor: "pointer",
+          position: "relative",
+          overflow: "hidden",
+          minHeight: 38,
           bgcolor:
             currentSession?.id === session.id
-              ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.2 : 0.14)
-              : "action.hover",
-        },
-        "@media (prefers-reduced-motion: no-preference)": {
-          "&:active::after": {
-            content: '""',
-            position: "absolute",
-            inset: 0,
-            borderRadius: "inherit",
-            background: alpha(theme.palette.primary.main, 0.18),
-            "@keyframes omigaBloom": {
-              from: { opacity: 1, transform: "scale(0.6)" },
-              to: { opacity: 0, transform: "scale(1.4)" },
-            },
-            animation: "omigaBloom 320ms cubic-bezier(0.2, 0, 0.6, 1) forwards",
-            pointerEvents: "none",
+              ? alpha(
+                  theme.palette.primary.main,
+                  theme.palette.mode === "dark" ? 0.14 : 0.1,
+                )
+              : "transparent",
+          border: "1px solid",
+          borderColor:
+            currentSession?.id === session.id
+              ? alpha(
+                  theme.palette.primary.main,
+                  theme.palette.mode === "dark" ? 0.25 : 0.18,
+                )
+              : "transparent",
+          transition: "background-color 120ms ease, border-color 120ms ease",
+          "&:hover": {
+            bgcolor:
+              currentSession?.id === session.id
+                ? alpha(
+                    theme.palette.primary.main,
+                    theme.palette.mode === "dark" ? 0.2 : 0.14,
+                  )
+                : "action.hover",
           },
-        },
-      }}
-    >
-      <Stack direction="row" alignItems="center" spacing={0.5}>
-        {isSessionRunning(session.id) && (
-          <Box
-            aria-label="running"
-            sx={{
-              flexShrink: 0,
-              width: 7,
-              height: 7,
-              borderRadius: "50%",
-              bgcolor: "primary.main",
-              boxShadow: (t) =>
-                `0 0 6px 1px ${alpha(t.palette.primary.main, 0.55)}`,
-              "@media (prefers-reduced-motion: no-preference)": {
-                "@keyframes omigaRunPulse": {
-                  "0%, 100%": { opacity: 1, transform: "scale(1)" },
-                  "50%": { opacity: 0.45, transform: "scale(0.65)" },
-                },
-                animation: "omigaRunPulse 1.2s ease-in-out infinite",
+          "&:hover .session-row-time, &:focus-within .session-row-time": {
+            opacity: 0,
+            transform: "translateX(-3px)",
+          },
+          "&:hover .session-row-menu, &:focus-within .session-row-menu": {
+            opacity: 1,
+            pointerEvents: "auto",
+            transform: "translate(0, -50%)",
+          },
+          "@media (prefers-reduced-motion: no-preference)": {
+            "&:active::after": {
+              content: '""',
+              position: "absolute",
+              inset: 0,
+              borderRadius: "inherit",
+              background: alpha(theme.palette.primary.main, 0.18),
+              "@keyframes omigaBloom": {
+                from: { opacity: 1, transform: "scale(0.6)" },
+                to: { opacity: 0, transform: "scale(1.4)" },
               },
-            }}
-          />
-        )}
-        <Typography
-          variant="body2"
-          fontWeight={500}
-          noWrap
-          sx={{
-            flex: 1,
-            minWidth: 0,
-            ...(isPlaceholder
-              ? {
-                  color: "text.secondary",
-                  fontStyle: "italic",
-                  fontWeight: 400,
-                }
-              : { color: "text.primary" }),
-          }}
-        >
-          {isPlaceholder ? UNUSED_SESSION_LABEL : session.name}
-        </Typography>
-        <IconButton
-          size="small"
-          aria-label={t("sessionActions")}
-          onClick={(e) => {
-            e.stopPropagation();
-            handleMenuOpen(e, session.id);
-          }}
-          sx={{
-            p: 0.25,
-            flexShrink: 0,
-            color: "text.secondary",
-            "&:hover": {
-              bgcolor: "action.hover",
+              animation: "omigaBloom 320ms cubic-bezier(0.2, 0, 0.6, 1) forwards",
+              pointerEvents: "none",
             },
-          }}
-        >
-          <MoreVert fontSize="small" />
-        </IconButton>
-      </Stack>
-    </Box>
-  );
+          },
+        }}
+      >
+        <Stack direction="row" alignItems="center" spacing={0.5}>
+          {isSessionRunning(session.id) && (
+            <Box
+              aria-label="running"
+              sx={{
+                flexShrink: 0,
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                bgcolor: "primary.main",
+                boxShadow: (t) =>
+                  `0 0 6px 1px ${alpha(t.palette.primary.main, 0.55)}`,
+                "@media (prefers-reduced-motion: no-preference)": {
+                  "@keyframes omigaRunPulse": {
+                    "0%, 100%": { opacity: 1, transform: "scale(1)" },
+                    "50%": { opacity: 0.45, transform: "scale(0.65)" },
+                  },
+                  animation: "omigaRunPulse 1.2s ease-in-out infinite",
+                },
+              }}
+            />
+          )}
+          <Typography
+            variant="body2"
+            fontWeight={500}
+            noWrap
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              ...(isPlaceholder
+                ? {
+                    color: "text.secondary",
+                    fontStyle: "italic",
+                    fontWeight: 400,
+                  }
+                : { color: "text.primary" }),
+            }}
+          >
+            {isPlaceholder ? UNUSED_SESSION_LABEL : session.name}
+          </Typography>
+          <Box
+            sx={{
+              position: "relative",
+              width: 42,
+              height: 28,
+              flexShrink: 0,
+            }}
+          >
+            <Typography
+              className="session-row-time"
+              variant="body2"
+              noWrap
+              sx={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "flex-end",
+                color: "text.secondary",
+                fontSize: 13,
+                fontWeight: 500,
+                transition: "opacity 120ms ease, transform 120ms ease",
+                userSelect: "none",
+              }}
+            >
+              {relativeTime}
+            </Typography>
+            <IconButton
+              className="session-row-menu"
+              size="small"
+              aria-label={t("sessionActions")}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleMenuOpen(e, session.id);
+              }}
+              sx={{
+                position: "absolute",
+                right: -2,
+                top: "50%",
+                transform: "translate(4px, -50%)",
+                width: 28,
+                height: 28,
+                opacity: 0,
+                pointerEvents: "none",
+                color: "text.secondary",
+                transition:
+                  "opacity 120ms ease, transform 120ms ease, background-color 120ms ease",
+                "&:hover": {
+                  bgcolor: "action.hover",
+                  color: "text.primary",
+                },
+              }}
+            >
+              <MoreVert fontSize="small" />
+            </IconButton>
+          </Box>
+        </Stack>
+      </Box>
+    );
+  };
 
   // Only block the whole panel on the initial list fetch — not when switching sessions
   if (isLoading && sessions.length === 0) {
@@ -1550,64 +1650,129 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         onClose={handleMenuClose}
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
+        MenuListProps={{ sx: { py: 0.5 } }}
         PaperProps={{
-          sx: { minWidth: 140 },
+          sx: {
+            width: 228,
+            borderRadius: 2.5,
+            border: "1px solid",
+            borderColor: alpha(theme.palette.divider, 0.8),
+            bgcolor: alpha(theme.palette.background.paper, theme.palette.mode === "dark" ? 0.96 : 0.98),
+            backgroundImage: "none",
+            boxShadow:
+              theme.palette.mode === "dark"
+                ? "0 18px 48px rgba(0,0,0,0.55)"
+                : "0 18px 48px rgba(15,23,42,0.18)",
+          },
         }}
       >
-        <MenuItem onClick={handleRenameClick}>
-          <Edit fontSize="small" sx={{ mr: 1 }} />
-          {t("rename")}
-        </MenuItem>
-        <MenuItem onClick={() => void handleExportMarkdown()}>
-          <FileDownloadOutlined fontSize="small" sx={{ mr: 1 }} />
-          {t("exportMarkdown")}
+        <MenuItem
+          aria-label={t("rename")}
+          onClick={handleRenameClick}
+          disabled={isRenaming}
+          sx={{
+            minHeight: 42,
+            mx: 0.75,
+            my: 0.125,
+            px: 1.25,
+            borderRadius: 1.5,
+            "& .MuiListItemIcon-root": { minWidth: 34, color: "text.secondary" },
+            "& .MuiListItemText-primary": { fontSize: 14, fontWeight: 650 },
+          }}
+        >
+          <ListItemIcon>
+            <Edit fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>{t("rename")}</ListItemText>
         </MenuItem>
         <MenuItem
+          aria-label={t("exportMarkdown")}
+          onClick={() => void handleExportMarkdown()}
+          sx={{
+            minHeight: 42,
+            mx: 0.75,
+            my: 0.125,
+            px: 1.25,
+            borderRadius: 1.5,
+            "& .MuiListItemIcon-root": { minWidth: 34, color: "text.secondary" },
+            "& .MuiListItemText-primary": { fontSize: 14, fontWeight: 650 },
+          }}
+        >
+          <ListItemIcon>
+            <FileDownloadOutlined fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>{t("exportMarkdown")}</ListItemText>
+        </MenuItem>
+        <Divider sx={{ my: 0.5 }} />
+        <MenuItem
+          aria-label={t("delete")}
           onClick={handleDelete}
           disabled={isDeleting}
-          sx={{ color: "error.main" }}
+          sx={{
+            minHeight: 42,
+            mx: 0.75,
+            my: 0.125,
+            px: 1.25,
+            borderRadius: 1.5,
+            color: "error.main",
+            "& .MuiListItemIcon-root": { minWidth: 34, color: "error.main" },
+            "& .MuiListItemText-primary": { fontSize: 14, fontWeight: 700 },
+          }}
         >
-          <Delete fontSize="small" sx={{ mr: 1 }} />
-          {isDeleting ? t("deleting") : t("delete")}
+          <ListItemIcon>
+            <Delete fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>{isDeleting ? t("deleting") : t("delete")}</ListItemText>
         </MenuItem>
       </Menu>
 
       {/* Rename Dialog */}
       <Dialog
         open={renameDialogOpen}
-        onClose={() => setRenameDialogOpen(false)}
+        onClose={handleRenameDialogClose}
         maxWidth="xs"
         fullWidth
-        PaperProps={{ sx: { borderRadius: 3 } }}
+        PaperProps={{
+          sx: {
+            borderRadius: 4,
+            backgroundImage: "none",
+            boxShadow:
+              theme.palette.mode === "dark"
+                ? "0 24px 80px rgba(0,0,0,0.64)"
+                : "0 24px 80px rgba(15,23,42,0.26)",
+          },
+        }}
       >
-        <DialogTitle>{t("renameSession")}</DialogTitle>
-        <DialogContent>
+        <DialogTitle sx={{ pb: 1, fontWeight: 750 }}>{t("renameSession")}</DialogTitle>
+        <DialogContent sx={{ pt: 1 }}>
           <TextField
             autoFocus
             fullWidth
+            disabled={isRenaming}
             label={t("sessionName")}
             value={newName}
+            onFocus={(e) => e.currentTarget.select()}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => {
               const ne = e.nativeEvent;
               if (ne.isComposing || ne.keyCode === 229) return;
               if (e.key === "Enter" && newName.trim()) {
-                handleRenameConfirm();
+                void handleRenameConfirm();
               }
             }}
             sx={{ mt: 1 }}
           />
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setRenameDialogOpen(false)}>
+        <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
+          <Button onClick={handleRenameDialogClose} disabled={isRenaming}>
             {t("cancel")}
           </Button>
           <Button
-            onClick={handleRenameConfirm}
+            onClick={() => void handleRenameConfirm()}
             variant="contained"
-            disabled={!newName.trim()}
+            disabled={isRenaming || !newName.trim()}
           >
-            {t("rename")}
+            {isRenaming ? `${t("rename")}…` : t("rename")}
           </Button>
         </DialogActions>
       </Dialog>
