@@ -1,12 +1,15 @@
-import { lazy, Suspense, useEffect, useRef, useCallback, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useCallback,
+} from "react";
+import { Icon } from "@iconify/react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Box,
   IconButton,
-  ListItemIcon,
-  ListItemText,
-  Menu,
-  MenuItem,
   Paper,
   Stack,
   Typography,
@@ -15,12 +18,7 @@ import {
 import {
   ArrowBackRounded,
   ArrowForwardRounded,
-  CheckRounded,
-  EditNoteRounded,
-  KeyboardArrowDownRounded,
-  MenuRounded,
   TerminalRounded,
-  ViewSidebarOutlined,
 } from "@mui/icons-material";
 import { Layout } from "./components/Layout";
 import { Chat } from "./components/Chat";
@@ -80,7 +78,7 @@ function clamp(n: number, min: number, max: number): number {
 
 const APP_TITLE_BAR_HEIGHT = 50;
 const TITLE_BAR_LEFT_PANEL_TOGGLE_LEFT = 80;
-const TITLE_BAR_RIGHT_PANEL_TOGGLE_RIGHT = 28;
+const TITLE_BAR_RIGHT_ACTIONS_RIGHT = 28;
 const TITLE_BAR_CONTROL_SIZE = 32;
 const TITLE_BAR_CONTROL_CENTER_Y = 25;
 const TITLE_BAR_TITLE_GAP = 16;
@@ -153,9 +151,6 @@ export default function App() {
   const setCodeHeight = useUiStore((s) => s.setCodeHeight);
   const setTasksHeight = useUiStore((s) => s.setTasksHeight);
   const ensureCodePanelMin = useUiStore((s) => s.ensureCodePanelMin);
-  const [rightMenuAnchor, setRightMenuAnchor] = useState<HTMLElement | null>(
-    null,
-  );
 
   const leftRef = useRef<HTMLDivElement>(null);
   const centerRef = useRef<HTMLDivElement>(null);
@@ -272,11 +267,6 @@ export default function App() {
     currentSession && !isPlaceholderSessionTitle(currentSession.name)
       ? currentSession.name
       : "Omiga";
-  const rightMenuOpen = Boolean(rightMenuAnchor);
-
-  const closeRightMenu = useCallback(() => {
-    setRightMenuAnchor(null);
-  }, []);
 
   const handleTitlebarNewSession = useCallback(async () => {
     try {
@@ -654,7 +644,11 @@ export default function App() {
                 },
               }}
             >
-              <MenuRounded fontSize="small" />
+              <Icon
+                icon="system-uicons:window-collapse-left"
+                width={23}
+                height={23}
+              />
             </IconButton>
 
             <IconButton
@@ -740,7 +734,7 @@ export default function App() {
                 },
               }}
             >
-              <EditNoteRounded fontSize="small" />
+              <Icon icon="codicon:new-session" width={20} height={20} />
             </IconButton>
           </Stack>
 
@@ -779,111 +773,77 @@ export default function App() {
             </Box>
           </Stack>
 
-          <IconButton
-            data-testid="right-sidebar-toggle"
-            aria-label="打开右侧选项"
-            title="打开右侧选项"
-            aria-haspopup="menu"
-            aria-expanded={rightMenuOpen ? "true" : undefined}
-            size="small"
-            disableRipple
-            disableTouchRipple
-            disableFocusRipple
-            onClick={(event) => setRightMenuAnchor(event.currentTarget)}
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={0.5}
             sx={{
               position: "absolute",
-              right: TITLE_BAR_RIGHT_PANEL_TOGGLE_RIGHT,
+              right: TITLE_BAR_RIGHT_ACTIONS_RIGHT,
               top: TITLE_BAR_CONTROL_CENTER_Y,
               transform: "translateY(-50%)",
               zIndex: 1,
-              width: 58,
-              height: 34,
-              px: 0.75,
-              gap: 0.1,
-              borderRadius: 2.25,
-              color: rightPanelCollapsed ? "text.secondary" : "text.primary",
-              bgcolor: (theme) => alpha(theme.palette.text.primary, 0.07),
-              border: (theme) =>
-                `1px solid ${alpha(theme.palette.text.primary, 0.05)}`,
-              boxShadow: (theme) =>
-                `0 1px 0 ${alpha(theme.palette.common.white, 0.55)} inset`,
-              touchAction: "manipulation",
-              transition:
-                "background-color 80ms ease, border-color 80ms ease, color 80ms ease",
-              "&:hover": {
-                color: "text.primary",
-                bgcolor: (theme) => alpha(theme.palette.text.primary, 0.1),
-                borderColor: (theme) => alpha(theme.palette.text.primary, 0.08),
-              },
-              "& svg": {
-                pointerEvents: "none",
-              },
             }}
           >
-            <ViewSidebarOutlined sx={{ fontSize: 21, transform: "scaleX(-1)" }} />
-            <KeyboardArrowDownRounded sx={{ ml: -0.35, fontSize: 17 }} />
-          </IconButton>
-          <Menu
-            anchorEl={rightMenuAnchor}
-            open={rightMenuOpen}
-            onClose={closeRightMenu}
-            anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
-            transformOrigin={{ vertical: "top", horizontal: "right" }}
-            PaperProps={{
-              sx: {
-                mt: 0.8,
-                minWidth: 220,
-                borderRadius: 2.5,
-                border: (theme) =>
-                  `1px solid ${alpha(theme.palette.text.primary, 0.08)}`,
-                boxShadow: (theme) =>
-                  `0 18px 45px ${alpha(theme.palette.common.black, 0.16)}`,
-                overflow: "hidden",
-              },
-            }}
-            MenuListProps={{
-              dense: false,
-              "aria-label": "右侧区域选项",
-              sx: { py: 0.75 },
-            }}
-          >
-            <MenuItem
-              onClick={() => {
-                setRightPanelCollapsed(!rightPanelCollapsed);
-                closeRightMenu();
+            <IconButton
+              data-testid="terminal-panel-toggle"
+              aria-label={terminalPanelOpen ? "收起终端" : "拉起终端"}
+              aria-pressed={terminalPanelOpen}
+              title={terminalPanelOpen ? "收起终端" : "拉起终端"}
+              size="small"
+              disableRipple
+              disableTouchRipple
+              disableFocusRipple
+              onClick={() => setTerminalPanelOpen(!terminalPanelOpen)}
+              sx={{
+                width: TITLE_BAR_CONTROL_SIZE,
+                height: TITLE_BAR_CONTROL_SIZE,
+                borderRadius: 1.5,
+                color: terminalPanelOpen ? "text.primary" : "text.secondary",
+                bgcolor: terminalPanelOpen
+                  ? (theme) => alpha(theme.palette.text.primary, 0.08)
+                  : "transparent",
+                touchAction: "manipulation",
+                transition: "background-color 80ms ease, color 80ms ease",
+                "&:hover": {
+                  color: "text.primary",
+                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                },
               }}
-              sx={{ gap: 1, minHeight: 42 }}
             >
-              <ListItemIcon sx={{ minWidth: 30 }}>
-                <ViewSidebarOutlined
-                  sx={{ fontSize: 21, transform: "scaleX(-1)" }}
-                />
-              </ListItemIcon>
-              <ListItemText
-                primary={rightPanelCollapsed ? "显示右侧边栏" : "隐藏右侧边栏"}
-                primaryTypographyProps={{ fontWeight: 600 }}
-              />
-              {!rightPanelCollapsed && <CheckRounded sx={{ fontSize: 18 }} />}
-            </MenuItem>
-            <MenuItem
-              onClick={() => {
-                setTerminalPanelOpen(!terminalPanelOpen);
-                closeRightMenu();
+              <TerminalRounded sx={{ fontSize: 21 }} />
+            </IconButton>
+            <IconButton
+              data-testid="right-sidebar-toggle"
+              aria-label={rightPanelCollapsed ? "展开右侧边栏" : "关闭右侧边栏"}
+              aria-pressed={!rightPanelCollapsed}
+              title={rightPanelCollapsed ? "展开右侧边栏" : "关闭右侧边栏"}
+              size="small"
+              disableRipple
+              disableTouchRipple
+              disableFocusRipple
+              onClick={() => setRightPanelCollapsed(!rightPanelCollapsed)}
+              sx={{
+                width: TITLE_BAR_CONTROL_SIZE,
+                height: TITLE_BAR_CONTROL_SIZE,
+                borderRadius: 1.5,
+                color: rightPanelCollapsed ? "text.secondary" : "text.primary",
+                bgcolor: "transparent",
+                touchAction: "manipulation",
+                transition: "background-color 80ms ease, color 80ms ease",
+                "&:hover": {
+                  color: "text.primary",
+                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                },
               }}
-              sx={{ gap: 1, minHeight: 42 }}
             >
-              <ListItemIcon sx={{ minWidth: 30 }}>
-                <TerminalRounded sx={{ fontSize: 21 }} />
-              </ListItemIcon>
-              <ListItemText
-                primary={terminalPanelOpen ? "隐藏终端" : "显示终端"}
-                secondary="显示在输入框下方"
-                primaryTypographyProps={{ fontWeight: 600 }}
-                secondaryTypographyProps={{ fontSize: 12 }}
+              <Icon
+                icon="system-uicons:window-collapse-right"
+                width={23}
+                height={23}
               />
-              {terminalPanelOpen && <CheckRounded sx={{ fontSize: 18 }} />}
-            </MenuItem>
-          </Menu>
+            </IconButton>
+          </Stack>
         </Box>
         <Stack
           direction="row"
@@ -938,52 +898,26 @@ export default function App() {
             </>
           )}
 
-          {showSettingsPanel ? (
-            /* Settings takes the whole workspace; session/sidebar chrome is hidden. */
-            <Paper
-              component="section"
-              elevation={0}
-              square
+          <Box
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              minHeight: 0,
+              display: "flex",
+              position: "relative",
+              overflow: "hidden",
+            }}
+          >
+            <Box
+              aria-hidden={showSettingsPanel}
               sx={{
                 flex: 1,
                 minWidth: 0,
                 minHeight: 0,
-                display: "flex",
-                flexDirection: "column",
-                overflow: "hidden",
-                borderRadius: 0,
-                borderLeft: 1,
-                borderColor: "divider",
-                bgcolor: "background.paper",
+                display: showSettingsPanel ? "none" : "flex",
               }}
             >
-              <Box
-                sx={{
-                  flex: 1,
-                  minHeight: 0,
-                  display: "flex",
-                  flexDirection: "column",
-                  overflow: "hidden",
-                }}
-              >
-                <Suspense fallback={<PanelLoadingFallback label="正在加载设置…" />}>
-                  <Settings
-                    open={true}
-                    initialTab={settingsTabIndex}
-                    initialExecutionSubTab={settingsExecutionSubTab}
-                    onClose={() => {
-                      setSettingsOpen(false);
-                      setRightPanelMode("default");
-                      setSettingsTabIndex(0);
-                      setSettingsExecutionSubTab(0);
-                    }}
-                  />
-                </Suspense>
-              </Box>
-            </Paper>
-          ) : (
-            <>
-              {/* Center: code + chat */}
+              {/* Center: code + chat. Kept mounted under Settings so active streams are not cancelled. */}
               <Paper
                 ref={centerRef}
                 component="section"
@@ -1014,7 +948,9 @@ export default function App() {
                         overflow: "hidden",
                       }}
                     >
-                      <Suspense fallback={<PanelLoadingFallback label="正在加载编辑器…" />}>
+                      <Suspense
+                        fallback={<PanelLoadingFallback label="正在加载编辑器…" />}
+                      >
                         <CodeWorkspace />
                       </Suspense>
                     </Box>
@@ -1072,39 +1008,86 @@ export default function App() {
                   position: "relative",
                 }}
               >
-                  <Box
-                    ref={tasksPanelRef}
-                    sx={{
-                      height: tasksH,
-                      minHeight: LAYOUT_PANEL_MIN,
-                      flexShrink: 0,
-                      overflow: "auto",
-                      display: "flex",
-                      flexDirection: "column",
-                    }}
-                  >
-                    <TaskStatus />
-                  </Box>
+                <Box
+                  ref={tasksPanelRef}
+                  sx={{
+                    height: tasksH,
+                    minHeight: LAYOUT_PANEL_MIN,
+                    flexShrink: 0,
+                    overflow: "auto",
+                    display: "flex",
+                    flexDirection: "column",
+                  }}
+                >
+                  <TaskStatus />
+                </Box>
 
-                  <ResizeHandle
-                    direction="vertical"
-                    onResize={previewTasksResize}
-                    onResizeEnd={commitTasksResize}
-                  />
+                <ResizeHandle
+                  direction="vertical"
+                  onResize={previewTasksResize}
+                  onResizeEnd={commitTasksResize}
+                />
 
-                  <Box
-                    sx={{
-                      flex: 1,
-                      minHeight: 0,
-                      display: "flex",
-                      flexDirection: "column",
-                    }}
-                  >
-                    <FileTree />
-                  </Box>
+                <Box
+                  sx={{
+                    flex: 1,
+                    minHeight: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                  }}
+                >
+                  <FileTree />
+                </Box>
               </Paper>
-            </>
-          )}
+            </Box>
+
+            {showSettingsPanel && (
+              /* Settings takes the whole workspace while Chat remains mounted in the hidden layer. */
+              <Paper
+                component="section"
+                elevation={0}
+                square
+                sx={{
+                  position: "absolute",
+                  inset: 0,
+                  zIndex: 2,
+                  display: "flex",
+                  flexDirection: "column",
+                  overflow: "hidden",
+                  borderRadius: 0,
+                  borderLeft: 1,
+                  borderColor: "divider",
+                  bgcolor: "background.paper",
+                }}
+              >
+                <Box
+                  sx={{
+                    flex: 1,
+                    minHeight: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                    overflow: "hidden",
+                  }}
+                >
+                  <Suspense
+                    fallback={<PanelLoadingFallback label="正在加载设置…" />}
+                  >
+                    <Settings
+                      open={true}
+                      initialTab={settingsTabIndex}
+                      initialExecutionSubTab={settingsExecutionSubTab}
+                      onClose={() => {
+                        setSettingsOpen(false);
+                        setRightPanelMode("default");
+                        setSettingsTabIndex(0);
+                        setSettingsExecutionSubTab(0);
+                      }}
+                    />
+                  </Suspense>
+                </Box>
+              </Paper>
+            )}
+          </Box>
         </Stack>
       </Layout>
       <GlobalAsyncTasksDrawer />

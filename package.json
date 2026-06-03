@@ -25,6 +25,7 @@
     "@dagrejs/dagre": "^3.0.0",
     "@emotion/react": "^11.11.4",
     "@emotion/styled": "^11.11.5",
+    "@iconify/react": "^6.0.2",
     "@monaco-editor/react": "^4.7.0",
     "@mui/icons-material": "^5.15.20",
     "@mui/lab": "^5.0.0-alpha.170",

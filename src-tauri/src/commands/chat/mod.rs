@@ -34,7 +34,7 @@ use crate::domain::tools::{
     normalize_legacy_retrieval_tool_name, sort_tool_schemas_for_model, ToolContext, ToolSchema,
 };
 use crate::errors::{ChatError, OmigaError};
-use crate::infrastructure::streaming::StreamOutputItem;
+use crate::infrastructure::streaming::{FollowUpSuggestion, StreamOutputItem};
 use crate::llm::{
     create_client, load_config_from_env, LlmClient, LlmConfig, LlmContent, LlmMessage, LlmRole,
 };
@@ -86,6 +86,37 @@ const MAX_SUBAGENT_TOOL_ROUNDS: usize = 50;
 
 /// Max `execute_tool_calls` depth for nested `Agent` (main session = 0). TS allows deep nesting when `USER_TYPE=ant`.
 const MAX_SUBAGENT_EXECUTE_DEPTH: u8 = 8;
+
+fn tool_round_limit_message(max_rounds: usize) -> String {
+    format!(
+        "\n\n### 已达到工具调用上限（{max_rounds} 轮）\n\n\
+这不是用户取消，也不是会话崩溃；系统已主动停止继续调用工具，避免在同一类错误里无限循环。\n\n\
+**当前状态**\n\
+- 上方工具记录已经保留，可以继续作为上下文使用。\n\
+- 本轮没有稳定收敛，通常需要先缩小问题、改用更简单的单步命令，或由用户确认关键约束。\n\n\
+**建议下一步**\n\
+1. 先让我整理：已完成内容、失败点、可疑根因和下一步方案。\n\
+2. 如果继续执行，请让我按“小步验证 → 再写入”的方式继续，避免重复同一失败路径。\n\
+3. 如果你已经知道正确约束，可以直接补充约束后让我继续。\n"
+    )
+}
+
+fn tool_round_limit_follow_ups() -> Vec<FollowUpSuggestion> {
+    vec![
+        FollowUpSuggestion {
+            label: "先总结问题".to_string(),
+            prompt: "先不要继续调用工具。请基于上方记录，总结：已完成内容、失败点、根因假设、还缺哪些信息，以及建议我下一步怎么做。".to_string(),
+        },
+        FollowUpSuggestion {
+            label: "小步继续".to_string(),
+            prompt: "继续执行，但请先给出一个最小可验证步骤；每次只运行一个简单命令，成功后再进入下一步，避免重复刚才失败的工具调用方式。".to_string(),
+        },
+        FollowUpSuggestion {
+            label: "让我补充约束".to_string(),
+            prompt: "请列出你继续前必须由我确认的 3 个以内关键问题，不要继续自动调用工具。".to_string(),
+        },
+    ]
+}
 
 /// LLM + stream state needed for the `Agent` tool to run an isolated sub-session (same API key as main chat).
 #[derive(Clone)]
@@ -887,6 +918,7 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
         client,
         final_reply: &final_response,
         skip_summary: preflight_skip_turn_summary,
+        skip_follow_up: false,
         user_request: user_message,
         suggestions_reply: &final_response,
         repo: repo.clone(),
@@ -4148,6 +4180,7 @@ pub async fn send_message(
                 client: client.as_ref(),
                 final_reply: &final_reply_for_follow_up,
                 skip_summary: preflight_skip_turn_summary,
+                skip_follow_up: false,
                 user_request: &request_text_for_constraints,
                 suggestions_reply: &final_reply_for_follow_up,
                 repo: repo_clone.clone(),
@@ -4380,6 +4413,7 @@ pub async fn send_message(
                         client: client.as_ref(),
                         final_reply: &stop_text,
                         skip_summary: preflight_skip_turn_summary,
+                        skip_follow_up: false,
                         user_request: &request_text_for_constraints,
                         suggestions_reply: &stop_text,
                         repo: repo_clone.clone(),
@@ -5055,6 +5089,7 @@ pub async fn send_message(
                     client: client.as_ref(),
                     final_reply: &final_reply_for_follow_up,
                     skip_summary: preflight_skip_turn_summary,
+                    skip_follow_up: false,
                     user_request: &request_text_for_constraints,
                     suggestions_reply: &final_reply_for_follow_up,
                     repo: repo_clone.clone(),
@@ -5105,12 +5140,14 @@ pub async fn send_message(
         )
         .await;
 
+        let stop_text = tool_round_limit_message(MAX_TOOL_ROUNDS);
         let _ = app_clone.emit(
             &format!("chat-stream-{}", message_id_clone),
-            &StreamOutputItem::Text(format!(
-                "\n\n[Stopped: exceeded {} tool rounds]\n",
-                MAX_TOOL_ROUNDS
-            )),
+            &StreamOutputItem::Text(stop_text.clone()),
+        );
+        let _ = app_clone.emit(
+            &format!("chat-stream-{}", message_id_clone),
+            &StreamOutputItem::FollowUpSuggestions(tool_round_limit_follow_ups()),
         );
         {
             let repo = &*repo_clone;
@@ -5127,6 +5164,7 @@ pub async fn send_message(
             &llm_config_for_spawn.provider.to_string(),
         )
         .await;
+        let final_reply_with_stop = final_reply_for_follow_up.clone() + &stop_text;
         spawn_memory_sync(MemorySyncRequest {
             app: &app_clone,
             sessions: &sessions_clone,
@@ -5134,7 +5172,7 @@ pub async fn send_message(
             session_id: &session_id_clone,
             client: client.as_ref(),
             user_message: &request_text_for_constraints,
-            assistant_reply: &final_reply_for_follow_up,
+            assistant_reply: &final_reply_with_stop,
             allow_long_term_promotion: true,
         });
         emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
@@ -5143,10 +5181,11 @@ pub async fn send_message(
             stream_message_id: &message_id_clone,
             assistant_message_id: &last_assistant_id,
             client: client.as_ref(),
-            final_reply: &final_reply_for_follow_up,
+            final_reply: &final_reply_with_stop,
             skip_summary: preflight_skip_turn_summary,
+            skip_follow_up: true,
             user_request: &request_text_for_constraints,
-            suggestions_reply: &final_reply_for_follow_up,
+            suggestions_reply: &stop_text,
             repo: repo_clone.clone(),
         })
         .await;

@@ -646,6 +646,7 @@ pub(super) struct PostTurnCompletionRequest<'a> {
     pub client: &'a dyn LlmClient,
     pub final_reply: &'a str,
     pub skip_summary: bool,
+    pub skip_follow_up: bool,
     pub user_request: &'a str,
     pub suggestions_reply: &'a str,
     pub repo: Arc<crate::domain::persistence::SessionRepository>,
@@ -667,6 +668,7 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
         .await
         .unwrap_or((true, true));
     let (summary_enabled, follow_enabled) = flags;
+    let follow_enabled = follow_enabled && !request.skip_follow_up;
 
     // ── Emit Complete immediately — UI input is unlocked right here ───────────
     let _ = request.app.emit(
