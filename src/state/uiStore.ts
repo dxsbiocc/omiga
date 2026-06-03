@@ -22,6 +22,9 @@ export interface UiState {
   setSettingsExecutionSubTab: (index: number) => void;
   settingsOpen: boolean;
   rightPanelMode: "default" | "settings";
+  leftPanelCollapsed: boolean;
+  rightPanelCollapsed: boolean;
+  terminalPanelOpen: boolean;
   onboardingCompleted: boolean;
   setOnboardingCompleted: (completed: boolean) => void;
   leftPanelWidth: number;
@@ -30,6 +33,12 @@ export interface UiState {
   tasksPanelHeight: number;
   setSettingsOpen: (open: boolean) => void;
   setRightPanelMode: (mode: "default" | "settings") => void;
+  setLeftPanelCollapsed: (collapsed: boolean) => void;
+  toggleLeftPanelCollapsed: () => void;
+  setRightPanelCollapsed: (collapsed: boolean) => void;
+  toggleRightPanelCollapsed: () => void;
+  setTerminalPanelOpen: (open: boolean) => void;
+  toggleTerminalPanelOpen: () => void;
   setLeftWidth: (w: number) => void;
   setRightWidth: (w: number) => void;
   setCodeHeight: (h: number) => void;
@@ -56,6 +65,9 @@ export const useUiStore = create<UiState>()(
 
       settingsOpen: false,
       rightPanelMode: "default",
+      leftPanelCollapsed: false,
+      rightPanelCollapsed: false,
+      terminalPanelOpen: false,
       onboardingCompleted: false,
       setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
       leftPanelWidth: 260,
@@ -66,6 +78,15 @@ export const useUiStore = create<UiState>()(
       setSettingsOpen: (open) => set({ settingsOpen: open }),
 
       setRightPanelMode: (mode) => set({ rightPanelMode: mode }),
+      setLeftPanelCollapsed: (collapsed) => set({ leftPanelCollapsed: collapsed }),
+      toggleLeftPanelCollapsed: () =>
+        set((s) => ({ leftPanelCollapsed: !s.leftPanelCollapsed })),
+      setRightPanelCollapsed: (collapsed) => set({ rightPanelCollapsed: collapsed }),
+      toggleRightPanelCollapsed: () =>
+        set((s) => ({ rightPanelCollapsed: !s.rightPanelCollapsed })),
+      setTerminalPanelOpen: (open) => set({ terminalPanelOpen: open }),
+      toggleTerminalPanelOpen: () =>
+        set((s) => ({ terminalPanelOpen: !s.terminalPanelOpen })),
 
       setLeftWidth: (w) =>
         set({ leftPanelWidth: clamp(w, LAYOUT_LEFT_MIN, LAYOUT_LEFT_MAX) }),
@@ -135,7 +156,10 @@ export const useUiStore = create<UiState>()(
       storage: createJSONStorage(() => safeLocalStorage),
       partialize: (s) => ({
         leftPanelWidth: s.leftPanelWidth,
+        leftPanelCollapsed: s.leftPanelCollapsed,
         rightPanelWidth: s.rightPanelWidth,
+        rightPanelCollapsed: s.rightPanelCollapsed,
+        terminalPanelOpen: s.terminalPanelOpen,
         codePanelHeight: s.codePanelHeight,
         tasksPanelHeight: s.tasksPanelHeight,
         onboardingCompleted: s.onboardingCompleted,

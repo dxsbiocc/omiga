@@ -6,7 +6,11 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
-import { useChatComposerStore } from "./chatComposerStore";
+import {
+  executionWorkspaceScopeKey,
+  shouldResetWorkspaceForExecutionScopeChange,
+  useChatComposerStore,
+} from "./chatComposerStore";
 
 describe("chatComposerStore browserUseMode", () => {
   beforeEach(() => {
@@ -50,5 +54,48 @@ describe("chatComposerStore browserUseMode", () => {
     });
 
     expect(useChatComposerStore.getState().browserUseMode).toBe("off");
+  });
+});
+
+describe("chatComposerStore execution workspace scopes", () => {
+  it("keeps local virtual environment changes in the same workspace scope", () => {
+    const localScope = executionWorkspaceScopeKey("local", null, "docker");
+
+    expect(
+      shouldResetWorkspaceForExecutionScopeChange(localScope, localScope),
+    ).toBe(false);
+  });
+
+  it("resets workspace when switching between local and SSH scopes", () => {
+    const localScope = executionWorkspaceScopeKey("local", null, "docker");
+    const sshScope = executionWorkspaceScopeKey("ssh", "lab-a", "docker");
+
+    expect(
+      shouldResetWorkspaceForExecutionScopeChange(localScope, sshScope),
+    ).toBe(true);
+    expect(
+      shouldResetWorkspaceForExecutionScopeChange(sshScope, localScope),
+    ).toBe(true);
+  });
+
+  it("resets workspace when changing SSH server or container backend", () => {
+    expect(
+      shouldResetWorkspaceForExecutionScopeChange(
+        executionWorkspaceScopeKey("ssh", "lab-a", "docker"),
+        executionWorkspaceScopeKey("ssh", "lab-a", "docker"),
+      ),
+    ).toBe(false);
+    expect(
+      shouldResetWorkspaceForExecutionScopeChange(
+        executionWorkspaceScopeKey("ssh", "lab-a", "docker"),
+        executionWorkspaceScopeKey("ssh", "lab-b", "docker"),
+      ),
+    ).toBe(true);
+    expect(
+      shouldResetWorkspaceForExecutionScopeChange(
+        executionWorkspaceScopeKey("sandbox", null, "docker"),
+        executionWorkspaceScopeKey("sandbox", null, "singularity"),
+      ),
+    ).toBe(true);
   });
 });

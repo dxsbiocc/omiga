@@ -12,6 +12,15 @@ vi.mock("@tauri-apps/api/window", () => ({
 
 import { useSessionStore } from "./sessionStore";
 
+const baseSession = {
+  id: "session-1",
+  name: "Session 1",
+  projectPath: "/workspace/one",
+  workingDirectory: "/workspace/one",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+};
+
 describe("sessionStore sendMessage browserUseMode payload", () => {
   beforeEach(() => {
     invokeMock.mockReset();
@@ -39,5 +48,56 @@ describe("sessionStore sendMessage browserUseMode payload", () => {
         computerUseMode: "off",
       }),
     });
+  });
+});
+
+describe("sessionStore workspace reset", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+    useSessionStore.setState({
+      sessions: [baseSession],
+      currentSession: baseSession,
+      pendingProjectPathSessions: new Set(),
+    });
+  });
+
+  it("marks the session as needing workspace selection when project path is reset", async () => {
+    await useSessionStore
+      .getState()
+      .updateSessionProjectPath("session-1", ".");
+
+    expect(invokeMock).toHaveBeenCalledWith("update_session_project_path", {
+      sessionId: "session-1",
+      projectPath: ".",
+    });
+    expect(useSessionStore.getState().currentSession?.projectPath).toBe(".");
+    expect(useSessionStore.getState().currentSession?.workingDirectory).toBe(
+      ".",
+    );
+    expect(
+      useSessionStore
+        .getState()
+        .pendingProjectPathSessions.has("session-1"),
+    ).toBe(true);
+  });
+
+  it("clears the pending workspace flag when a real project path is selected", async () => {
+    useSessionStore.setState({
+      pendingProjectPathSessions: new Set(["session-1"]),
+    });
+
+    await useSessionStore
+      .getState()
+      .updateSessionProjectPath("session-1", "/workspace/two");
+
+    expect(
+      useSessionStore
+        .getState()
+        .pendingProjectPathSessions.has("session-1"),
+    ).toBe(false);
+    expect(useSessionStore.getState().currentSession?.projectPath).toBe(
+      "/workspace/two",
+    );
   });
 });

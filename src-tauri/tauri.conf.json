@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "Omiga",
-        "width": 1400,
-        "height": 900,
+        "width": 1300,
+        "height": 850,
         "minWidth": 800,
         "minHeight": 600,
         "center": true,
@@ -22,6 +22,12 @@
         "fullscreen": false,
         "visible": true,
         "decorations": true,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 27
+        },
+        "hiddenTitle": true,
         "transparent": false,
         "maximized": false
       }

@@ -19,6 +19,27 @@ export type LocalVenvType = "none" | "conda" | "venv" | "pyenv";
 /** 执行环境类型 */
 export type ExecutionEnvironment = "local" | "ssh" | "sandbox";
 
+export function executionWorkspaceScopeKey(
+  environment: ExecutionEnvironment,
+  sshServer: string | null,
+  sandboxBackend: SandboxBackend,
+): string {
+  if (environment === "ssh") {
+    return `ssh:${(sshServer ?? "").trim()}`;
+  }
+  if (environment === "sandbox") {
+    return `sandbox:${sandboxBackend}`;
+  }
+  return "local";
+}
+
+export function shouldResetWorkspaceForExecutionScopeChange(
+  previousScopeKey: string,
+  nextScopeKey: string,
+): boolean {
+  return previousScopeKey !== nextScopeKey;
+}
+
 export interface SessionConfigResponse {
   active_provider_entry_name: string | null;
   permission_mode: string;

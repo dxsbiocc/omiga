@@ -1,8 +1,30 @@
-import { lazy, Suspense, useEffect, useRef, useCallback } from "react";
+import { lazy, Suspense, useEffect, useRef, useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Box, Paper, Stack, useTheme, alpha } from "@mui/material";
+import {
+  Box,
+  IconButton,
+  ListItemIcon,
+  ListItemText,
+  Menu,
+  MenuItem,
+  Paper,
+  Stack,
+  Typography,
+  alpha,
+} from "@mui/material";
+import {
+  ArrowBackRounded,
+  ArrowForwardRounded,
+  CheckRounded,
+  EditNoteRounded,
+  KeyboardArrowDownRounded,
+  MenuRounded,
+  TerminalRounded,
+  ViewSidebarOutlined,
+} from "@mui/icons-material";
 import { Layout } from "./components/Layout";
 import { Chat } from "./components/Chat";
+import { AgentSessionStatus } from "./components/Chat/AgentSessionStatus";
 import { FileTree } from "./components/FileTree";
 import { SessionList } from "./components/SessionList";
 import {
@@ -20,9 +42,11 @@ import {
   useSessionStore,
   useWorkspaceStore,
   useUiStore,
+  useActivityStore,
   usePermissionStore,
   useExtensionStore,
   usePluginStore,
+  isPlaceholderSessionTitle,
   LAYOUT_LEFT_MIN,
   LAYOUT_LEFT_MAX,
   LAYOUT_RIGHT_MIN,
@@ -54,6 +78,31 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
+const APP_TITLE_BAR_HEIGHT = 50;
+const TITLE_BAR_LEFT_PANEL_TOGGLE_LEFT = 80;
+const TITLE_BAR_RIGHT_PANEL_TOGGLE_RIGHT = 28;
+const TITLE_BAR_CONTROL_SIZE = 32;
+const TITLE_BAR_CONTROL_CENTER_Y = 25;
+const TITLE_BAR_TITLE_GAP = 16;
+
+function TitleBarStatus() {
+  const isConnecting = useActivityStore((s) => s.isConnecting);
+  const activityIsStreaming = useActivityStore((s) => s.isStreaming);
+  const waitingFirstChunk = useActivityStore((s) => s.waitingFirstChunk);
+  const currentToolHint = useActivityStore((s) => s.currentToolHint);
+  const executionSteps = useActivityStore((s) => s.executionSteps);
+
+  return (
+    <AgentSessionStatus
+      executionSteps={executionSteps}
+      isConnecting={isConnecting}
+      isStreaming={activityIsStreaming}
+      waitingFirstChunk={waitingFirstChunk}
+      toolHintFallback={currentToolHint}
+    />
+  );
+}
+
 function PanelLoadingFallback({ label }: { label: string }) {
   return (
     <Box
@@ -72,8 +121,11 @@ function PanelLoadingFallback({ label }: { label: string }) {
 }
 
 export default function App() {
-  const theme = useTheme();
-  const { currentSession, loadSessions } = useSessionStore();
+  const currentSession = useSessionStore((s) => s.currentSession);
+  const loadSessions = useSessionStore((s) => s.loadSessions);
+  const sessions = useSessionStore((s) => s.sessions);
+  const setCurrentSession = useSessionStore((s) => s.setCurrentSession);
+  const createSessionQuick = useSessionStore((s) => s.createSessionQuick);
 
   const onboardingCompleted = useUiStore((s) => s.onboardingCompleted);
   const setOnboardingCompleted = useUiStore((s) => s.setOnboardingCompleted);
@@ -81,9 +133,17 @@ export default function App() {
   const settingsTabIndex = useUiStore((s) => s.settingsTabIndex);
   const setSettingsTabIndex = useUiStore((s) => s.setSettingsTabIndex);
   const settingsExecutionSubTab = useUiStore((s) => s.settingsExecutionSubTab);
-  const setSettingsExecutionSubTab = useUiStore((s) => s.setSettingsExecutionSubTab);
+  const setSettingsExecutionSubTab = useUiStore(
+    (s) => s.setSettingsExecutionSubTab,
+  );
   const rightPanelMode = useUiStore((s) => s.rightPanelMode);
   const setRightPanelMode = useUiStore((s) => s.setRightPanelMode);
+  const leftPanelCollapsed = useUiStore((s) => s.leftPanelCollapsed);
+  const setLeftPanelCollapsed = useUiStore((s) => s.setLeftPanelCollapsed);
+  const rightPanelCollapsed = useUiStore((s) => s.rightPanelCollapsed);
+  const setRightPanelCollapsed = useUiStore((s) => s.setRightPanelCollapsed);
+  const terminalPanelOpen = useUiStore((s) => s.terminalPanelOpen);
+  const setTerminalPanelOpen = useUiStore((s) => s.setTerminalPanelOpen);
   const leftW = useUiStore((s) => s.leftPanelWidth);
   const rightW = useUiStore((s) => s.rightPanelWidth);
   const codeH = useUiStore((s) => s.codePanelHeight);
@@ -93,6 +153,9 @@ export default function App() {
   const setCodeHeight = useUiStore((s) => s.setCodeHeight);
   const setTasksHeight = useUiStore((s) => s.setTasksHeight);
   const ensureCodePanelMin = useUiStore((s) => s.ensureCodePanelMin);
+  const [rightMenuAnchor, setRightMenuAnchor] = useState<HTMLElement | null>(
+    null,
+  );
 
   const leftRef = useRef<HTMLDivElement>(null);
   const centerRef = useRef<HTMLDivElement>(null);
@@ -121,13 +184,17 @@ export default function App() {
 
   useEffect(() => {
     leftWidthRef.current = leftW;
-    if (leftRef.current) leftRef.current.style.width = `${leftW}px`;
-  }, [leftW]);
+    if (leftRef.current) {
+      leftRef.current.style.width = leftPanelCollapsed ? "0px" : `${leftW}px`;
+    }
+  }, [leftPanelCollapsed, leftW]);
 
   useEffect(() => {
     rightWidthRef.current = rightW;
-    if (rightRef.current) rightRef.current.style.width = `${rightW}px`;
-  }, [rightW]);
+    if (rightRef.current) {
+      rightRef.current.style.width = rightPanelCollapsed ? "0px" : `${rightW}px`;
+    }
+  }, [rightPanelCollapsed, rightW]);
 
   useEffect(() => {
     codeHeightRef.current = codeH;
@@ -190,6 +257,50 @@ export default function App() {
   const commitTasksResize = useCallback(() => {
     setTasksHeight(tasksHeightRef.current);
   }, [setTasksHeight]);
+
+  const showSettingsPanel = rightPanelMode === "settings";
+  const currentSessionIndex = currentSession
+    ? sessions.findIndex((s) => s.id === currentSession.id)
+    : -1;
+  const previousSession =
+    currentSessionIndex >= 0 ? sessions[currentSessionIndex + 1] : undefined;
+  const nextSession =
+    currentSessionIndex > 0 ? sessions[currentSessionIndex - 1] : undefined;
+  const titleBarContentLeft =
+    TITLE_BAR_LEFT_PANEL_TOGGLE_LEFT + TITLE_BAR_CONTROL_SIZE * 4 + TITLE_BAR_TITLE_GAP;
+  const titleBarSessionTitle =
+    currentSession && !isPlaceholderSessionTitle(currentSession.name)
+      ? currentSession.name
+      : "Omiga";
+  const rightMenuOpen = Boolean(rightMenuAnchor);
+
+  const closeRightMenu = useCallback(() => {
+    setRightMenuAnchor(null);
+  }, []);
+
+  const handleTitlebarNewSession = useCallback(async () => {
+    try {
+      setRightPanelMode("default");
+      setSettingsOpen(false);
+      await createSessionQuick();
+    } catch (error) {
+      console.error("[App] createSessionQuick failed", error);
+    }
+  }, [createSessionQuick, setRightPanelMode, setSettingsOpen]);
+
+  const handleTitlebarSwitchSession = useCallback(
+    async (sessionId: string | undefined) => {
+      if (!sessionId) return;
+      try {
+        setRightPanelMode("default");
+        setSettingsOpen(false);
+        await setCurrentSession(sessionId);
+      } catch (error) {
+        console.error("[App] titlebar session navigation failed", error);
+      }
+    },
+    [setCurrentSession, setRightPanelMode, setSettingsOpen],
+  );
 
   useEffect(() => {
     const onWinResize = () => {
@@ -487,6 +598,293 @@ export default function App() {
       {/* Orchestration confirmation dialog — mounted at root so it shows regardless of projectRoot */}
       <ConfirmationDialog />
       <Layout>
+        <Box
+          sx={{
+            height: APP_TITLE_BAR_HEIGHT,
+            flexShrink: 0,
+            position: "relative",
+            bgcolor: "background.paper",
+            boxShadow: "none",
+            WebkitUserSelect: "none",
+            userSelect: "none",
+          }}
+        >
+          <Box
+            data-tauri-drag-region
+            aria-hidden
+            sx={{
+              position: "absolute",
+              inset: 0,
+              zIndex: 0,
+            }}
+          />
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={0}
+            sx={{
+              position: "absolute",
+              left: TITLE_BAR_LEFT_PANEL_TOGGLE_LEFT,
+              top: TITLE_BAR_CONTROL_CENTER_Y,
+              transform: "translateY(-50%)",
+              zIndex: 1,
+            }}
+          >
+            <IconButton
+              data-testid="left-sidebar-toggle"
+              aria-label={leftPanelCollapsed ? "展开左侧边栏" : "关闭左侧边栏"}
+              aria-pressed={!leftPanelCollapsed}
+              title={leftPanelCollapsed ? "展开左侧边栏" : "关闭左侧边栏"}
+              size="small"
+              disableRipple
+              disableTouchRipple
+              disableFocusRipple
+              onClick={() => setLeftPanelCollapsed(!leftPanelCollapsed)}
+              sx={{
+                width: TITLE_BAR_CONTROL_SIZE,
+                height: TITLE_BAR_CONTROL_SIZE,
+                borderRadius: 1.5,
+                color: leftPanelCollapsed ? "text.secondary" : "text.primary",
+                bgcolor: "transparent",
+                touchAction: "manipulation",
+                transition: "background-color 80ms ease, color 80ms ease",
+                "&:hover": {
+                  color: "text.primary",
+                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                },
+              }}
+            >
+              <MenuRounded fontSize="small" />
+            </IconButton>
+
+            <IconButton
+              data-testid="titlebar-previous-session"
+              aria-label="上一个会话"
+              title="上一个会话"
+              size="small"
+              disabled={!previousSession}
+              disableRipple
+              disableTouchRipple
+              disableFocusRipple
+              onClick={() => void handleTitlebarSwitchSession(previousSession?.id)}
+              sx={{
+                width: TITLE_BAR_CONTROL_SIZE,
+                height: TITLE_BAR_CONTROL_SIZE,
+                borderRadius: 1.5,
+                color: "text.secondary",
+                bgcolor: "transparent",
+                touchAction: "manipulation",
+                transition: "background-color 80ms ease, color 80ms ease",
+                "&:hover": {
+                  color: "text.primary",
+                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                },
+                "&.Mui-disabled": {
+                  color: (theme) => alpha(theme.palette.text.primary, 0.22),
+                },
+              }}
+            >
+              <ArrowBackRounded fontSize="small" />
+            </IconButton>
+
+            <IconButton
+              data-testid="titlebar-next-session"
+              aria-label="下一个会话"
+              title="下一个会话"
+              size="small"
+              disabled={!nextSession}
+              disableRipple
+              disableTouchRipple
+              disableFocusRipple
+              onClick={() => void handleTitlebarSwitchSession(nextSession?.id)}
+              sx={{
+                width: TITLE_BAR_CONTROL_SIZE,
+                height: TITLE_BAR_CONTROL_SIZE,
+                borderRadius: 1.5,
+                color: "text.secondary",
+                bgcolor: "transparent",
+                touchAction: "manipulation",
+                transition: "background-color 80ms ease, color 80ms ease",
+                "&:hover": {
+                  color: "text.primary",
+                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                },
+                "&.Mui-disabled": {
+                  color: (theme) => alpha(theme.palette.text.primary, 0.22),
+                },
+              }}
+            >
+              <ArrowForwardRounded fontSize="small" />
+            </IconButton>
+
+            <IconButton
+              data-testid="titlebar-new-session"
+              aria-label="新建会话"
+              title="新建会话"
+              size="small"
+              disableRipple
+              disableTouchRipple
+              disableFocusRipple
+              onClick={() => void handleTitlebarNewSession()}
+              sx={{
+                width: TITLE_BAR_CONTROL_SIZE,
+                height: TITLE_BAR_CONTROL_SIZE,
+                borderRadius: 1.5,
+                color: "text.secondary",
+                bgcolor: "transparent",
+                touchAction: "manipulation",
+                transition: "background-color 80ms ease, color 80ms ease",
+                "&:hover": {
+                  color: "text.primary",
+                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                },
+              }}
+            >
+              <EditNoteRounded fontSize="small" />
+            </IconButton>
+          </Stack>
+
+          <Stack
+            data-testid="titlebar-session-summary"
+            data-tauri-drag-region
+            direction="row"
+            alignItems="center"
+            spacing={1.5}
+            sx={{
+              position: "absolute",
+              left: titleBarContentLeft,
+              right: 106,
+              top: TITLE_BAR_CONTROL_CENTER_Y,
+              transform: "translateY(-50%)",
+              minWidth: 0,
+              pointerEvents: "auto",
+              zIndex: 1,
+            }}
+          >
+            <Typography
+              data-tauri-drag-region
+              noWrap
+              sx={{
+                minWidth: 0,
+                color: "text.primary",
+                fontSize: 16,
+                fontWeight: 650,
+                letterSpacing: "-0.015em",
+              }}
+            >
+              {titleBarSessionTitle}
+            </Typography>
+            <Box sx={{ flexShrink: 0, maxWidth: 340 }}>
+              <TitleBarStatus />
+            </Box>
+          </Stack>
+
+          <IconButton
+            data-testid="right-sidebar-toggle"
+            aria-label="打开右侧选项"
+            title="打开右侧选项"
+            aria-haspopup="menu"
+            aria-expanded={rightMenuOpen ? "true" : undefined}
+            size="small"
+            disableRipple
+            disableTouchRipple
+            disableFocusRipple
+            onClick={(event) => setRightMenuAnchor(event.currentTarget)}
+            sx={{
+              position: "absolute",
+              right: TITLE_BAR_RIGHT_PANEL_TOGGLE_RIGHT,
+              top: TITLE_BAR_CONTROL_CENTER_Y,
+              transform: "translateY(-50%)",
+              zIndex: 1,
+              width: 58,
+              height: 34,
+              px: 0.75,
+              gap: 0.1,
+              borderRadius: 2.25,
+              color: rightPanelCollapsed ? "text.secondary" : "text.primary",
+              bgcolor: (theme) => alpha(theme.palette.text.primary, 0.07),
+              border: (theme) =>
+                `1px solid ${alpha(theme.palette.text.primary, 0.05)}`,
+              boxShadow: (theme) =>
+                `0 1px 0 ${alpha(theme.palette.common.white, 0.55)} inset`,
+              touchAction: "manipulation",
+              transition:
+                "background-color 80ms ease, border-color 80ms ease, color 80ms ease",
+              "&:hover": {
+                color: "text.primary",
+                bgcolor: (theme) => alpha(theme.palette.text.primary, 0.1),
+                borderColor: (theme) => alpha(theme.palette.text.primary, 0.08),
+              },
+              "& svg": {
+                pointerEvents: "none",
+              },
+            }}
+          >
+            <ViewSidebarOutlined sx={{ fontSize: 21, transform: "scaleX(-1)" }} />
+            <KeyboardArrowDownRounded sx={{ ml: -0.35, fontSize: 17 }} />
+          </IconButton>
+          <Menu
+            anchorEl={rightMenuAnchor}
+            open={rightMenuOpen}
+            onClose={closeRightMenu}
+            anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+            transformOrigin={{ vertical: "top", horizontal: "right" }}
+            PaperProps={{
+              sx: {
+                mt: 0.8,
+                minWidth: 220,
+                borderRadius: 2.5,
+                border: (theme) =>
+                  `1px solid ${alpha(theme.palette.text.primary, 0.08)}`,
+                boxShadow: (theme) =>
+                  `0 18px 45px ${alpha(theme.palette.common.black, 0.16)}`,
+                overflow: "hidden",
+              },
+            }}
+            MenuListProps={{
+              dense: false,
+              "aria-label": "右侧区域选项",
+              sx: { py: 0.75 },
+            }}
+          >
+            <MenuItem
+              onClick={() => {
+                setRightPanelCollapsed(!rightPanelCollapsed);
+                closeRightMenu();
+              }}
+              sx={{ gap: 1, minHeight: 42 }}
+            >
+              <ListItemIcon sx={{ minWidth: 30 }}>
+                <ViewSidebarOutlined
+                  sx={{ fontSize: 21, transform: "scaleX(-1)" }}
+                />
+              </ListItemIcon>
+              <ListItemText
+                primary={rightPanelCollapsed ? "显示右侧边栏" : "隐藏右侧边栏"}
+                primaryTypographyProps={{ fontWeight: 600 }}
+              />
+              {!rightPanelCollapsed && <CheckRounded sx={{ fontSize: 18 }} />}
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                setTerminalPanelOpen(!terminalPanelOpen);
+                closeRightMenu();
+              }}
+              sx={{ gap: 1, minHeight: 42 }}
+            >
+              <ListItemIcon sx={{ minWidth: 30 }}>
+                <TerminalRounded sx={{ fontSize: 21 }} />
+              </ListItemIcon>
+              <ListItemText
+                primary={terminalPanelOpen ? "隐藏终端" : "显示终端"}
+                secondary="显示在输入框下方"
+                primaryTypographyProps={{ fontWeight: 600 }}
+                secondaryTypographyProps={{ fontSize: 12 }}
+              />
+              {terminalPanelOpen && <CheckRounded sx={{ fontSize: 18 }} />}
+            </MenuItem>
+          </Menu>
+        </Box>
         <Stack
           direction="row"
           sx={{
@@ -496,43 +894,52 @@ export default function App() {
             width: "100%",
           }}
         >
-          {/* Left: conversations */}
-          <Paper
-            ref={leftRef}
-            id="omiga-session-panel"
-            component="aside"
-            elevation={0}
-            square
-            sx={{
-              width: leftW,
-              flexShrink: 0,
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-              borderRadius: 0,
-              borderRight: 1,
-              borderColor: "divider",
-              bgcolor: "background.paper",
-            }}
-          >
-            <ErrorBoundary label="Session list">
-              <SessionList
-                onSelectSession={() => {
-                  setRightPanelMode("default");
-                  setSettingsOpen(false);
+          {!showSettingsPanel && (
+            <>
+              {/* Left: conversations */}
+              <Paper
+                ref={leftRef}
+                id="omiga-session-panel"
+                component="aside"
+                aria-hidden={leftPanelCollapsed}
+                elevation={0}
+                square
+                sx={{
+                  width: leftPanelCollapsed ? 0 : leftW,
+                  flexShrink: 0,
+                  display: "flex",
+                  flexDirection: "column",
+                  overflow: "hidden",
+                  visibility: leftPanelCollapsed ? "hidden" : "visible",
+                  pointerEvents: leftPanelCollapsed ? "none" : "auto",
+                  borderRadius: 0,
+                  borderRight: leftPanelCollapsed ? 0 : 1,
+                  borderColor: "divider",
+                  bgcolor: "background.paper",
                 }}
-              />
-            </ErrorBoundary>
-          </Paper>
+              >
+                <ErrorBoundary label="Session list">
+                  <SessionList
+                    onSelectSession={() => {
+                      setRightPanelMode("default");
+                      setSettingsOpen(false);
+                    }}
+                  />
+                </ErrorBoundary>
+              </Paper>
 
-          <ResizeHandle
-            direction="horizontal"
-            onResize={previewLeftResize}
-            onResizeEnd={commitLeftResize}
-          />
+              {!leftPanelCollapsed && (
+                <ResizeHandle
+                  direction="horizontal"
+                  onResize={previewLeftResize}
+                  onResizeEnd={commitLeftResize}
+                />
+              )}
+            </>
+          )}
 
-          {rightPanelMode === "settings" ? (
-            /* Settings covers center + right: code/chat + file tree area */
+          {showSettingsPanel ? (
+            /* Settings takes the whole workspace; session/sidebar chrome is hidden. */
             <Paper
               component="section"
               elevation={0}
@@ -591,7 +998,7 @@ export default function App() {
                   overflow: "hidden",
                   borderRadius: 0,
                   bgcolor: "background.default",
-                  boxShadow: `inset 0 1px 0 ${alpha(theme.palette.common.black, 0.04)}`,
+                  boxShadow: "none",
                 }}
               >
                 {hasCodeWorkspace && (
@@ -636,61 +1043,65 @@ export default function App() {
                 </Box>
               </Paper>
 
-              <ResizeHandle
-                direction="horizontal"
-                onResize={previewRightResize}
-                onResizeEnd={commitRightResize}
-              />
+              {!rightPanelCollapsed && (
+                <ResizeHandle
+                  direction="horizontal"
+                  onResize={previewRightResize}
+                  onResizeEnd={commitRightResize}
+                />
+              )}
 
               <Paper
                 ref={rightRef}
                 component="aside"
+                aria-hidden={rightPanelCollapsed}
                 elevation={0}
                 square
                 sx={{
-                  width: rightW,
+                  width: rightPanelCollapsed ? 0 : rightW,
                   flexShrink: 0,
                   display: "flex",
                   flexDirection: "column",
                   overflow: "hidden",
+                  visibility: rightPanelCollapsed ? "hidden" : "visible",
+                  pointerEvents: rightPanelCollapsed ? "none" : "auto",
                   borderRadius: 0,
-                  borderLeft: 1,
+                  borderLeft: rightPanelCollapsed ? 0 : 1,
                   borderColor: "divider",
                   bgcolor: "background.paper",
                   position: "relative",
                 }}
               >
-                <Box
-                  ref={tasksPanelRef}
-                  sx={{
-                    height: tasksH,
-                    minHeight: LAYOUT_PANEL_MIN,
-                    flexShrink: 0,
-                    overflow: "auto",
-                    display: "flex",
-                    flexDirection: "column",
-                  }}
-                >
-                  <TaskStatus />
-                </Box>
+                  <Box
+                    ref={tasksPanelRef}
+                    sx={{
+                      height: tasksH,
+                      minHeight: LAYOUT_PANEL_MIN,
+                      flexShrink: 0,
+                      overflow: "auto",
+                      display: "flex",
+                      flexDirection: "column",
+                    }}
+                  >
+                    <TaskStatus />
+                  </Box>
 
-                <ResizeHandle
-                  direction="vertical"
-                  onResize={previewTasksResize}
-                  onResizeEnd={commitTasksResize}
-                />
+                  <ResizeHandle
+                    direction="vertical"
+                    onResize={previewTasksResize}
+                    onResizeEnd={commitTasksResize}
+                  />
 
-                <Box
-                  sx={{
-                    flex: 1,
-                    minHeight: 0,
-                    display: "flex",
-                    flexDirection: "column",
-                  }}
-                >
-                  <FileTree />
-                </Box>
-
+                  <Box
+                    sx={{
+                      flex: 1,
+                      minHeight: 0,
+                      display: "flex",
+                      flexDirection: "column",
+                    }}
+                  >
+                    <FileTree />
+                  </Box>
               </Paper>
             </>
           )}

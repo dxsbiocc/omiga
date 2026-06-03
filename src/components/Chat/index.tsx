@@ -14,8 +14,6 @@ import {
   Fade,
   useTheme,
   Collapse,
-  Tabs,
-  Tab,
   Alert,
   Button,
   Divider,
@@ -30,7 +28,6 @@ import {
   SmartToy,
   CheckCircle,
   ExpandMore,
-  ForumOutlined,
   FolderOpen,
   Send as SendIcon,
   Check as CheckIcon,
@@ -46,6 +43,7 @@ import "katex/dist/katex.min.css";
 import {
   useSessionStore,
   useActivityStore,
+  useUiStore,
   mergeActiveTodosWithTiming,
   useChatComposerStore,
   type PermissionMode,
@@ -56,8 +54,9 @@ import {
   type Message as StoreMessage,
   isPlaceholderSessionTitle,
   titleFromFirstUserMessage,
-  shouldShowNewSessionPlaceholder,
   isUnsetWorkspacePath,
+  executionWorkspaceScopeKey,
+  shouldResetWorkspaceForExecutionScopeChange,
 } from "../../state";
 import { Terminal } from "../Terminal";
 import { OmigaLogo } from "../OmigaLogo";
@@ -98,6 +97,7 @@ import {
 import {
   AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
   isNearScrollBottom,
+  shouldAutofillOlderMessages,
   shouldShowJumpToLatestButton,
 } from "./chatScrollState";
 import { selectLiveReActFoldTraceText } from "./liveFoldTrace";
@@ -126,7 +126,6 @@ import {
 } from "./markdownImage";
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { SessionSwitchSkeleton } from "./SessionSwitchSkeleton";
-import { AgentSessionStatus } from "./AgentSessionStatus";
 import {
   ResearchGoalStatusPill,
   buildResearchGoalAutoRunCommand,
@@ -691,8 +690,8 @@ interface ActivityOperationPayload {
 /** Avatar column + row gap; align with pencil-new.pen (36px avatar, ~10px gap). */
 /** Chat bubble radius — smaller than pill-style so content stays inside the rounded rect */
 const BUBBLE_RADIUS_PX = 10;
-/** User message bubble max width (assistant uses full row width) */
-const USER_BUBBLE_MAX_CSS = "min(960px, 100%)";
+/** Shared chat column width: assistant rows, user bubbles, and composer align to this rail. */
+const USER_BUBBLE_MAX_CSS = "min(1120px, 100%)";
 /** Markdown fenced code / blockquote — small px radius (avoid pill look on wide blocks) */
 const MD_BLOCK_RADIUS_PX = 1;
 /** Inline `code` longer than this: no fill (e.g. protein sequences) */
@@ -2330,7 +2329,7 @@ export function Chat({ sessionId }: ChatProps) {
   const theme = useTheme();
   const CHAT = useMemo(() => getChatTokens(theme), [theme]);
   const isDev = import.meta.env.DEV;
-  const [panelTab, setPanelTab] = useState(0);
+  const terminalPanelOpen = useUiStore((s) => s.terminalPanelOpen);
   const composerRef = useRef<ChatComposerRef>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const messagesRef = useRef<Message[]>([]);
@@ -2446,8 +2445,6 @@ export function Chat({ sessionId }: ChatProps) {
   const isConnecting = useActivityStore((s) => s.isConnecting);
   const activityIsStreaming = useActivityStore((s) => s.isStreaming);
   const waitingFirstChunk = useActivityStore((s) => s.waitingFirstChunk);
-  const currentToolHint = useActivityStore((s) => s.currentToolHint);
-  const executionSteps = useActivityStore((s) => s.executionSteps);
   /** First text chunk of each “segment” (after Start or after tool_result). */
   const segmentStartRef = useRef(true);
 
@@ -3195,13 +3192,6 @@ export function Chat({ sessionId }: ChatProps) {
     return currentSession?.name;
   }, [sessionId, currentSession?.name]);
 
-  const showNewSessionPlaceholder =
-    currentSession != null &&
-    shouldShowNewSessionPlaceholder(currentSession, {
-      isCurrentSession: true,
-      storeMessageCount: storeMessages.length,
-    });
-
   useEffect(() => {
     // ── Session switch: save → restore (or clear) ─────────────────────────
     //
@@ -3738,6 +3728,51 @@ export function Chat({ sessionId }: ChatProps) {
     waitingFirstChunk,
   ]);
 
+  const handleExecutionScopeChange = useCallback(
+    (next: {
+      environment: ExecutionEnvironment;
+      sshServer: string | null;
+      sandboxBackend: SandboxBackend;
+    }) => {
+      if (!sessionId || !currentSession) return;
+
+      const composerState = useChatComposerStore.getState();
+      const previousScopeKey = executionWorkspaceScopeKey(
+        composerState.environment,
+        composerState.sshServer,
+        composerState.sandboxBackend,
+      );
+      const nextScopeKey = executionWorkspaceScopeKey(
+        next.environment,
+        next.sshServer,
+        next.sandboxBackend,
+      );
+      if (
+        !shouldResetWorkspaceForExecutionScopeChange(
+          previousScopeKey,
+          nextScopeKey,
+        )
+      ) {
+        return;
+      }
+
+      const currentWorkspace =
+        currentSession.workingDirectory ?? currentSession.projectPath;
+      if (isUnsetWorkspacePath(currentWorkspace)) return;
+
+      setPathToastKey((k) => k + 1);
+      setPathRequiredToast(
+        "已切换执行环境，请重新选择该环境下的工作目录。",
+      );
+      void updateSessionProjectPath(sessionId, ".").catch((error) => {
+        console.error("[Chat] reset workspace for execution scope failed", error);
+        setPathToastKey((k) => k + 1);
+        setPathRequiredToast("重置工作目录失败，请手动重新选择。");
+      });
+    },
+    [currentSession, sessionId, updateSessionProjectPath],
+  );
+
   const handlePickProjectFolder = async () => {
     if (!sessionId) return;
     const { environment, sshServer } = useChatComposerStore.getState();
@@ -3807,6 +3842,10 @@ export function Chat({ sessionId }: ChatProps) {
   const shouldAutoScrollRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
   const jumpVisibilityRafRef = useRef<number | null>(null);
+  const olderPageScrollRestoreRef = useRef<{
+    sessionId: string;
+    scrollHeight: number;
+  } | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const jumpToLatestAnimationTimerRef = useRef<number | null>(null);
   const jumpToLatestClickAnimatingRef = useRef(false);
@@ -3862,13 +3901,40 @@ export function Chat({ sessionId }: ChatProps) {
     });
   }, [updateJumpToLatestVisibility]);
 
+  const requestOlderMessages = useCallback(() => {
+    if (!sessionId || !hasMoreMessages || isLoadingMoreMessages) {
+      return false;
+    }
+    const el = messagesScrollRef.current;
+    olderPageScrollRestoreRef.current = {
+      sessionId,
+      scrollHeight: el?.scrollHeight ?? 0,
+    };
+    void loadMoreMessages();
+    return true;
+  }, [hasMoreMessages, isLoadingMoreMessages, loadMoreMessages, sessionId]);
+
+  useLayoutEffect(() => {
+    const restore = olderPageScrollRestoreRef.current;
+    if (!restore || isLoadingMoreMessages) return;
+
+    const el = messagesScrollRef.current;
+    if (el && restore.sessionId === sessionId) {
+      const addedHeight = el.scrollHeight - restore.scrollHeight;
+      if (addedHeight > 0) {
+        el.scrollTop += addedHeight;
+      }
+    }
+    olderPageScrollRestoreRef.current = null;
+  }, [isLoadingMoreMessages, messages.length, sessionId]);
+
   // Scroll-to-top pagination + auto-scroll bottom detection
   useEffect(() => {
     const el = messagesScrollRef.current;
     if (!el) return;
     const onScroll = () => {
       if (el.scrollTop < 120 && hasMoreMessages && !isLoadingMoreMessages) {
-        void loadMoreMessages();
+        requestOlderMessages();
       }
       updateJumpToLatestVisibility();
     };
@@ -3877,7 +3943,7 @@ export function Chat({ sessionId }: ChatProps) {
   }, [
     hasMoreMessages,
     isLoadingMoreMessages,
-    loadMoreMessages,
+    requestOlderMessages,
     updateJumpToLatestVisibility,
   ]);
 
@@ -3970,6 +4036,52 @@ export function Chat({ sessionId }: ChatProps) {
     () => displayedItems.filter(renderItemHasVisibleContent),
     [displayedItems],
   );
+
+  useEffect(() => {
+    if (
+      !sessionId ||
+      isSwitchingSession ||
+      isConnecting ||
+      isStreaming ||
+      activityIsStreaming ||
+      waitingFirstChunk ||
+      isLoadingMoreMessages ||
+      messages.length === 0
+    ) {
+      return;
+    }
+
+    const rafId = requestAnimationFrame(() => {
+      const el = messagesScrollRef.current;
+      if (!el) return;
+      const shouldAutofill = shouldAutofillOlderMessages(
+        {
+          scrollTop: el.scrollTop,
+          clientHeight: el.clientHeight,
+          scrollHeight: el.scrollHeight,
+        },
+        hasMoreMessages && !isLoadingMoreMessages,
+      );
+      if (shouldAutofill) {
+        requestOlderMessages();
+      }
+    });
+
+    return () => cancelAnimationFrame(rafId);
+  }, [
+    activityIsStreaming,
+    allItemsVisible,
+    hasMoreMessages,
+    isConnecting,
+    isLoadingMoreMessages,
+    isStreaming,
+    isSwitchingSession,
+    messages.length,
+    requestOlderMessages,
+    sessionId,
+    visibleDisplayedItems.length,
+    waitingFirstChunk,
+  ]);
 
   useLayoutEffect(() => {
     const totalItems = messageRenderItems.length;
@@ -7238,183 +7350,14 @@ export function Chat({ sessionId }: ChatProps) {
         minHeight: 0,
       }}
     >
-      <Tabs
-        value={panelTab}
-        onChange={(_, v) => setPanelTab(v)}
-        aria-label="聊天或终端"
-        sx={{
-          flexShrink: 0,
-          minHeight: 40,
-          borderBottom: 1,
-          borderColor: "divider",
-          bgcolor: alpha(theme.palette.background.paper, 0.85),
-          "& .MuiTab-root": {
-            minHeight: 40,
-            textTransform: "none",
-            fontWeight: 600,
-            fontSize: 13,
-          },
-          "& .MuiTabs-indicator": { height: 2 },
-        }}
-      >
-        <Tab label="聊天" id="omiga-tab-chat" />
-        <Tab label="终端" id="omiga-tab-terminal" />
-      </Tabs>
-
       <Box
-        aria-hidden={panelTab !== 1}
         sx={{
-          flex: panelTab === 1 ? 1 : 0,
+          flex: 1,
           minHeight: 0,
-          overflow: "hidden",
-          display: panelTab === 1 ? "flex" : "none",
+          display: "flex",
           flexDirection: "column",
         }}
       >
-        <Terminal
-          embedded
-          active={panelTab === 1}
-          sessionId={sessionId}
-          workspacePath={currentSession?.projectPath ?? null}
-        />
-      </Box>
-
-      <Box
-        aria-hidden={panelTab !== 0}
-        sx={{
-          flex: panelTab === 0 ? 1 : 0,
-          minHeight: 0,
-          display: panelTab === 0 ? "flex" : "none",
-          flexDirection: "column",
-        }}
-      >
-          {/* Chat Header */}
-          {currentSession && (
-            <Box
-              sx={{
-                px: 3,
-                py: 1.5,
-                borderBottom: 1,
-                borderColor: "divider",
-                bgcolor: alpha(theme.palette.background.paper, 0.6),
-                position: "relative",
-              }}
-            >
-              <Stack
-                direction="row"
-                alignItems="center"
-                justifyContent="space-between"
-                spacing={1}
-              >
-                <Stack
-                  direction="row"
-                  alignItems="center"
-                  spacing={0.75}
-                  minWidth={0}
-                >
-                  <Tooltip title="Conversations">
-                    <IconButton
-                      size="small"
-                      aria-label="Open conversations list"
-                      onClick={() => {
-                        document
-                          .getElementById("omiga-session-panel")
-                          ?.scrollIntoView({
-                            behavior: "auto",
-                            block: "nearest",
-                          });
-                      }}
-                      sx={{
-                        color: "text.secondary",
-                        transition:
-                          "color 0.25s ease, background-color 0.25s ease, transform 0.2s ease, box-shadow 0.25s ease",
-                        "@media (prefers-reduced-motion: reduce)": {
-                          transition: "none",
-                        },
-                        "&:hover": {
-                          color: theme.palette.primary.main,
-                          bgcolor: alpha(theme.palette.primary.main, 0.1),
-                          boxShadow: `0 3px 12px ${alpha(theme.palette.primary.main, 0.18)}`,
-                          transform: "translateY(-1px)",
-                        },
-                        "&:active": {
-                          transform: "translateY(1px)",
-                          boxShadow: "none",
-                          transition: "transform 0.1s ease, box-shadow 0.1s ease",
-                        },
-                      }}
-                    >
-                      <ForumOutlined fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                  <Stack direction="column" spacing={0.25} minWidth={0}>
-                    <Stack
-                      direction="row"
-                      alignItems="center"
-                      spacing={0.75}
-                      minWidth={0}
-                    >
-                      {showNewSessionPlaceholder ? null : (
-                        <Typography variant="subtitle1" fontWeight={600} noWrap>
-                          {currentSession.name}
-                        </Typography>
-                      )}
-                      {messages.length > 0 && (
-                        <Chip
-                          size="small"
-                          label={`${messages.length} messages`}
-                          variant="outlined"
-                          color="default"
-                          sx={{
-                            transition:
-                              "border-color 0.3s ease, box-shadow 0.3s ease, background-color 0.3s ease, transform 0.2s ease",
-                            "@media (prefers-reduced-motion: reduce)": {
-                              transition: "none",
-                            },
-                            "& .MuiChip-label": {
-                              letterSpacing: "0.01em",
-                              transition: "letter-spacing 0.3s ease",
-                              "@media (prefers-reduced-motion: reduce)": {
-                                transition: "none",
-                              },
-                            },
-                            "&:hover": {
-                              borderColor: alpha(theme.palette.primary.main, 0.5),
-                              bgcolor: alpha(theme.palette.primary.main, 0.08),
-                              boxShadow: `0 3px 14px ${alpha(theme.palette.primary.main, 0.2)}`,
-                              transform: "translateY(-1px)",
-                              "& .MuiChip-label": { letterSpacing: "0.06em" },
-                            },
-                            "&:active": {
-                              transform: "translateY(1px)",
-                              boxShadow: "none",
-                              transition: "transform 0.1s ease, box-shadow 0.1s ease",
-                            },
-                          }}
-                        />
-                      )}
-                    </Stack>
-                  </Stack>
-                </Stack>
-                <AgentSessionStatus
-                  executionSteps={executionSteps}
-                  isConnecting={isConnecting}
-                  isStreaming={activityIsStreaming}
-                  waitingFirstChunk={waitingFirstChunk}
-                  toolHintFallback={currentToolHint}
-                  showResume={awaitingResumeAfterCancel && !followUpTaskId}
-                  onResume={handleResumeAfterCancel}
-                  backgroundTaskCount={
-                    backgroundTasks.filter(
-                      (task) =>
-                        task.status === "Running" || task.status === "Pending",
-                    ).length
-                  }
-                />
-              </Stack>
-            </Box>
-          )}
-
           {/* Messages Area */}
           <Box
             ref={messagesScrollRef}
@@ -7423,7 +7366,8 @@ export function Chat({ sessionId }: ChatProps) {
               minWidth: 0,
               overflowY: "auto",
               overflowX: "hidden",
-              p: 3,
+              px: 1.5,
+              py: 3,
               display: "flex",
               flexDirection: "column",
               gap: 2,
@@ -7489,12 +7433,15 @@ export function Chat({ sessionId }: ChatProps) {
                 prefers-reduced-motion: the animation is gated below. */}
             <Box
               ref={messagesContentRef}
+              data-testid="chat-message-rail"
               key={isSwitchingSession ? "skeleton" : (sessionId ?? "none")}
               sx={{
                 display: "flex",
                 flexDirection: "column",
                 gap: 2,
                 width: "100%",
+                maxWidth: USER_BUBBLE_MAX_CSS,
+                mx: "auto",
                 "@media (prefers-reduced-motion: no-preference)": {
                   "@keyframes omigaFadeUp": {
                     from: {
@@ -8375,12 +8322,45 @@ export function Chat({ sessionId }: ChatProps) {
               </Alert>
             </Collapse>
             <Box
+              data-testid="chat-composer-rail"
               sx={{
                 width: "100%",
                 maxWidth: USER_BUBBLE_MAX_CSS,
                 mx: "auto",
               }}
             >
+              <Collapse in={awaitingResumeAfterCancel && !followUpTaskId}>
+                <Alert
+                  severity="warning"
+                  sx={{
+                    mb: 1.25,
+                    borderRadius: 2,
+                    alignItems: "center",
+                    "& .MuiAlert-message": { py: 0.25 },
+                    "& .MuiAlert-action": {
+                      alignItems: "center",
+                      alignSelf: "center",
+                      pt: 0,
+                      pb: 0,
+                      pl: 1,
+                    },
+                  }}
+                  action={
+                    <Button
+                      color="warning"
+                      size="small"
+                      variant="contained"
+                      disabled={isConnecting || isStreaming || needsWorkspacePath}
+                      onClick={() => void handleResumeAfterCancel()}
+                      sx={{ whiteSpace: "nowrap", fontWeight: 700 }}
+                    >
+                      断点继续
+                    </Button>
+                  }
+                >
+                  当前回复已中断，可从上一轮中断处继续。
+                </Alert>
+              </Collapse>
               <ResearchGoalStatusPill
                 goal={activeResearchGoal}
                 onPrepareCommand={prepareResearchGoalCommand}
@@ -8399,6 +8379,7 @@ export function Chat({ sessionId }: ChatProps) {
                 }
                 needsWorkspacePath={needsWorkspacePath}
                 onPickWorkspace={handlePickProjectFolder}
+                onExecutionScopeChange={handleExecutionScopeChange}
                 composerRef={composerRef}
                 onKeyDown={handleKeyDown}
                 inputRef={inputRef}
@@ -8431,6 +8412,31 @@ export function Chat({ sessionId }: ChatProps) {
                 }
               />
             </Box>
+          </Box>
+          <Box
+            data-testid="chat-terminal-panel"
+            aria-hidden={!terminalPanelOpen}
+            sx={{
+              height: terminalPanelOpen ? { xs: 260, md: 300 } : 0,
+              minHeight: terminalPanelOpen ? 220 : 0,
+              flexShrink: 0,
+              overflow: "hidden",
+              borderTop: terminalPanelOpen ? 1 : 0,
+              borderColor: "divider",
+              bgcolor: "background.paper",
+              transition:
+                "height 200ms ease, min-height 200ms ease, border-color 200ms ease",
+              "@media (prefers-reduced-motion: reduce)": {
+                transition: "none",
+              },
+            }}
+          >
+            <Terminal
+              embedded
+              active={terminalPanelOpen}
+              sessionId={sessionId}
+              workspacePath={currentSession?.projectPath ?? null}
+            />
           </Box>
         </Box>
 

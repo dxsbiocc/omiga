@@ -48,6 +48,8 @@ export {
 } from "./constants";
 export {
   useChatComposerStore,
+  executionWorkspaceScopeKey,
+  shouldResetWorkspaceForExecutionScopeChange,
   type PermissionMode,
   type ComputerUseMode,
   type BrowserUseMode,

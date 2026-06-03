@@ -577,9 +577,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   updateSessionProjectPath: async (sessionId, projectPath) => {
     await invoke("update_session_project_path", { sessionId, projectPath });
+    msgCacheInvalidate(sessionId);
     set((state) => {
       const pending = new Set(state.pendingProjectPathSessions);
-      pending.delete(sessionId);
+      if (isUnsetWorkspacePath(projectPath)) {
+        pending.add(sessionId);
+      } else {
+        pending.delete(sessionId);
+      }
       persistPendingProjectPathIds(pending);
       const patch = (s: Session) =>
         s.id === sessionId

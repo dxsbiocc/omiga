@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isNearScrollBottom,
+  shouldAutofillOlderMessages,
   shouldShowJumpToLatestButton,
 } from "./chatScrollState";
 
@@ -52,6 +53,43 @@ describe("chatScrollState", () => {
           scrollHeight: 720,
         },
         undefined,
+        false,
+      ),
+    ).toBe(false);
+  });
+
+  it("autofills older history when loaded transcript cannot meaningfully scroll", () => {
+    expect(
+      shouldAutofillOlderMessages(
+        {
+          scrollTop: 0,
+          clientHeight: 700,
+          scrollHeight: 760,
+        },
+        true,
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldAutofillOlderMessages(
+        {
+          scrollTop: 0,
+          clientHeight: 700,
+          scrollHeight: 900,
+        },
+        true,
+      ),
+    ).toBe(false);
+  });
+
+  it("does not autofill older history when another page load is unavailable", () => {
+    expect(
+      shouldAutofillOlderMessages(
+        {
+          scrollTop: 0,
+          clientHeight: 700,
+          scrollHeight: 700,
+        },
         false,
       ),
     ).toBe(false);

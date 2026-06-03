@@ -155,26 +155,25 @@ export function AgentSessionStatus({
         position: "relative",
         minWidth: 0,
         maxWidth: { xs: "min(100%, 320px)", sm: 340 },
-        borderRadius: 2.5,
+        borderRadius: 1.5,
         overflow: "hidden",
-        border: `1px solid ${alpha(accent, busy ? 0.35 : 0.22)}`,
-        background: alpha(theme.palette.background.paper, 0.55),
-        backdropFilter: "blur(14px) saturate(160%)",
-        WebkitBackdropFilter: "blur(14px) saturate(160%)",
-        boxShadow: `0 1px 0 ${alpha(theme.palette.common.black, 0.04)}, 0 8px 24px ${alpha(theme.palette.common.black, 0.06)}`,
+        border: "none",
+        background: "transparent",
+        backdropFilter: "none",
+        WebkitBackdropFilter: "none",
+        boxShadow: "none",
         cursor: showResume ? "pointer" : "default",
         userSelect: "none",
-        transition: "border-color 0.35s ease, box-shadow 0.35s ease, background 0.35s ease, transform 0.2s ease",
+        transition: "background 0.25s ease, transform 0.2s ease",
         "@media (prefers-reduced-motion: reduce)": {
           transition: "none",
         },
         "&:hover": {
-          borderColor: alpha(accent, showResume ? 0.65 : busy ? 0.5 : 0.36),
           background: showResume
-            ? alpha(accent, 0.15)
-            : alpha(theme.palette.background.paper, 0.72),
-          boxShadow: `0 4px 22px ${alpha(accent, showResume ? 0.38 : 0.14)}, 0 1px 0 ${alpha(theme.palette.common.black, 0.04)}`,
-          transform: "translateY(-1px)",
+            ? alpha(accent, 0.12)
+            : "transparent",
+          boxShadow: "none",
+          transform: showResume ? "translateY(-1px)" : "none",
           "& .status-pill-label": {
             letterSpacing: showResume ? "0.08em" : "0.04em",
           },

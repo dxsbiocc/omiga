@@ -97,6 +97,7 @@ import {
   type PermissionMode,
   type BrowserUseMode,
   type SandboxBackend,
+  type ExecutionEnvironment,
   type LocalVenvType,
 } from "../../state";
 import { normalizeAgentDisplayName } from "../../state/agentStore";
@@ -549,6 +550,11 @@ export interface ChatComposerProps {
   workspacePath: string;
   needsWorkspacePath: boolean;
   onPickWorkspace: () => void;
+  onExecutionScopeChange?: (next: {
+    environment: ExecutionEnvironment;
+    sshServer: string | null;
+    sandboxBackend: SandboxBackend;
+  }) => void;
   /** Optional controlled initial value; use composerRef for programmatic updates. */
   input?: string;
   onInputChange?: (v: string) => void;
@@ -595,6 +601,7 @@ export const ChatComposer = memo(function ChatComposer({
   workspacePath,
   needsWorkspacePath,
   onPickWorkspace,
+  onExecutionScopeChange,
   input: initialInput,
   onInputChange,
   onKeyDown,
@@ -857,6 +864,20 @@ export const ChatComposer = memo(function ChatComposer({
     selectedBranchByRoot,
     setBranchForRoot,
   } = useChatComposerStore();
+  const applyExecutionScopeChange = useCallback(
+    (
+      nextEnvironment: ExecutionEnvironment,
+      nextSshServer: string | null = sshServer,
+      nextSandboxBackend: SandboxBackend = sandboxBackend,
+    ) => {
+      onExecutionScopeChange?.({
+        environment: nextEnvironment,
+        sshServer: nextSshServer,
+        sandboxBackend: nextSandboxBackend,
+      });
+    },
+    [onExecutionScopeChange, sandboxBackend, sshServer],
+  );
   const pluginMarketplaces = usePluginStore((s) => s.marketplaces);
   const loadPlugins = usePluginStore((s) => s.loadPlugins);
   const hasPendingPermissionPrompt = usePermissionStore(
@@ -4298,6 +4319,7 @@ export const ChatComposer = memo(function ChatComposer({
               }}
               onMouseLeave={scheduleCloseVenvSub}
               onClick={() => {
+                applyExecutionScopeChange("local", null);
                 setEnvironment("local");
                 setLocalVenv("none", "");
                 setEnvAnchor(null);
@@ -4354,6 +4376,7 @@ export const ChatComposer = memo(function ChatComposer({
                 // 选择第一个可用的服务器
                 const firstServer = Object.keys(sshServers)[0];
                 if (firstServer) {
+                  applyExecutionScopeChange("ssh", firstServer);
                   setSshServer(firstServer);
                   setEnvironment("ssh");
                   setEnvAnchor(null);
@@ -4513,6 +4536,7 @@ export const ChatComposer = memo(function ChatComposer({
                     key={name}
                     selected={environment === "ssh" && sshServer === name}
                     onClick={() => {
+                      applyExecutionScopeChange("ssh", name);
                       setSshServer(name);
                       setEnvironment("ssh");
                       setSshMenuAnchor(null);
@@ -4596,6 +4620,7 @@ export const ChatComposer = memo(function ChatComposer({
                     environment === "sandbox" && sandboxBackend === b.id
                   }
                   onClick={() => {
+                    applyExecutionScopeChange("sandbox", null, b.id);
                     setSandboxBackend(b.id);
                     setEnvironment("sandbox");
                     setSandboxMenuAnchor(null);
@@ -4671,6 +4696,7 @@ export const ChatComposer = memo(function ChatComposer({
             <MenuItem
               selected={environment === "local" && localVenvType === "none"}
               onClick={() => {
+                applyExecutionScopeChange("local", null);
                 setEnvironment("local");
                 setLocalVenv("none", "");
                 setVenvMenuAnchor(null);
@@ -4721,6 +4747,7 @@ export const ChatComposer = memo(function ChatComposer({
                       localVenvName === v.name
                     }
                     onClick={() => {
+                      applyExecutionScopeChange("local", null);
                       setEnvironment("local");
                       setLocalVenv(v.kind as LocalVenvType, v.name);
                       setVenvMenuAnchor(null);

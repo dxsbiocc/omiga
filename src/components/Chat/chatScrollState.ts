@@ -26,3 +26,18 @@ export function shouldShowJumpToLatestButton(
   const hasScrollableHistory = metrics.scrollHeight > metrics.clientHeight;
   return hasScrollableHistory && !isNearScrollBottom(metrics, thresholdPx);
 }
+
+/**
+ * If a session initially renders with less history than a full viewport,
+ * the user cannot physically scroll to the top to trigger pagination.
+ * In that case, proactively load older messages until the transcript has a
+ * meaningful scroll range or the backend reports no older history.
+ */
+export function shouldAutofillOlderMessages(
+  metrics: ScrollMetrics,
+  canLoadOlderMessages: boolean,
+  minScrollableOverflowPx = 120,
+): boolean {
+  if (!canLoadOlderMessages) return false;
+  return metrics.scrollHeight <= metrics.clientHeight + minScrollableOverflowPx;
+}
