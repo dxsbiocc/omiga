@@ -841,26 +841,26 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         onMouseLeave={handleSessionMouseLeave}
         onMouseDown={() => handleSessionMouseDown(session.id)}
         sx={{
-          px: opts?.nested ? 1.25 : 1.5,
-          py: 0.9,
-          borderRadius: 1.75,
+          px: opts?.nested ? 1 : 1.25,
+          py: 0.55,
+          borderRadius: 1.25,
           cursor: "pointer",
           position: "relative",
           overflow: "hidden",
-          minHeight: 38,
+          minHeight: 32,
           bgcolor:
             currentSession?.id === session.id
               ? alpha(
-                  theme.palette.primary.main,
-                  theme.palette.mode === "dark" ? 0.14 : 0.1,
+                  theme.palette.text.primary,
+                  theme.palette.mode === "dark" ? 0.12 : 0.055,
                 )
               : "transparent",
           border: "1px solid",
           borderColor:
             currentSession?.id === session.id
               ? alpha(
-                  theme.palette.primary.main,
-                  theme.palette.mode === "dark" ? 0.25 : 0.18,
+                  theme.palette.divider,
+                  theme.palette.mode === "dark" ? 0.8 : 0.9,
                 )
               : "transparent",
           transition: "background-color 120ms ease, border-color 120ms ease",
@@ -868,8 +868,8 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             bgcolor:
               currentSession?.id === session.id
                 ? alpha(
-                    theme.palette.primary.main,
-                    theme.palette.mode === "dark" ? 0.2 : 0.14,
+                    theme.palette.text.primary,
+                    theme.palette.mode === "dark" ? 0.16 : 0.075,
                   )
                 : "action.hover",
           },
@@ -905,8 +905,8 @@ export function SessionList({ onSelectSession }: SessionListProps) {
               aria-label="running"
               sx={{
                 flexShrink: 0,
-                width: 7,
-                height: 7,
+                width: 6,
+                height: 6,
                 borderRadius: "50%",
                 bgcolor: "primary.main",
                 boxShadow: (t) =>
@@ -928,6 +928,8 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             sx={{
               flex: 1,
               minWidth: 0,
+              fontSize: 14,
+              lineHeight: 1.35,
               ...(isPlaceholder
                 ? {
                     color: "text.secondary",
@@ -942,8 +944,8 @@ export function SessionList({ onSelectSession }: SessionListProps) {
           <Box
             sx={{
               position: "relative",
-              width: 42,
-              height: 28,
+              width: 38,
+              height: 24,
               flexShrink: 0,
             }}
           >
@@ -958,7 +960,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                 alignItems: "center",
                 justifyContent: "flex-end",
                 color: "text.secondary",
-                fontSize: 13,
+                fontSize: 12.5,
                 fontWeight: 500,
                 transition: "opacity 120ms ease, transform 120ms ease",
                 userSelect: "none",
@@ -976,11 +978,11 @@ export function SessionList({ onSelectSession }: SessionListProps) {
               }}
               sx={{
                 position: "absolute",
-                right: -2,
+                right: -1,
                 top: "50%",
                 transform: "translate(4px, -50%)",
-                width: 28,
-                height: 28,
+                width: 24,
+                height: 24,
                 opacity: 0,
                 pointerEvents: "none",
                 color: "text.secondary",
@@ -1127,15 +1129,14 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                     sx={{
                       display: "flex",
                       alignItems: "center",
-                      gap: 0.9,
-                      px: 1.25,
-                      py: 0.8,
-                      borderRadius: 1.75,
+                      gap: 0.85,
+                      px: 1,
+                      py: 0.58,
+                      borderRadius: 1.25,
                       cursor: "pointer",
                       color: "text.primary",
-                      bgcolor: project.isCurrent
-                        ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.1 : 0.06)
-                        : "transparent",
+                      minHeight: 32,
+                      bgcolor: "transparent",
                       outline: "none",
                       "&:hover, &:focus-visible": {
                         bgcolor: "action.hover",
@@ -1145,16 +1146,16 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                     {expanded ? (
                       <FolderOpenOutlined
                         sx={{
-                          fontSize: 20,
-                          color: project.isCurrent ? "primary.main" : "text.secondary",
+                          fontSize: 19,
+                          color: "text.secondary",
                           flexShrink: 0,
                         }}
                       />
                     ) : (
                       <FolderOutlined
                         sx={{
-                          fontSize: 20,
-                          color: project.isCurrent ? "primary.main" : "text.secondary",
+                          fontSize: 19,
+                          color: "text.secondary",
                           flexShrink: 0,
                         }}
                       />
@@ -1166,7 +1167,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                         flex: 1,
                         minWidth: 0,
                         color: "text.primary",
-                        fontWeight: project.isCurrent ? 700 : 560,
+                        fontWeight: project.isCurrent ? 650 : 560,
                         lineHeight: 1.25,
                       }}
                     >
@@ -1180,12 +1181,13 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                         void handleCreateProjectSession(project.projectPath);
                       }}
                       sx={{
-                        width: 28,
-                        height: 28,
+                        width: 24,
+                        height: 24,
                         opacity: 0,
                         pointerEvents: "none",
                         color: "text.secondary",
-                        transition: "opacity 120ms ease, color 120ms ease, background-color 120ms ease",
+                        transition:
+                          "opacity 120ms ease, color 120ms ease, background-color 120ms ease",
                         ".MuiBox-root:hover > &, .MuiBox-root:focus-within > &": {
                           opacity: 1,
                           pointerEvents: "auto",
@@ -1193,12 +1195,14 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                         "&:hover": { bgcolor: "action.hover", color: "text.primary" },
                       }}
                     >
-                      <Add sx={{ fontSize: 18 }} />
+                      <Add sx={{ fontSize: 17 }} />
                     </IconButton>
                   </Box>
                   {expanded && (
-                    <Stack spacing={0.25} sx={{ mt: 0.25, pl: 2.75 }}>
-                      {project.rows.map((row) => renderSessionRow(row, { nested: true }))}
+                    <Stack spacing={0.18} sx={{ mt: 0.18, pl: 2.5, pr: 0 }}>
+                      {project.rows.map((row) =>
+                        renderSessionRow(row, { nested: true }),
+                      )}
                     </Stack>
                   )}
                 </Box>

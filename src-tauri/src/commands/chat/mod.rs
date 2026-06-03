@@ -118,6 +118,71 @@ fn tool_round_limit_follow_ups() -> Vec<FollowUpSuggestion> {
     ]
 }
 
+fn truncate_tool_error_for_fallback(output: &str) -> String {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return "工具返回了错误，但没有提供可展示的错误文本。".to_string();
+    }
+    let prefix = truncate_utf8_prefix(trimmed, 240).trim();
+    if prefix.len() < trimmed.len() {
+        format!("{prefix}…")
+    } else {
+        prefix.to_string()
+    }
+}
+
+fn tool_failure_no_final_answer_message(tool_results: &[(String, String, bool)]) -> String {
+    let snippets: Vec<String> = tool_results
+        .iter()
+        .filter(|(_, _, is_error)| *is_error)
+        .take(3)
+        .map(|(_, output, _)| truncate_tool_error_for_fallback(output))
+        .collect();
+
+    let mut message = String::from(
+        "### 本轮没有稳定完成\n\n\
+最近的工具调用返回了错误，而且模型没有生成可交付的最终回复。系统已停止继续自动尝试，避免在同一失败路径里反复调用工具或误写记忆。\n\n",
+    );
+
+    if !snippets.is_empty() {
+        message.push_str("**最近错误摘要**\n");
+        for (idx, snippet) in snippets.iter().enumerate() {
+            message.push_str(&format!("{}. `{}`\n", idx + 1, snippet.replace('`', "'")));
+        }
+        message.push('\n');
+    }
+
+    message.push_str(
+        "**建议下一步**\n\
+1. 展开上方错误工具，确认具体 stderr / 参数。\n\
+2. 让我按“单个最小命令 → 验证 → 再写入”的方式继续。\n\
+3. 如果当前环境或路径有特殊约束，先补充约束再继续。\n",
+    );
+    message
+}
+
+fn should_update_memory_after_turn(final_reply: &str, had_tool_errors: bool) -> bool {
+    let trimmed = final_reply.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if had_tool_errors {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    ![
+        "已达到工具调用上限",
+        "本轮没有稳定完成",
+        "没有生成可交付的最终回复",
+        "exceeded maximum tool rounds",
+        "autopilot stopped",
+        "[cancelled",
+        "cancelled by user",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 /// LLM + stream state needed for the `Agent` tool to run an isolated sub-session (same API key as main chat).
 #[derive(Clone)]
 pub(crate) struct AgentLlmRuntime {
@@ -2921,20 +2986,10 @@ pub async fn send_message(
                         "done",
                         Some("已提炼即将被压缩的上下文".to_string()),
                     );
-                    // Context compression is a semantic trigger: archive session summary now.
-                    let project_root_for_compact = resolve_session_project_root(&project_path);
-                    if let Ok(cfg) =
-                        crate::domain::memory::load_resolved_config(&project_root_for_compact).await
-                    {
-                        let lt_path = cfg.long_term_path(&project_root_for_compact);
-                        crate::commands::chat::turn::archive_on_compact(
-                            &app,
-                            &session_id,
-                            &lt_path,
-                            &compact_state,
-                        )
-                        .await;
-                    }
+                    let _ = compact_state;
+                    // Pre-compact memory is only a scratchpad used to avoid losing
+                    // context during this active turn. Do not promote/archive it here:
+                    // failed or tool-limit turns must not silently update long-term memory.
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(
@@ -4162,16 +4217,20 @@ pub async fn send_message(
                 Some(&round_id_clone),
             )
             .await;
-            spawn_memory_sync(MemorySyncRequest {
-                app: &app_clone,
-                sessions: &sessions_clone,
-                repo: &repo_clone,
-                session_id: &session_id_clone,
-                client: client.as_ref(),
-                user_message: &request_text_for_constraints,
-                assistant_reply: &final_reply_for_follow_up,
-                allow_long_term_promotion: true,
-            });
+            let should_update_memory =
+                should_update_memory_after_turn(&final_reply_for_follow_up, false);
+            if should_update_memory {
+                spawn_memory_sync(MemorySyncRequest {
+                    app: &app_clone,
+                    sessions: &sessions_clone,
+                    repo: &repo_clone,
+                    session_id: &session_id_clone,
+                    client: client.as_ref(),
+                    user_message: &request_text_for_constraints,
+                    assistant_reply: &final_reply_for_follow_up,
+                    allow_long_term_promotion: true,
+                });
+            }
             emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
                 app: &app_clone,
                 session_id: &session_id_clone,
@@ -4186,7 +4245,9 @@ pub async fn send_message(
                 repo: repo_clone.clone(),
             })
             .await;
-            spawn_chat_indexing(&app_clone, &sessions_clone, &repo_clone, &session_id_clone);
+            if should_update_memory {
+                spawn_chat_indexing(&app_clone, &sessions_clone, &repo_clone, &session_id_clone);
+            }
             return;
         }
 
@@ -4395,16 +4456,6 @@ pub async fn send_message(
                         &llm_config_for_spawn.provider.to_string(),
                     )
                     .await;
-                    spawn_memory_sync(MemorySyncRequest {
-                        app: &app_clone,
-                        sessions: &sessions_clone,
-                        repo: &repo_clone,
-                        session_id: &session_id_clone,
-                        client: client.as_ref(),
-                        user_message: &request_text_for_constraints,
-                        assistant_reply: &stop_text,
-                        allow_long_term_promotion: true,
-                    });
                     emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
                         app: &app_clone,
                         session_id: &session_id_clone,
@@ -4499,28 +4550,11 @@ pub async fn send_message(
                                         "done",
                                         Some("已提炼即将被压缩的上下文".to_string()),
                                     );
-                                    // Compression is a semantic trigger for session summary.
-                                    //
-                                    // Important: this block already holds the sessions write lock.
-                                    // Do not re-acquire `sessions_clone.read()` here; tokio RwLock is
-                                    // not re-entrant and that self-read deadlocks the tool loop right
-                                    // after the UI shows “压缩前摘要” as the last successful step.
-                                    let project_root_for_compact =
-                                        resolve_session_project_root(&runtime.session.project_path);
-                                    if let Ok(cfg) = crate::domain::memory::load_resolved_config(
-                                        &project_root_for_compact,
-                                    )
-                                    .await
-                                    {
-                                        let lt_path = cfg.long_term_path(&project_root_for_compact);
-                                        crate::commands::chat::turn::archive_on_compact(
-                                            &app_clone,
-                                            &session_id_clone,
-                                            &lt_path,
-                                            &compact_state,
-                                        )
-                                        .await;
-                                    }
+                                    let _ = compact_state;
+                                    // This block already holds the sessions write lock. Keep
+                                    // pre-compact memory as scratchpad only; archiving/promoting
+                                    // while the tool loop is still active polluted long-term memory
+                                    // when a later tool-limit or failure stopped the turn.
                                 }
                                 Err(_) => {
                                     tracing::warn!(
@@ -4683,8 +4717,6 @@ pub async fn send_message(
                 };
             merge_turn_token_usage(&mut turn_token_usage, usage_next);
 
-            final_reply_for_follow_up = next_text.clone();
-
             let next_tool_names: Vec<String> =
                 next_tools.iter().map(|(_, name, _)| name.clone()).collect();
             if let Some(block) = constraint_harness.tool_gate(
@@ -4786,6 +4818,16 @@ pub async fn send_message(
                 }
             }
 
+            let synthesized_failure_reply = next_tools.is_empty()
+                && next_text.trim().is_empty()
+                && tool_results.iter().any(|(_, _, is_error)| *is_error);
+            let assistant_text_for_turn = if synthesized_failure_reply {
+                tool_failure_no_final_answer_message(&tool_results)
+            } else {
+                next_text.clone()
+            };
+            final_reply_for_follow_up = assistant_text_for_turn.clone();
+
             if agent_runtime.runtime_constraints_config.buffer_responses && !next_tools.is_empty() {
                 emit_buffered_assistant_text(&app_clone, &message_id_clone, &next_text);
                 emit_runtime_constraint_metadata(
@@ -4853,7 +4895,7 @@ pub async fn send_message(
                         id: &next_assistant_id,
                         session_id: &session_id_clone,
                         role: "assistant",
-                        content: &next_text,
+                        content: &assistant_text_for_turn,
                         tool_calls: next_tc_json.as_deref(),
                         tool_call_id: None,
                         token_usage_json: None,
@@ -4872,9 +4914,11 @@ pub async fn send_message(
                 if let Some(runtime) = sessions.get_mut(&session_id_clone) {
                     let tc = completed_to_tool_calls(&next_tools);
                     let rc = (!next_reasoning.is_empty()).then(|| next_reasoning.clone());
-                    runtime
-                        .session
-                        .add_assistant_message_with_tools(&next_text, tc, rc);
+                    runtime.session.add_assistant_message_with_tools(
+                        &assistant_text_for_turn,
+                        tc,
+                        rc,
+                    );
                 }
             }
 
@@ -4886,7 +4930,7 @@ pub async fn send_message(
                 if let Some(action) = constraint_harness.post_response_action(
                     &crate::domain::runtime_constraints::PostResponseConstraintContext {
                         request_text: &request_text_for_constraints,
-                        assistant_text: &next_text,
+                        assistant_text: &assistant_text_for_turn,
                         pending_tool_names: &no_pending_tool_names,
                         is_subagent: false,
                     },
@@ -5071,16 +5115,23 @@ pub async fn send_message(
                     Some(&round_id_clone),
                 )
                 .await;
-                spawn_memory_sync(MemorySyncRequest {
-                    app: &app_clone,
-                    sessions: &sessions_clone,
-                    repo: &repo_clone,
-                    session_id: &session_id_clone,
-                    client: client.as_ref(),
-                    user_message: &request_text_for_constraints,
-                    assistant_reply: &final_reply_for_follow_up,
-                    allow_long_term_promotion: true,
-                });
+                let turn_had_tool_errors = tool_results.iter().any(|(_, _, is_error)| *is_error);
+                let should_update_memory = should_update_memory_after_turn(
+                    &final_reply_for_follow_up,
+                    turn_had_tool_errors,
+                );
+                if should_update_memory {
+                    spawn_memory_sync(MemorySyncRequest {
+                        app: &app_clone,
+                        sessions: &sessions_clone,
+                        repo: &repo_clone,
+                        session_id: &session_id_clone,
+                        client: client.as_ref(),
+                        user_message: &request_text_for_constraints,
+                        assistant_reply: &final_reply_for_follow_up,
+                        allow_long_term_promotion: true,
+                    });
+                }
                 emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
                     app: &app_clone,
                     session_id: &session_id_clone,
@@ -5095,7 +5146,14 @@ pub async fn send_message(
                     repo: repo_clone.clone(),
                 })
                 .await;
-                spawn_chat_indexing(&app_clone, &sessions_clone, &repo_clone, &session_id_clone);
+                if should_update_memory {
+                    spawn_chat_indexing(
+                        &app_clone,
+                        &sessions_clone,
+                        &repo_clone,
+                        &session_id_clone,
+                    );
+                }
                 return;
             }
         }
@@ -5165,16 +5223,6 @@ pub async fn send_message(
         )
         .await;
         let final_reply_with_stop = final_reply_for_follow_up.clone() + &stop_text;
-        spawn_memory_sync(MemorySyncRequest {
-            app: &app_clone,
-            sessions: &sessions_clone,
-            repo: &repo_clone,
-            session_id: &session_id_clone,
-            client: client.as_ref(),
-            user_message: &request_text_for_constraints,
-            assistant_reply: &final_reply_with_stop,
-            allow_long_term_promotion: true,
-        });
         emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
             app: &app_clone,
             session_id: &session_id_clone,
@@ -5404,6 +5452,51 @@ mod tests {
             "tool-loop compaction should throttle pre-compact summary/archive emission \
             to avoid repeating 压缩前摘要 / 归档会话摘要 on every tool round"
         );
+        assert!(
+            !block.contains("archive_on_compact") && !block.contains("long_term_path"),
+            "pre-compact scratchpad updates must not archive/promote long-term memory \
+            while the active tool loop may still fail"
+        );
+    }
+
+    #[test]
+    fn empty_final_after_tool_error_gets_visible_failure_message() {
+        let results = vec![
+            (
+                "tool-1".to_string(),
+                "Error: command failed because destination path does not exist".to_string(),
+                true,
+            ),
+            ("tool-2".to_string(), "ok".to_string(), false),
+        ];
+
+        let message = tool_failure_no_final_answer_message(&results);
+
+        assert!(message.contains("本轮没有稳定完成"));
+        assert!(message.contains("最近错误摘要"));
+        assert!(message.contains("destination path does not exist"));
+        assert!(!should_update_memory_after_turn(&message, true));
+    }
+
+    #[test]
+    fn safety_stop_replies_do_not_update_memory() {
+        assert!(!should_update_memory_after_turn("", false));
+        assert!(!should_update_memory_after_turn(
+            &tool_round_limit_message(100),
+            false
+        ));
+        assert!(!should_update_memory_after_turn(
+            "Autopilot stopped after exceeding max argumentation cycles (3/3).",
+            false,
+        ));
+        assert!(!should_update_memory_after_turn(
+            "任务完成：中间有一次命令失败但后来恢复。",
+            true,
+        ));
+        assert!(should_update_memory_after_turn(
+            "任务完成：已写入文件并通过测试。",
+            false
+        ));
     }
 
     #[test]

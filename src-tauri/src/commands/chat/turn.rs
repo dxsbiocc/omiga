@@ -554,16 +554,6 @@ pub(super) async fn sync_memory_layers_after_turn(request: MemorySyncRequest<'_>
     }
 }
 
-/// Called from the auto-compact path as a semantic trigger for session summary.
-pub(crate) async fn archive_on_compact(
-    app: &AppHandle,
-    session_id: &str,
-    lt_path: &std::path::Path,
-    state: &crate::domain::memory::working_memory::WorkingMemoryState,
-) {
-    maybe_archive_session_summary(app, session_id, lt_path, state).await;
-}
-
 /// Archive the current working memory state as a `SessionSummary` long-term entry,
 /// then update the project dossier for the active topic.
 async fn maybe_archive_session_summary(

@@ -27,7 +27,6 @@ import { alpha } from "@mui/material/styles";
 import {
   SmartToy,
   CheckCircle,
-  ErrorOutline,
   ExpandMore,
   FolderOpen,
   Send as SendIcon,
@@ -1583,21 +1582,17 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
               />
             )}
 
-            {showGroupDone && (
+            {showGroupDone && !anyError && (
               <Stack direction="row" alignItems="center" spacing={1} sx={{ pt: 0.25 }}>
-                {anyError ? (
-                  <ErrorOutline sx={{ fontSize: 14, color: "error.main" }} />
-                ) : (
-                  <CheckCircle sx={{ fontSize: 14, color: chat.doneGreen }} />
-                )}
+                <CheckCircle sx={{ fontSize: 14, color: chat.doneGreen }} />
                 <Typography
                   sx={{
                     fontSize: 12,
                     fontWeight: 600,
-                    color: anyError ? "error.main" : chat.toolIcon,
+                    color: chat.toolIcon,
                   }}
                 >
-                  {anyError ? "Failed" : "Done"}
+                  Done
                 </Typography>
               </Stack>
             )}
