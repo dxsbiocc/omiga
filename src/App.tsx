@@ -82,6 +82,8 @@ const TITLE_BAR_RIGHT_ACTIONS_RIGHT = 28;
 const TITLE_BAR_CONTROL_SIZE = 32;
 const TITLE_BAR_CONTROL_CENTER_Y = 25;
 const TITLE_BAR_TITLE_GAP = 16;
+const TITLE_BAR_CHAT_RAIL_INSET = 18;
+const TITLE_BAR_RESIZE_HANDLE_WIDTH = 6;
 
 function TitleBarStatus() {
   const isConnecting = useActivityStore((s) => s.isConnecting);
@@ -261,8 +263,18 @@ export default function App() {
     currentSessionIndex >= 0 ? sessions[currentSessionIndex + 1] : undefined;
   const nextSession =
     currentSessionIndex > 0 ? sessions[currentSessionIndex - 1] : undefined;
-  const titleBarContentLeft =
-    TITLE_BAR_LEFT_PANEL_TOGGLE_LEFT + TITLE_BAR_CONTROL_SIZE * 4 + TITLE_BAR_TITLE_GAP;
+  const titleBarButtonRailEnd =
+    TITLE_BAR_LEFT_PANEL_TOGGLE_LEFT +
+    TITLE_BAR_CONTROL_SIZE * 4 +
+    TITLE_BAR_TITLE_GAP;
+  const titleBarChatRailLeft =
+    (!leftPanelCollapsed && !showSettingsPanel
+      ? leftW + TITLE_BAR_RESIZE_HANDLE_WIDTH
+      : 0) + TITLE_BAR_CHAT_RAIL_INSET;
+  const titleBarContentLeft = Math.max(
+    titleBarButtonRailEnd,
+    titleBarChatRailLeft,
+  );
   const titleBarSessionTitle =
     currentSession && !isPlaceholderSessionTitle(currentSession.name)
       ? currentSession.name
