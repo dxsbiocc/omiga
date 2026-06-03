@@ -150,6 +150,11 @@ export function isUnsetWorkspacePath(projectPath: string | undefined): boolean {
   return p === "" || p === ".";
 }
 
+function normalizeWorkspacePathForSession(projectPath: string | undefined): string {
+  const p = (projectPath ?? "").trim();
+  return isUnsetWorkspacePath(p) ? "." : p;
+}
+
 export type RoundStatus = "running" | "partial" | "cancelled" | "completed";
 
 export interface SchedulerPlan {
@@ -370,7 +375,7 @@ interface SessionState {
   /** Sessions created with placeholder path — show “pick folder” until set */
   pendingProjectPathSessions: Set<string>;
   createSession: (name: string, projectPath: string) => Promise<void>;
-  createSessionQuick: () => Promise<void>;
+  createSessionQuick: (projectPath?: string) => Promise<void>;
   updateSessionProjectPath: (
     sessionId: string,
     projectPath: string,
@@ -559,9 +564,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  createSessionQuick: async () => {
+  createSessionQuick: async (projectPath) => {
     const { sessions, currentSession, storeMessages } = get();
+    const targetProjectPath = normalizeWorkspacePathForSession(projectPath);
+    const targetWasExplicit = projectPath !== undefined;
     const reusable = sessions.find((s) => {
+      if (
+        targetWasExplicit &&
+        normalizeWorkspacePathForSession(s.projectPath) !== targetProjectPath
+      ) {
+        return false;
+      }
       const isCur = currentSession?.id === s.id;
       return shouldShowNewSessionPlaceholder(s, {
         isCurrentSession: isCur,
@@ -572,7 +585,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       await get().setCurrentSession(reusable.id);
       return;
     }
-    await get().createSession(UNUSED_SESSION_LABEL, ".");
+    await get().createSession(UNUSED_SESSION_LABEL, targetProjectPath);
   },
 
   updateSessionProjectPath: async (sessionId, projectPath) => {

@@ -26,8 +26,8 @@ import {
   Edit,
   Add,
   Search,
-  BusinessCenterOutlined,
   FolderOutlined,
+  FolderOpenOutlined,
   UnfoldMore,
   Settings as SettingsIcon,
   Language as LanguageIcon,
@@ -43,12 +43,14 @@ import {
   ChevronRight,
   FileDownloadOutlined,
 } from "@mui/icons-material";
+import { Icon } from "@iconify/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { OMIGA_GITHUB_RELEASES_URL } from "../../constants/appLinks";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   useSessionStore,
   UNUSED_SESSION_LABEL,
+  isUnsetWorkspacePath,
   shouldShowNewSessionPlaceholder,
   type Session,
 } from "../../state/sessionStore";
@@ -73,16 +75,46 @@ interface SessionListProps {
 const HELP_CENTER_URL = "https://support.anthropic.com/";
 const LEARN_MORE_URL = "https://www.anthropic.com/claude";
 const LANGUAGE_SUBMENU_BRIDGE_MS = 90;
+const UNSET_PROJECT_GROUP_KEY = "__omiga_unset_project__";
+
+function normalizeSidebarProjectPath(raw: string | undefined): string {
+  const trimmed = (raw ?? "").trim();
+  if (isUnsetWorkspacePath(trimmed)) return ".";
+  return trimmed.replace(/\\/g, "/").replace(/\/+$/u, "") || ".";
+}
+
+function projectKeyForSession(session: {
+  workingDirectory?: string;
+  projectPath?: string;
+}): string {
+  const normalized = normalizeSidebarProjectPath(
+    session.projectPath ?? session.workingDirectory,
+  );
+  return isUnsetWorkspacePath(normalized) ? UNSET_PROJECT_GROUP_KEY : normalized;
+}
+
+function projectDisplayName(projectPath: string, noProjectLabel: string): string {
+  const normalized = normalizeSidebarProjectPath(projectPath);
+  if (isUnsetWorkspacePath(normalized)) return noProjectLabel;
+  const last = normalized.split("/").filter(Boolean).pop();
+  return last ?? normalized;
+}
+
+function updatedAtMs(value: string | undefined): number {
+  const ms = Date.parse(value ?? "");
+  return Number.isFinite(ms) ? ms : 0;
+}
 
 function sessionProjectLabel(session: {
   workingDirectory?: string;
   projectPath?: string;
 }): string {
-  const raw = (session.workingDirectory ?? session.projectPath ?? "").trim();
-  if (!raw || raw === ".") return "";
-  const normalized = raw.replace(/\\/g, "/").replace(/\/+$/u, "");
+  const normalized = normalizeSidebarProjectPath(
+    session.projectPath ?? session.workingDirectory,
+  );
+  if (isUnsetWorkspacePath(normalized)) return "";
   const last = normalized.split("/").filter(Boolean).pop();
-  return last ?? raw;
+  return last ?? normalized;
 }
 
 interface SessionSearchSummary {
@@ -98,6 +130,15 @@ interface SessionSearchRow {
   session: Session;
   isPlaceholder: boolean;
   matchSnippet?: string | null;
+}
+
+interface ProjectSessionGroup {
+  key: string;
+  projectPath: string;
+  label: string;
+  latestUpdatedAt: string;
+  rows: SessionSearchRow[];
+  isCurrent: boolean;
 }
 
 export function SessionList({ onSelectSession }: SessionListProps) {
@@ -207,6 +248,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const languageSubmenuLeaveTimerRef = useRef<ReturnType<
     typeof setTimeout
   > | null>(null);
+  const [expandedProjectKeys, setExpandedProjectKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const projectKeysInitializedRef = useRef(false);
 
   // Load sessions on mount
   useEffect(() => {
@@ -460,11 +505,29 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const handleCreateClick = async () => {
     setSelectError(null);
     try {
-      await createSessionQuick();
+      const currentProjectPath =
+        currentSession && !isUnsetWorkspacePath(currentSession.projectPath)
+          ? currentSession.projectPath
+          : undefined;
+      await createSessionQuick(currentProjectPath);
       onSelectSession?.();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[SessionList] createSessionQuick failed", e);
+      setSelectError(msg);
+    }
+  };
+
+  const handleCreateProjectSession = async (projectPath: string) => {
+    setSelectError(null);
+    try {
+      await createSessionQuick(
+        isUnsetWorkspacePath(projectPath) ? undefined : projectPath,
+      );
+      onSelectSession?.();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[SessionList] create project session failed", e);
       setSelectError(msg);
     }
   };
@@ -516,6 +579,72 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     for (const row of sessionRows) rowsById.set(row.session.id, row);
     return rowsById;
   }, [sessionRows]);
+
+  const noProjectLabel = t("noProject");
+  const projectGroups = useMemo<ProjectSessionGroup[]>(() => {
+    const groups = new Map<string, ProjectSessionGroup>();
+    const currentId = currentSession?.id ?? null;
+
+    for (const row of sessionRows) {
+      const projectPath = normalizeSidebarProjectPath(
+        row.session.projectPath ?? row.session.workingDirectory,
+      );
+      const key = projectKeyForSession(row.session);
+      const existing = groups.get(key);
+      const latestUpdatedAt =
+        existing && updatedAtMs(existing.latestUpdatedAt) > updatedAtMs(row.session.updatedAt)
+          ? existing.latestUpdatedAt
+          : row.session.updatedAt;
+      const group =
+        existing ??
+        ({
+          key,
+          projectPath,
+          label: projectDisplayName(projectPath, noProjectLabel),
+          latestUpdatedAt: row.session.updatedAt,
+          rows: [],
+          isCurrent: false,
+        } satisfies ProjectSessionGroup);
+
+      group.latestUpdatedAt = latestUpdatedAt;
+      group.rows.push(row);
+      group.isCurrent = group.isCurrent || row.session.id === currentId;
+      groups.set(key, group);
+    }
+
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        rows: [...group.rows].sort(
+          (a, b) =>
+            updatedAtMs(b.session.updatedAt) - updatedAtMs(a.session.updatedAt),
+        ),
+      }))
+      .sort((a, b) => {
+        if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+        return updatedAtMs(b.latestUpdatedAt) - updatedAtMs(a.latestUpdatedAt);
+      });
+  }, [currentSession?.id, noProjectLabel, sessionRows]);
+
+  const currentProjectKey = currentSession
+    ? projectKeyForSession(currentSession)
+    : null;
+
+  useEffect(() => {
+    if (projectKeysInitializedRef.current || projectGroups.length === 0) return;
+    projectKeysInitializedRef.current = true;
+    setExpandedProjectKeys(new Set(projectGroups.map((group) => group.key)));
+  }, [projectGroups]);
+
+  useEffect(() => {
+    if (!currentProjectKey) return;
+    setExpandedProjectKeys((previous) => {
+      if (previous.has(currentProjectKey)) return previous;
+      const next = new Set(previous);
+      next.add(currentProjectKey);
+      return next;
+    });
+  }, [currentProjectKey]);
 
   const filteredSessions = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -658,6 +787,119 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     [theme.palette.text.primary],
   );
 
+  const renderSessionRow = (
+    { session, isPlaceholder }: SessionSearchRow,
+    opts?: { nested?: boolean },
+  ) => (
+    <Box
+      key={session.id}
+      onClick={() => handleSelectSession(session.id)}
+      onMouseEnter={() => handleSessionMouseEnter(session.id)}
+      onMouseLeave={handleSessionMouseLeave}
+      onMouseDown={() => handleSessionMouseDown(session.id)}
+      sx={{
+        px: opts?.nested ? 1.25 : 1.5,
+        py: 0.9,
+        borderRadius: 1.75,
+        cursor: "pointer",
+        position: "relative",
+        overflow: "hidden",
+        minHeight: 38,
+        bgcolor:
+          currentSession?.id === session.id
+            ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.14 : 0.1)
+            : "transparent",
+        border: "1px solid",
+        borderColor:
+          currentSession?.id === session.id
+            ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.25 : 0.18)
+            : "transparent",
+        transition: "background-color 120ms ease, border-color 120ms ease",
+        "&:hover": {
+          bgcolor:
+            currentSession?.id === session.id
+              ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.2 : 0.14)
+              : "action.hover",
+        },
+        "@media (prefers-reduced-motion: no-preference)": {
+          "&:active::after": {
+            content: '""',
+            position: "absolute",
+            inset: 0,
+            borderRadius: "inherit",
+            background: alpha(theme.palette.primary.main, 0.18),
+            "@keyframes omigaBloom": {
+              from: { opacity: 1, transform: "scale(0.6)" },
+              to: { opacity: 0, transform: "scale(1.4)" },
+            },
+            animation: "omigaBloom 320ms cubic-bezier(0.2, 0, 0.6, 1) forwards",
+            pointerEvents: "none",
+          },
+        },
+      }}
+    >
+      <Stack direction="row" alignItems="center" spacing={0.5}>
+        {isSessionRunning(session.id) && (
+          <Box
+            aria-label="running"
+            sx={{
+              flexShrink: 0,
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              bgcolor: "primary.main",
+              boxShadow: (t) =>
+                `0 0 6px 1px ${alpha(t.palette.primary.main, 0.55)}`,
+              "@media (prefers-reduced-motion: no-preference)": {
+                "@keyframes omigaRunPulse": {
+                  "0%, 100%": { opacity: 1, transform: "scale(1)" },
+                  "50%": { opacity: 0.45, transform: "scale(0.65)" },
+                },
+                animation: "omigaRunPulse 1.2s ease-in-out infinite",
+              },
+            }}
+          />
+        )}
+        <Typography
+          variant="body2"
+          fontWeight={500}
+          noWrap
+          sx={{
+            flex: 1,
+            minWidth: 0,
+            ...(isPlaceholder
+              ? {
+                  color: "text.secondary",
+                  fontStyle: "italic",
+                  fontWeight: 400,
+                }
+              : { color: "text.primary" }),
+          }}
+        >
+          {isPlaceholder ? UNUSED_SESSION_LABEL : session.name}
+        </Typography>
+        <IconButton
+          size="small"
+          aria-label={t("sessionActions")}
+          onClick={(e) => {
+            e.stopPropagation();
+            handleMenuOpen(e, session.id);
+          }}
+          sx={{
+            p: 0.25,
+            flexShrink: 0,
+            color: "text.secondary",
+            "&:hover": {
+              bgcolor: "action.hover",
+            },
+          }}
+        >
+          <MoreVert fontSize="small" />
+        </IconButton>
+      </Stack>
+    </Box>
+  );
+
   // Only block the whole panel on the initial list fetch — not when switching sessions
   if (isLoading && sessions.length === 0) {
     return (
@@ -696,52 +938,39 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         </Alert>
       )}
 
-      {/* App logo */}
-      <Box sx={{ px: 2, pt: 2, pb: 1.25, display: "flex", alignItems: "center", gap: 1.25 }}>
-        <OmigaLogo size={28} />
-        <Typography variant="h6" fontWeight={750} sx={{ letterSpacing: 0, color: "text.primary" }}>
-          Omiga
-        </Typography>
-      </Box>
-
-      {/* Top nav: icon + label (reference layout) */}
-      <Stack spacing={0} sx={{ p: 1.5, pb: 1 }}>
+      {/* Top nav: compact utility actions only. Project navigation lives below. */}
+      <Stack spacing={0} sx={{ px: 1.5, pt: 1.5, pb: 1 }}>
         <Box
           data-testid="new-session-btn"
           sx={navRowSx}
           onClick={() => {
-            handleCreateClick();
+            void handleCreateClick();
           }}
         >
-          <Add sx={{ fontSize: 20, color: "text.secondary" }} />
+          <Box
+            component="span"
+            sx={{
+              width: 20,
+              height: 20,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "text.secondary",
+              flexShrink: 0,
+            }}
+          >
+            <Icon icon="codicon:new-session" width={20} height={20} />
+          </Box>
           <Typography sx={navTextSx}>{t("newSession")}</Typography>
         </Box>
-        <Box
-          sx={navRowSx}
-          onClick={handleOpenSearchDialog}
-        >
+        <Box sx={navRowSx} onClick={handleOpenSearchDialog}>
           <Search sx={{ fontSize: 20, color: "text.secondary" }} />
           <Typography sx={navTextSx}>{t("search")}</Typography>
         </Box>
-        <Box
-          sx={navRowSx}
-          onClick={() => {
-            window.dispatchEvent(
-              new CustomEvent("openSettings", { detail: { tab: "plugins" } }),
-            );
-          }}
-        >
-          <BusinessCenterOutlined sx={{ fontSize: 20, color: "text.secondary" }} />
-          <Typography sx={navTextSx}>{t("customize")}</Typography>
-        </Box>
-        <Box sx={navRowSx} onClick={() => {}}>
-          <FolderOutlined sx={{ fontSize: 20, color: "text.secondary" }} />
-          <Typography sx={navTextSx}>{t("projects")}</Typography>
-        </Box>
       </Stack>
 
-      {/* Recents */}
-      <Box sx={{ px: 1.5, pt: 0.5, pb: 0.75 }}>
+      {/* Projectized sessions: one project folder can contain many sessions that share project memory. */}
+      <Box sx={{ px: 1.5, pt: 0.75, pb: 0.75 }}>
         <Typography
           variant="caption"
           sx={{
@@ -749,17 +978,16 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             px: 0.5,
             color: "text.secondary",
             fontSize: 12,
-            fontWeight: 500,
+            fontWeight: 650,
           }}
         >
-          {t("recents")}
+          {t("projectsSection")}
         </Typography>
       </Box>
 
-      {/* Session list */}
       <Box data-testid="session-list" sx={{ flex: 1, overflow: "auto", px: 1, pb: 1, minHeight: 0 }}>
-        <Stack spacing={0.5}>
-          {sessionRows.length === 0 ? (
+        <Stack spacing={0.75}>
+          {projectGroups.length === 0 ? (
             <Box
               sx={{
                 p: 3,
@@ -770,118 +998,112 @@ export function SessionList({ onSelectSession }: SessionListProps) {
               <Typography variant="body2">{t("noSessions")}</Typography>
             </Box>
           ) : (
-            sessionRows.map(({ session, isPlaceholder }) => (
-              <Box
-                key={session.id}
-                onClick={() => handleSelectSession(session.id)}
-                onMouseEnter={() => handleSessionMouseEnter(session.id)}
-                onMouseLeave={handleSessionMouseLeave}
-                onMouseDown={() => handleSessionMouseDown(session.id)}
-                sx={{
-                  px: 1.25,
-                  py: 1,
-                  borderRadius: 1.5,
-                  cursor: "pointer",
-                  position: "relative",
-                  overflow: "hidden",
-                  bgcolor:
-                    currentSession?.id === session.id
-                      ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.14 : 0.1)
-                      : "transparent",
-                  border: "1px solid",
-                  borderColor:
-                    currentSession?.id === session.id
-                      ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.25 : 0.18)
-                      : "transparent",
-                  transition: "background-color 120ms ease, border-color 120ms ease",
-                  "&:hover": {
-                    bgcolor:
-                      currentSession?.id === session.id
-                        ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.2 : 0.14)
-                        : "action.hover",
-                  },
-                  // Radial bloom on click — expands from press point outward.
-                  // Uses a pseudo-element so it never affects layout.
-                  // prefers-reduced-motion: animation is suppressed entirely.
-                  "@media (prefers-reduced-motion: no-preference)": {
-                    "&:active::after": {
-                      content: '""',
-                      position: "absolute",
-                      inset: 0,
-                      borderRadius: "inherit",
-                      background: alpha(theme.palette.primary.main, 0.18),
-                      "@keyframes omigaBloom": {
-                        from: { opacity: 1, transform: "scale(0.6)" },
-                        to:   { opacity: 0, transform: "scale(1.4)" },
-                      },
-                      animation: "omigaBloom 320ms cubic-bezier(0.2, 0, 0.6, 1) forwards",
-                      pointerEvents: "none",
-                    },
-                  },
-                }}
-              >
-                <Stack direction="row" alignItems="center" spacing={0.5}>
-                  {/* Running indicator — pulsing dot + left glow strip */}
-                  {isSessionRunning(session.id) && (
-                    <Box
-                      aria-label="running"
-                      sx={{
-                        flexShrink: 0,
-                        width: 7,
-                        height: 7,
-                        borderRadius: "50%",
-                        bgcolor: "primary.main",
-                        boxShadow: (t) =>
-                          `0 0 6px 1px ${alpha(t.palette.primary.main, 0.55)}`,
-                        "@media (prefers-reduced-motion: no-preference)": {
-                          "@keyframes omigaRunPulse": {
-                            "0%, 100%": { opacity: 1, transform: "scale(1)" },
-                            "50%":       { opacity: 0.45, transform: "scale(0.65)" },
-                          },
-                          animation: "omigaRunPulse 1.2s ease-in-out infinite",
-                        },
-                      }}
-                    />
-                  )}
-                  <Typography
-                    variant="body2"
-                    fontWeight={500}
-                    noWrap
-                    sx={{
-                      flex: 1,
-                      minWidth: 0,
-                      ...(isPlaceholder
-                        ? {
-                            color: "text.secondary",
-                            fontStyle: "italic",
-                            fontWeight: 400,
-                          }
-                        : { color: "text.primary" }),
+            projectGroups.map((project) => {
+              const expanded = expandedProjectKeys.has(project.key);
+              return (
+                <Box key={project.key} data-testid="project-session-group">
+                  <Box
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      setExpandedProjectKeys((previous) => {
+                        const next = new Set(previous);
+                        if (next.has(project.key)) next.delete(project.key);
+                        else next.add(project.key);
+                        return next;
+                      });
                     }}
-                  >
-                    {isPlaceholder ? UNUSED_SESSION_LABEL : session.name}
-                  </Typography>
-                  <IconButton
-                    size="small"
-                    aria-label={t("sessionActions")}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleMenuOpen(e, session.id);
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setExpandedProjectKeys((previous) => {
+                          const next = new Set(previous);
+                          if (next.has(project.key)) next.delete(project.key);
+                          else next.add(project.key);
+                          return next;
+                        });
+                      }
                     }}
                     sx={{
-                      p: 0.25,
-                      flexShrink: 0,
-                      color: "text.secondary",
-                      "&:hover": {
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 0.9,
+                      px: 1.25,
+                      py: 0.8,
+                      borderRadius: 1.75,
+                      cursor: "pointer",
+                      color: "text.primary",
+                      bgcolor: project.isCurrent
+                        ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.1 : 0.06)
+                        : "transparent",
+                      outline: "none",
+                      "&:hover, &:focus-visible": {
                         bgcolor: "action.hover",
                       },
                     }}
                   >
-                    <MoreVert fontSize="small" />
-                  </IconButton>
-                </Stack>
-              </Box>
-            ))
+                    {expanded ? (
+                      <FolderOpenOutlined
+                        sx={{
+                          fontSize: 20,
+                          color: project.isCurrent ? "primary.main" : "text.secondary",
+                          flexShrink: 0,
+                        }}
+                      />
+                    ) : (
+                      <FolderOutlined
+                        sx={{
+                          fontSize: 20,
+                          color: project.isCurrent ? "primary.main" : "text.secondary",
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
+                    <Typography
+                      variant="body2"
+                      noWrap
+                      sx={{
+                        flex: 1,
+                        minWidth: 0,
+                        color: "text.primary",
+                        fontWeight: project.isCurrent ? 700 : 560,
+                        lineHeight: 1.25,
+                      }}
+                    >
+                      {project.label}
+                    </Typography>
+                    <IconButton
+                      size="small"
+                      aria-label={t("newProjectSession")}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleCreateProjectSession(project.projectPath);
+                      }}
+                      sx={{
+                        width: 28,
+                        height: 28,
+                        opacity: 0,
+                        pointerEvents: "none",
+                        color: "text.secondary",
+                        transition: "opacity 120ms ease, color 120ms ease, background-color 120ms ease",
+                        ".MuiBox-root:hover > &, .MuiBox-root:focus-within > &": {
+                          opacity: 1,
+                          pointerEvents: "auto",
+                        },
+                        "&:hover": { bgcolor: "action.hover", color: "text.primary" },
+                      }}
+                    >
+                      <Add sx={{ fontSize: 18 }} />
+                    </IconButton>
+                  </Box>
+                  {expanded && (
+                    <Stack spacing={0.25} sx={{ mt: 0.25, pl: 2.75 }}>
+                      {project.rows.map((row) => renderSessionRow(row, { nested: true }))}
+                    </Stack>
+                  )}
+                </Box>
+              );
+            })
           )}
         </Stack>
       </Box>
