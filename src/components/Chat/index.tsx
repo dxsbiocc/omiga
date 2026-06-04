@@ -506,6 +506,33 @@ function renderItemHasVisibleContent(item: RenderMsgItem): boolean {
   });
 }
 
+function latestTurnHasExecutionActivity(
+  messages: readonly Message[],
+  latestUserMessageId: string | null,
+): boolean {
+  if (!latestUserMessageId) return false;
+  let afterLatestUser = false;
+  for (const message of messages) {
+    if (message.role === "user") {
+      afterLatestUser = message.id === latestUserMessageId;
+      continue;
+    }
+    if (!afterLatestUser) continue;
+    if (message.role === "tool" && (message.toolCall || message.content.trim())) {
+      return true;
+    }
+    if (
+      message.role === "assistant" &&
+      (message.intermediate ||
+        message.prefaceBeforeTools?.trim() ||
+        (message.toolCallsList && message.toolCallsList.length > 0))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** One item in the main-session FIFO queue while a previous turn is still streaming. */
 interface QueuedMainSend {
   id: string;
@@ -4132,6 +4159,10 @@ export function Chat({ sessionId }: ChatProps) {
     }
     return foldId;
   }, [latestUserMessageId, messageRenderItems]);
+  const latestTurnHasLiveExecutionActivity = useMemo(
+    () => latestTurnHasExecutionActivity(messages, latestUserMessageId),
+    [latestUserMessageId, messages],
+  );
   useEffect(() => {
     activeReactFoldIdRef.current = activeReactFoldId;
   }, [activeReactFoldId]);
@@ -4451,6 +4482,7 @@ export function Chat({ sessionId }: ChatProps) {
     !isSwitchingSession &&
     !pendingAskUser &&
     !awaitingResumeAfterCancel &&
+    !latestTurnHasLiveExecutionActivity &&
     !activeReactFoldId &&
     !currentResponseHasVisibleText &&
     !shouldRenderLiveTraceInFold &&
