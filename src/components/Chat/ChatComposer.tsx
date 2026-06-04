@@ -158,8 +158,7 @@ const ENV_SUBMENU_PARENT_LEAVE_MS = 200;
 export const COMPOSER_PROMPT_OVERLAY_POSITION = "absolute";
 export const COMPOSER_PROMPT_OVERLAY_BOTTOM = "calc(100% + 8px)";
 export const COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT = "min(48vh, 360px)";
-export const COMPOSER_PROMPT_OVERLAY_WIDTH =
-  "min(520px, calc(100vw - 48px))";
+export const COMPOSER_PROMPT_OVERLAY_WIDTH = "100%";
 export const COMPOSER_PROMPT_OVERLAY_Z_INDEX = 24;
 export const COMPOSER_INPUT_JOINED_Z_INDEX = 1;
 export const COMPOSER_PROMPT_JOINED_BORDER_RADIUS = "12px";
@@ -2384,11 +2383,8 @@ export const ChatComposer = memo(function ChatComposer({
             aria-live="polite"
             sx={{
               position: COMPOSER_PROMPT_OVERLAY_POSITION,
-              left: askUserBlocksInput ? 0 : "auto",
-              right: 0,
-              width: askUserBlocksInput
-                ? "100%"
-                : COMPOSER_PROMPT_OVERLAY_WIDTH,
+              left: 0,
+              width: COMPOSER_PROMPT_OVERLAY_WIDTH,
               maxWidth: "100%",
               bottom: COMPOSER_PROMPT_OVERLAY_BOTTOM,
               zIndex: COMPOSER_PROMPT_OVERLAY_Z_INDEX,

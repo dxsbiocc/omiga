@@ -19,9 +19,7 @@ describe("ChatComposer prompt overlay layout", () => {
     expect(COMPOSER_PROMPT_OVERLAY_POSITION).toBe("absolute");
     expect(COMPOSER_PROMPT_OVERLAY_BOTTOM).toBe("calc(100% + 8px)");
     expect(COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT).toBe("min(48vh, 360px)");
-    expect(COMPOSER_PROMPT_OVERLAY_WIDTH).toBe(
-      "min(520px, calc(100vw - 48px))",
-    );
+    expect(COMPOSER_PROMPT_OVERLAY_WIDTH).toBe("100%");
     expect(COMPOSER_PROMPT_OVERLAY_Z_INDEX).toBeGreaterThan(0);
     expect(COMPOSER_PROMPT_OVERLAY_Z_INDEX).toBeGreaterThan(
       COMPOSER_INPUT_JOINED_Z_INDEX,
