@@ -210,6 +210,93 @@ function browserOperatorPanelTitle(
   return toolName;
 }
 
+function isBashToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return (
+    toolName === "bash" ||
+    normalized.includes("bash") ||
+    normalized.includes("shell")
+  );
+}
+
+function objectKeyCount(value: Record<string, unknown> | null): number {
+  return value ? Object.keys(value).length : 0;
+}
+
+function stringField(
+  value: Record<string, unknown> | null,
+  keys: string[],
+): string | undefined {
+  if (!value) return undefined;
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate !== "string") continue;
+    const trimmed = candidate.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+function fileMutationInputSummary(input: string | undefined): string {
+  const parsed = parseToolInput(input);
+  if (!parsed) return input?.trim() ?? "";
+  if (objectKeyCount(parsed) === 0) return "";
+
+  const path = stringField(parsed, ["path", "file_path", "filepath"]);
+  const content = stringField(parsed, ["content", "text", "new_string"]);
+  const oldString = stringField(parsed, ["old_string"]);
+  const summary: string[] = [];
+
+  if (path) summary.push(`path: ${path}`);
+  if (oldString || content) {
+    if (oldString) summary.push(`replace: ${oldString.length} chars`);
+    if (content) summary.push(`content: ${content.length} chars`);
+  }
+
+  if (summary.length > 0) return summary.join("\n");
+  return JSON.stringify(parsed, null, 2);
+}
+
+export function toolInputDisplayText(
+  toolName: string,
+  input: string | undefined,
+): string {
+  const raw = input?.trim() ?? "";
+  if (!raw) return "";
+
+  const parsed = parseToolInput(input);
+  if (parsed && objectKeyCount(parsed) === 0) return "";
+
+  if (isComputerUseTool(toolName)) return computerUseInputSummary(toolName, input);
+  if (isBrowserOperatorTool(toolName))
+    return browserOperatorInputSummary(toolName, input);
+
+  if (isBashToolName(toolName)) {
+    return stringField(parsed, ["command", "cmd", "script"]) ?? raw;
+  }
+
+  const normalized = toolName.toLowerCase();
+  if (
+    normalized.includes("file_write") ||
+    normalized.includes("filewrite") ||
+    normalized.includes("file_edit") ||
+    normalized.includes("fileedit") ||
+    normalized.includes("write")
+  ) {
+    return fileMutationInputSummary(input);
+  }
+
+  if (parsed) return JSON.stringify(parsed, null, 2);
+  return raw;
+}
+
+function toolInputSectionLabel(toolName: string): string {
+  if (isBashToolName(toolName)) return "Command";
+  if (isComputerUseTool(toolName)) return "Computer Use request";
+  if (isBrowserOperatorTool(toolName)) return "Browser Operator request";
+  return "Input";
+}
+
 interface ExecutionInsightPanelProps {
   insight: ExecutionInsight;
   chat: ChatTokens;
@@ -321,22 +408,10 @@ export const ToolCallCard = memo(function ToolCallCard({
   const executionInsight = summarizeExecutionInsight(toolCall.name, displayOutput);
   const isComputerTool = isComputerUseTool(toolCall.name);
   const isBrowserTool = isBrowserOperatorTool(toolCall.name);
-  const displayInput = isComputerTool
-    ? computerUseInputSummary(toolCall.name, toolCall.input)
-    : isBrowserTool
-      ? browserOperatorInputSummary(toolCall.name, toolCall.input)
-    : toolCall.input;
+  const displayInput = toolInputDisplayText(toolCall.name, toolCall.input);
   const hasInput = Boolean(displayInput && displayInput.trim());
   const hasOutput = Boolean(displayOutput);
-  const isBash =
-    toolCall.name === "bash" || toolCall.name.toLowerCase().includes("bash");
-  const commandSectionLabel = isBash
-    ? "Command"
-    : isComputerTool
-      ? "Computer Use request"
-      : isBrowserTool
-        ? "Browser Operator request"
-      : toolCall.name;
+  const commandSectionLabel = toolInputSectionLabel(toolCall.name);
   const panelTitle = isComputerTool
     ? computerUsePanelTitle(toolCall.name, toolCall.input)
     : isBrowserTool
@@ -517,7 +592,7 @@ export const ToolCallCard = memo(function ToolCallCard({
                         fontWeight: 400,
                       }}
                     >
-                      {isBash ? commandSectionLabel : "Input"}
+                      {commandSectionLabel}
                     </Typography>
                     <Box
                       sx={{

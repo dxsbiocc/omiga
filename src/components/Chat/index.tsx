@@ -696,6 +696,125 @@ const MD_BLOCK_RADIUS_PX = 1;
 /** Inline `code` longer than this: no fill (e.g. protein sequences) */
 const INLINE_CODE_LONG_LEN = 80;
 
+function ImmediateThinkingPlaceholder({
+  chat,
+  hint,
+}: {
+  chat: ReturnType<typeof getChatTokens>;
+  hint?: string | null;
+}) {
+  const detail = hint?.trim() || "正在分析上下文，准备执行下一步…";
+
+  return (
+    <Fade in timeout={160}>
+      <Box
+        role="status"
+        aria-live="polite"
+        data-testid="chat-thinking-placeholder"
+        sx={{
+          width: "100%",
+          minWidth: 0,
+          maxWidth: "100%",
+          px: 1.4,
+          py: 1.15,
+          borderRadius: `${BUBBLE_RADIUS_PX}px`,
+          bgcolor: alpha(chat.agentBubbleBg, 0.82),
+          border: `1px solid ${alpha(chat.accent, 0.18)}`,
+          boxShadow: `0 10px 28px ${alpha(chat.accent, 0.08)}`,
+          fontFamily: chat.font,
+        }}
+      >
+        <Stack
+          direction="row"
+          alignItems="center"
+          spacing={1.1}
+          sx={{ minWidth: 0 }}
+        >
+          <Box
+            sx={{
+              width: 24,
+              height: 24,
+              borderRadius: "999px",
+              display: "grid",
+              placeItems: "center",
+              bgcolor: alpha(chat.accent, 0.12),
+              color: chat.accent,
+              flexShrink: 0,
+            }}
+          >
+            <CircularProgress size={14} thickness={5} sx={{ color: "inherit" }} />
+          </Box>
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={0.8}
+            sx={{ minWidth: 0, flex: 1 }}
+          >
+            <Typography
+              sx={{
+                fontSize: 13,
+                fontWeight: 700,
+                color: chat.textPrimary,
+                flexShrink: 0,
+              }}
+            >
+              正在思考
+            </Typography>
+            <Box
+              component="span"
+              sx={{
+                display: "inline-flex",
+                gap: 0.35,
+                flexShrink: 0,
+                "@media (prefers-reduced-motion: no-preference)": {
+                  "@keyframes omigaThinkingDot": {
+                    "0%, 80%, 100%": {
+                      opacity: 0.28,
+                      transform: "translateY(0)",
+                    },
+                    "40%": { opacity: 1, transform: "translateY(-2px)" },
+                  },
+                },
+                "& > span": {
+                  width: 4,
+                  height: 4,
+                  borderRadius: "999px",
+                  bgcolor: chat.accent,
+                  opacity: 0.45,
+                  "@media (prefers-reduced-motion: no-preference)": {
+                    animation: "omigaThinkingDot 1.1s ease-in-out infinite",
+                  },
+                },
+                "& > span:nth-of-type(2)": {
+                  animationDelay: "120ms",
+                },
+                "& > span:nth-of-type(3)": {
+                  animationDelay: "240ms",
+                },
+              }}
+            >
+              <Box component="span" />
+              <Box component="span" />
+              <Box component="span" />
+            </Box>
+            <Typography
+              noWrap
+              sx={{
+                minWidth: 0,
+                color: chat.textMuted,
+                fontSize: 13,
+                lineHeight: 1.5,
+              }}
+            >
+              {detail}
+            </Typography>
+          </Stack>
+        </Stack>
+      </Box>
+    </Fade>
+  );
+}
+
 /**
  * Skip adding a tool row when the payload has no tool name / id and no usable input.
  * The backend sends `tool_use` twice: first with empty `arguments`, then with full JSON at block end.
@@ -4327,6 +4446,15 @@ export function Chat({ sessionId }: ChatProps) {
       waitingFirstChunk,
       activityIsStreaming,
     });
+  const showImmediateThinkingPlaceholder =
+    Boolean(sessionId) &&
+    !isSwitchingSession &&
+    !pendingAskUser &&
+    !awaitingResumeAfterCancel &&
+    !activeReactFoldId &&
+    !currentResponseHasVisibleText &&
+    !shouldRenderLiveTraceInFold &&
+    (isConnecting || waitingFirstChunk || isStreaming || activityIsStreaming);
   const showTurnSummaryCard =
     Boolean(sessionId) &&
     Boolean(stickyTurnSummary) &&
@@ -7533,25 +7661,8 @@ export function Chat({ sessionId }: ChatProps) {
               );
             })}
 
-            {isConnecting && pendingAssistantHint && (
-              <Box
-                sx={{
-                  width: "100%",
-                  minWidth: 0,
-                  maxWidth: "100%",
-                  px: 1.75,
-                  py: 1.5,
-                  borderRadius: `${BUBBLE_RADIUS_PX}px`,
-                  bgcolor: alpha(CHAT.agentBubbleBg, 0.75),
-                  border: `1px dashed ${alpha(CHAT.agentBubbleBorder, 0.9)}`,
-                  fontFamily: CHAT.font,
-                  color: "text.secondary",
-                }}
-              >
-                <Typography variant="body2" sx={{ fontSize: 14, lineHeight: 1.7 }}>
-                  {pendingAssistantHint}
-                </Typography>
-              </Box>
+            {showImmediateThinkingPlaceholder && (
+              <ImmediateThinkingPlaceholder chat={CHAT} hint={pendingAssistantHint} />
             )}
 
             {/* Streaming: visible assistant text is always a normal reply draft.

@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createTheme } from "@mui/material/styles";
 import { describe, expect, it } from "vitest";
 import { getChatTokens } from "./chatTokens";
-import { ToolCallCard } from "./ToolCallCard";
+import { ToolCallCard, toolInputDisplayText } from "./ToolCallCard";
 
 const chat = getChatTokens(createTheme());
 
@@ -34,8 +34,51 @@ describe("ToolCallCard", () => {
     expect(html).toContain("bash");
     expect(html).toContain("Command");
     expect(html).toContain("npm test");
+    expect(html).not.toContain("&quot;command&quot;");
+    expect(html).not.toContain("&quot;description&quot;");
     expect(html).toContain("all passed");
     expect(html).toContain("1.4s");
+  });
+
+  it("formats bash input as the command instead of raw JSON metadata", () => {
+    expect(
+      toolInputDisplayText(
+        "bash",
+        JSON.stringify({
+          description: "Quick check data structure",
+          command: "printf 'x' | R --slave",
+        }),
+      ),
+    ).toBe("printf 'x' | R --slave");
+  });
+
+  it("hides empty file_write arguments while keeping validation output visible", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-file"
+        messageId="tool-file"
+        content="Failed to parse tool arguments: missing field `path`"
+        timestamp={1000}
+        toolCall={{
+          name: "file_write",
+          status: "error",
+          input: "{}",
+          output: "Failed to parse tool arguments: missing field `path`",
+          completedAt: 1100,
+        }}
+        previousAssistantHasText
+        nestedOpen
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(toolInputDisplayText("file_write", "{}")).toBe("");
+    expect(html).not.toContain("{}");
+    expect(html).not.toContain("Input");
+    expect(html).toContain("missing field");
   });
 
   it("does not invent thought summaries for running tool placeholders", () => {
