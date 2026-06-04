@@ -111,6 +111,8 @@ import {
   RSYNC_INSTALL_HELP_URL,
   RSYNC_SSH_WARN_STORAGE_KEY,
 } from "../../lib/rsyncSsh";
+import { extractErrorMessage } from "../../utils/errorMessage";
+import { getCurrentWindowIfTauri } from "../../utils/tauriRuntime";
 import {
   getLocalStorageItem,
   setLocalStorageItem,
@@ -118,6 +120,7 @@ import {
 import {
   buildComposerMentionChildPath,
   filterComposerMentionRows,
+  formatComposerPathChipLabel,
   joinWorkspaceMentionDirectory,
   normalizeComposerMentionPath,
   parentComposerMentionDirectory,
@@ -167,6 +170,45 @@ export const COMPOSER_PERMISSION_MODE_MENU_WIDTH = 180;
 export const COMPOSER_CONTEXT_TRAY_PLACEMENT = "above-input";
 export const COMPOSER_CONTEXT_TRAY_MAX_HEIGHT = "min(28vh, 152px)";
 export const COMPOSER_CONTEXT_ITEM_MAX_WIDTH = "calc((100% - 16px) / 3)";
+export const COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+export const COMPOSER_SSH_DROP_UPLOAD_MAX_FILES = 20;
+export const COMPOSER_DROP_UPLOAD_SNACKBAR_AUTO_HIDE_MS = 6000;
+export const COMPOSER_DROP_UPLOAD_SNACKBAR_ERROR_AUTO_HIDE_MS = 10000;
+
+export function sanitizeComposerDroppedFileName(name: string): string {
+  const base = (name || "")
+    .split(/[/\\]/u)
+    .pop()
+    ?.trim()
+    .replace(/[\x00-\x1F\x7F]/gu, "_")
+    .replace(/[/:\\]/gu, "_")
+    .replace(/\s+/gu, " ");
+  if (!base || /^\.+$/u.test(base)) return "upload.bin";
+  return base;
+}
+
+export function buildComposerWorkspaceUploadPath(
+  workspacePath: string,
+  fileName: string,
+): string {
+  const safeName = sanitizeComposerDroppedFileName(fileName);
+  const normalizedRoot = workspacePath.trim().replace(/\\/g, "/");
+  if (!normalizedRoot || normalizedRoot === ".") return safeName;
+  if (normalizedRoot === "/") return `/${safeName}`;
+  if (normalizedRoot === "~") return `~/${safeName}`;
+  return `${normalizedRoot.replace(/\/+$/u, "")}/${safeName}`;
+}
+
+export function composerPointInRect(
+  point: { x: number; y: number },
+  rect: Pick<DOMRect, "left" | "right" | "top" | "bottom">,
+  scale = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
+): boolean {
+  const logical = { x: point.x / scale, y: point.y / scale };
+  const within = (p: { x: number; y: number }) =>
+    p.x >= rect.left && p.x <= rect.right && p.y >= rect.top && p.y <= rect.bottom;
+  return within(logical) || within(point);
+}
 
 /** React StrictMode 下 effect 会双跑，避免同页两次 `invoke` + 弹窗 */
 let rsyncAvailabilityCheckStarted = false;
@@ -184,6 +226,21 @@ interface SshServerConfig {
 }
 
 type SshServersMap = Record<string, SshServerConfig>;
+type ComposerDropUploadStatus = {
+  severity: "info" | "success" | "error";
+  message: string;
+};
+
+interface FileWriteResponse {
+  bytes_written: number;
+  new_hash: string;
+}
+
+interface ComposerUploadItem {
+  name: string;
+  size: number;
+  getBase64: () => Promise<string>;
+}
 
 function sshResolvedHost(cfg: SshServerConfig): string | undefined {
   return cfg.HostName ?? cfg.host_name ?? cfg.host ?? undefined;
@@ -308,6 +365,31 @@ function permissionModeAccent(theme: Theme, mode: PermissionMode): string {
     default:
       return p.primary.main;
   }
+}
+
+function dataTransferHasFiles(dataTransfer: DataTransfer): boolean {
+  return (
+    Array.from(dataTransfer.types ?? []).includes("Files") ||
+    dataTransfer.files.length > 0
+  );
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return bytesToBase64(bytes);
+}
+
+function basenameFromDroppedPath(path: string): string {
+  return path.split(/[/\\]/u).pop() || path;
 }
 
 type AvailableAgentRow = { agentType: string; description: string; background: boolean };
@@ -759,22 +841,31 @@ export const ChatComposer = memo(function ChatComposer({
   /** Hairline border / shadow tint — theme-aware */
   const edge = (a: number) =>
     alpha(isDark ? theme.palette.common.white : theme.palette.common.black, a);
-  const semanticChipSurface = (tone: string) => ({
-    bgcolor: alpha(tone, isDark ? 0.2 : 0.11),
-    borderColor: alpha(tone, isDark ? 0.62 : 0.45),
-    color: tone,
-    boxShadow: `0 1px 2px ${alpha(tone, isDark ? 0.2 : 0.14)}`,
-    "& .MuiChip-label": {
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      color: tone,
-    },
-    "& .MuiChip-icon": {
-      color: tone,
-      marginTop: 0,
-      marginBottom: 0,
-    },
-  } as const);
+  const semanticChipSurface = (tone: string) => {
+    const readableTone = isDark ? lighten(tone, 0.28) : tone;
+    return {
+      color: ink,
+      bgcolor: alpha(tone, isDark ? 0.2 : 0.11),
+      borderColor: alpha(tone, isDark ? 0.62 : 0.45),
+      boxShadow: `0 1px 2px ${alpha(tone, isDark ? 0.2 : 0.14)}`,
+      "& .MuiChip-label": {
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        color: ink,
+      },
+      "& .MuiChip-icon": {
+        color: readableTone,
+        marginTop: 0,
+        marginBottom: 0,
+      },
+      "& .MuiChip-deleteIcon": {
+        color: alpha(ink, 0.72),
+        "&:hover": {
+          color: readableTone,
+        },
+      },
+    } as const;
+  };
   const composerContextChipSx = (tone: string, fontWeight = 700) => ({
     ...semanticChipSurface(tone),
     flexShrink: 1,
@@ -858,6 +949,11 @@ export const ChatComposer = memo(function ChatComposer({
     { kind: string; label: string; name: string }[]
   >([]);
   const [localVenvsLoading, setLocalVenvsLoading] = useState(false);
+  const [dropUploadActive, setDropUploadActive] = useState(false);
+  const [dropUploadBusy, setDropUploadBusy] = useState(false);
+  const [dropUploadStatus, setDropUploadStatus] =
+    useState<ComposerDropUploadStatus | null>(null);
+  const dropUploadDepthRef = useRef(0);
 
   const handlePermissionModeSelect = useCallback(
     async (mode: PermissionMode) => {
@@ -1940,6 +2036,281 @@ export const ChatComposer = memo(function ChatComposer({
   const inputDisabled =
     (!allowInputWhileStreaming && (isConnecting || isStreaming)) ||
     askUserBlocksInput;
+  const canDropUploadToSsh =
+    !inputDisabled &&
+    !needsWorkspacePath &&
+    environment === "ssh" &&
+    Boolean(sshServer?.trim()) &&
+    Boolean(workspacePath.trim()) &&
+    workspacePath.trim() !== ".";
+
+  const handleComposerFileDragEnter = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!dataTransferHasFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dropUploadDepthRef.current += 1;
+      setDropUploadActive(true);
+      setDropUploadStatus(null);
+    },
+    [],
+  );
+
+  const handleComposerFileDragOver = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!dataTransferHasFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = canDropUploadToSsh ? "copy" : "none";
+      setDropUploadActive(true);
+    },
+    [canDropUploadToSsh],
+  );
+
+  const handleComposerFileDragLeave = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!dataTransferHasFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dropUploadDepthRef.current = Math.max(0, dropUploadDepthRef.current - 1);
+      if (dropUploadDepthRef.current === 0) {
+        setDropUploadActive(false);
+      }
+    },
+    [],
+  );
+
+  const uploadComposerItemsToSsh = useCallback(
+    async (items: ComposerUploadItem[]) => {
+      if (items.length === 0) return;
+
+      if (inputDisabled) {
+        setDropUploadStatus({
+          severity: "error",
+          message: "当前输入区不可上传文件。",
+        });
+        return;
+      }
+      if (environment !== "ssh") {
+        setDropUploadStatus({
+          severity: "error",
+          message: "拖拽上传当前用于 SSH 工作目录，请先切换到 SSH 执行环境。",
+        });
+        return;
+      }
+      const profile = sshServer?.trim();
+      if (!profile) {
+        setDropUploadStatus({
+          severity: "error",
+          message: "请先选择 SSH 服务器后再拖拽上传。",
+        });
+        return;
+      }
+      if (needsWorkspacePath || !workspacePath.trim() || workspacePath.trim() === ".") {
+        setDropUploadStatus({
+          severity: "error",
+          message: "请先选择 SSH 工作目录后再拖拽上传。",
+        });
+        return;
+      }
+      if (items.length > COMPOSER_SSH_DROP_UPLOAD_MAX_FILES) {
+        setDropUploadStatus({
+          severity: "error",
+          message: `一次最多上传 ${COMPOSER_SSH_DROP_UPLOAD_MAX_FILES} 个文件。`,
+        });
+        return;
+      }
+
+      setDropUploadBusy(true);
+      setDropUploadStatus({
+        severity: "info",
+        message: `正在上传 ${items.length} 个文件到 SSH 工作目录…`,
+      });
+      try {
+        const uploadedNames: string[] = [];
+        for (const item of items) {
+          if (item.size > COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES) {
+            throw new Error(
+              `${item.name} 超过 ${Math.floor(
+                COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES / 1024 / 1024,
+              )} MB，已取消上传。`,
+            );
+          }
+          const safeName = sanitizeComposerDroppedFileName(item.name);
+          const targetPath = buildComposerWorkspaceUploadPath(
+            workspacePath,
+            safeName,
+          );
+          const dataBase64 = await item.getBase64();
+          await invoke<FileWriteResponse>("ssh_write_file_bytes", {
+            sshProfileName: profile,
+            path: targetPath,
+            dataBase64,
+          });
+          uploadedNames.push(safeName);
+          addComposerAttachedPath(targetPath);
+        }
+        setDropUploadStatus({
+          severity: "success",
+          message:
+            uploadedNames.length === 1
+              ? `已上传 ${uploadedNames[0]} 到 SSH 工作目录。`
+              : `已上传 ${uploadedNames.length} 个文件到 SSH 工作目录。`,
+        });
+        queueMicrotask(() => focusEditableEnd());
+      } catch (error) {
+        setDropUploadStatus({
+          severity: "error",
+          message: extractErrorMessage(error),
+        });
+      } finally {
+        setDropUploadBusy(false);
+      }
+    },
+    [
+      addComposerAttachedPath,
+      environment,
+      focusEditableEnd,
+      inputDisabled,
+      needsWorkspacePath,
+      sshServer,
+      workspacePath,
+    ],
+  );
+
+  const handleComposerFileDrop = useCallback(
+    async (event: React.DragEvent<HTMLElement>) => {
+      if (!dataTransferHasFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dropUploadDepthRef.current = 0;
+      setDropUploadActive(false);
+
+      const files = Array.from(event.dataTransfer.files ?? []);
+      await uploadComposerItemsToSsh(
+        files.map((file) => ({
+          name: file.name,
+          size: file.size,
+          getBase64: () => fileToBase64(file),
+        })),
+      );
+    },
+    [uploadComposerItemsToSsh],
+  );
+
+  const nativeDragPositionInsideComposer = useCallback(
+    (position: { x: number; y: number }): boolean => {
+      const el = composerInputAnchorRef.current;
+      if (!el) return false;
+      return composerPointInRect(position, el.getBoundingClientRect());
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void getCurrentWindowIfTauri().then(async (windowHandle) => {
+      if (disposed || !windowHandle) return;
+      unlisten = await windowHandle.onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          const inside = nativeDragPositionInsideComposer(payload.position);
+          setDropUploadActive(inside);
+          if (inside) {
+            setDropUploadStatus(null);
+          }
+          return;
+        }
+
+        if (payload.type === "leave") {
+          dropUploadDepthRef.current = 0;
+          setDropUploadActive(false);
+          return;
+        }
+
+        if (payload.type === "drop") {
+          dropUploadDepthRef.current = 0;
+          setDropUploadActive(false);
+          if (
+            !nativeDragPositionInsideComposer(payload.position) ||
+            payload.paths.length === 0
+          ) {
+            return;
+          }
+
+          void uploadComposerItemsToSsh(
+            payload.paths.map((path) => ({
+              name: basenameFromDroppedPath(path),
+              size: 0,
+              getBase64: async () => {
+                const bytes = await invoke<number[]>("read_dropped_file_bytes", {
+                  path,
+                });
+                return bytesToBase64(new Uint8Array(bytes));
+              },
+            })),
+          );
+        }
+      });
+      if (disposed && unlisten) {
+        unlisten();
+        unlisten = null;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+        unlisten = null;
+      }
+    };
+  }, [nativeDragPositionInsideComposer, uploadComposerItemsToSsh]);
+
+  const dropUploadBannerVisible =
+    dropUploadActive || dropUploadBusy || Boolean(dropUploadStatus);
+  const dropUploadBannerSeverity: ComposerDropUploadStatus["severity"] =
+    dropUploadActive && !canDropUploadToSsh
+      ? "error"
+      : dropUploadStatus?.severity ?? "info";
+  const dropUploadBannerMessage = dropUploadActive
+    ? canDropUploadToSsh
+      ? "松开后上传到 SSH 工作目录。"
+      : "请选择 SSH 服务器和工作目录后再上传。"
+    : dropUploadStatus?.message ??
+      (dropUploadBusy ? "正在上传文件到 SSH 工作目录…" : "");
+  const dropUploadTone =
+    dropUploadBannerSeverity === "success"
+      ? theme.palette.success.main
+      : dropUploadBannerSeverity === "error"
+        ? errorMain
+        : theme.palette.info.main;
+  const dropUploadReadableTone = isDark
+    ? lighten(dropUploadTone, 0.28)
+    : dropUploadTone;
+  const dropUploadSnackbarClosable =
+    Boolean(dropUploadStatus) && !dropUploadBusy;
+
+  const dismissDropUploadStatus = useCallback(() => {
+    setDropUploadStatus(null);
+  }, []);
+
+  useEffect(() => {
+    if (!dropUploadStatus || dropUploadBusy || dropUploadActive) return;
+    const delay =
+      dropUploadStatus.severity === "error"
+        ? COMPOSER_DROP_UPLOAD_SNACKBAR_ERROR_AUTO_HIDE_MS
+        : COMPOSER_DROP_UPLOAD_SNACKBAR_AUTO_HIDE_MS;
+    const statusAtSchedule = dropUploadStatus;
+    const timer = window.setTimeout(() => {
+      setDropUploadStatus((current) =>
+        current === statusAtSchedule ? null : current,
+      );
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [dropUploadActive, dropUploadBusy, dropUploadStatus]);
 
   const showSlashPopover =
     (slashParse.active || skillParse.active) &&
@@ -2421,8 +2792,98 @@ export const ChatComposer = memo(function ChatComposer({
             </Box>
           </Paper>
         ) : null}
+        <Collapse in={dropUploadBannerVisible} unmountOnExit>
+          <Box
+            role={dropUploadBannerSeverity === "error" ? "alert" : "status"}
+            aria-live={
+              dropUploadBannerSeverity === "error" ? "assertive" : "polite"
+            }
+            sx={{
+              mb: 1,
+              px: 1.25,
+              py: 0.85,
+              borderRadius: 2,
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              color: ink,
+              bgcolor: alpha(paper, isDark ? 0.94 : 0.98),
+              border: `1px solid ${alpha(
+                dropUploadTone,
+                isDark ? 0.42 : 0.24,
+              )}`,
+              boxShadow: isDark
+                ? `0 12px 36px ${alpha("#000", 0.3)}, inset 0 1px 0 ${edge(0.08)}`
+                : `0 12px 30px ${alpha(
+                    dropUploadTone,
+                    0.12,
+                  )}, inset 0 1px 0 ${edge(0.08)}`,
+              backdropFilter: "blur(14px)",
+              WebkitBackdropFilter: "blur(14px)",
+            }}
+          >
+            <Box
+              sx={{
+                width: 28,
+                height: 28,
+                flex: "0 0 auto",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                borderRadius: "50%",
+                color: dropUploadReadableTone,
+                bgcolor: alpha(dropUploadTone, isDark ? 0.18 : 0.1),
+              }}
+            >
+              <InsertDriveFile sx={{ fontSize: 18 }} />
+            </Box>
+            <Typography
+              variant="body2"
+              sx={{
+                minWidth: 0,
+                flex: 1,
+                fontSize: 13,
+                fontWeight: 600,
+                lineHeight: 1.45,
+                color: ink,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: { xs: "normal", sm: "nowrap" },
+              }}
+            >
+              {dropUploadBannerMessage}
+            </Typography>
+            {dropUploadSnackbarClosable ? (
+              <IconButton
+                aria-label="关闭上传提示"
+                size="small"
+                onClick={dismissDropUploadStatus}
+                sx={{
+                  width: 30,
+                  height: 30,
+                  flex: "0 0 auto",
+                  color: alpha(ink, 0.72),
+                  "&:hover": {
+                    color: dropUploadReadableTone,
+                    bgcolor: alpha(dropUploadTone, isDark ? 0.16 : 0.08),
+                  },
+                  "&:focus-visible": {
+                    outline: `2px solid ${alpha(dropUploadTone, 0.48)}`,
+                    outlineOffset: 2,
+                  },
+                }}
+              >
+                <Close sx={{ fontSize: 18 }} />
+              </IconButton>
+            ) : null}
+          </Box>
+        </Collapse>
         <Paper
           elevation={0}
+          onDragEnter={handleComposerFileDragEnter}
+          onDragOver={handleComposerFileDragOver}
+          onDragLeave={handleComposerFileDragLeave}
+          onDrop={handleComposerFileDrop}
           sx={{
             borderRadius: hasFloatingComposerPrompt
               ? COMPOSER_INPUT_JOINED_BORDER_RADIUS
@@ -2433,10 +2894,18 @@ export const ChatComposer = memo(function ChatComposer({
             bgcolor: composerBg,
             backdropFilter: "blur(12px)",
             WebkitBackdropFilter: "blur(12px)",
-            border: `1px solid ${edge(0.12)}`,
+            border: dropUploadActive
+              ? `1px solid ${alpha(
+                  canDropUploadToSsh ? accent : errorMain,
+                  0.55,
+                )}`
+              : `1px solid ${edge(0.12)}`,
             boxShadow: `
               0 1px 2px ${edge(0.06)},
-              0 8px 24px ${alpha(accent, 0.08)},
+              0 8px 24px ${alpha(
+                dropUploadActive && !canDropUploadToSsh ? errorMain : accent,
+                dropUploadActive ? 0.16 : 0.08,
+              )},
               inset 0 1px 0 ${edge(0.08)}
             `,
             transition:
@@ -2613,7 +3082,7 @@ export const ChatComposer = memo(function ChatComposer({
                       size="small"
                       variant="outlined"
                       icon={<InsertDriveFile sx={{ fontSize: 16 }} />}
-                      label={`@${p}`}
+                      label={`@${formatComposerPathChipLabel(p)}`}
                       onDelete={() => removeComposerAttachedPath(p)}
                       sx={composerContextChipSx(fileTone, 600)}
                     />

@@ -151,8 +151,26 @@ export function filterComposerMentionRows<T extends ComposerMentionRow>(
 
 function normalizedComposerPaths(paths: string[]): string[] {
   return paths
-    .map(normalizeComposerMentionPath)
+    .map(normalizeComposerAttachedPath)
     .filter((path, index, arr) => path && arr.indexOf(path) === index);
+}
+
+export function normalizeComposerAttachedPath(path: string): string {
+  const trimmed = path
+    .trim()
+    .replace(/^@(?:file:)?/u, "")
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/");
+  if (!trimmed) return "";
+  if (trimmed === "/" || trimmed === "~") return trimmed;
+  return trimmed.replace(/\/+$/u, "");
+}
+
+export function formatComposerPathChipLabel(path: string): string {
+  const normalized = normalizeComposerAttachedPath(path);
+  if (!normalized) return path;
+  const parts = normalized.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? normalized;
 }
 
 export function formatComposerPathPreview(paths: string[]): string {
@@ -166,7 +184,7 @@ export function buildComposerPathInjection(paths: string[]): string {
   if (normalized.length === 0) return "";
   return [
     "<omiga-selected-paths>",
-    "The user selected these workspace-relative paths with the @ picker. Use these exact path strings when reading or editing files; do not infer or guess alternatives:",
+    "The user selected or uploaded these exact file paths. Use these exact path strings when reading or editing files. Absolute paths and ~/ paths are already resolved; read them directly. Relative paths are relative to the current workspace. Do not run find/locate/recursive search to rediscover these attachments unless the user explicitly asks to search elsewhere:",
     ...normalized.map((path) => `- ${path}`),
     "</omiga-selected-paths>",
   ].join("\n");

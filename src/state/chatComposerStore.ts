@@ -268,7 +268,12 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
   },
   addComposerAttachedPath: (relativePath) =>
     set((s) => {
-      const t = relativePath.trim().replace(/\\/g, "/");
+      const t = relativePath
+        .trim()
+        .replace(/^@(?:file:)?/u, "")
+        .replace(/\\/g, "/")
+        .replace(/\/{2,}/g, "/")
+        .replace(/(.+)\/+$/u, "$1");
       if (!t || s.composerAttachedPaths.includes(t)) return s;
       return {
         composerAttachedPaths: [...s.composerAttachedPaths, t],

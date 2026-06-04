@@ -25,6 +25,7 @@ import {
   WORKFLOW_SLASH_COMMANDS,
   type WorkflowSlashCommandDefinition,
 } from "../../utils/workflowCommands";
+import { formatComposerPathChipLabel } from "./composerPathMentions";
 
 export function formatUserMessageTimestamp(ts: number | undefined): string {
   try {
@@ -114,10 +115,11 @@ export const UserMessageBubble = memo(function UserMessageBubble({
   const fileTone = theme.palette.info.main;
   const pluginTone = theme.palette.warning.main;
   const agentTone = chat.accent;
+  const chipText = isEditing ? chat.textPrimary : chat.userBubbleText;
 
   const semanticChipSx = (tone: string) => ({
-    flexShrink: 0,
-    maxWidth: "min(100%, 220px)",
+    flexShrink: 1,
+    maxWidth: "min(100%, 240px)",
     height: 22,
     display: "inline-flex",
     verticalAlign: "middle",
@@ -125,7 +127,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
     fontWeight: 600,
     bgcolor: alpha(tone, isDark ? 0.18 : 0.11),
     borderColor: alpha(tone, isDark ? 0.62 : 0.45),
-    color: tone,
+    color: chipText,
     boxShadow: `0 1px 2px ${alpha(tone, isDark ? 0.2 : 0.16)}`,
     "& .MuiChip-icon": {
       color: tone,
@@ -135,7 +137,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
       px: 0.5,
       overflow: "hidden",
       textOverflow: "ellipsis",
-      color: tone,
+      color: chipText,
     },
   } as const);
 
@@ -246,7 +248,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                         size="small"
                         variant="outlined"
                         icon={<InsertDriveFileIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
-                        label={`@${p}`}
+                        label={`@${formatComposerPathChipLabel(p)}`}
                         sx={semanticChipSx(fileTone)}
                       />
                     </Tooltip>
@@ -334,6 +336,11 @@ export const UserMessageBubble = memo(function UserMessageBubble({
               sx={{
                 fontSize: 13,
                 lineHeight: 1.45,
+                display: "inline-flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                columnGap: 0.5,
+                rowGap: 0.25,
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-word",
                 overflowWrap: "anywhere",
@@ -353,8 +360,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                     sx={{
                       display: "inline-flex",
                       verticalAlign: "middle",
-                      mr: 0.5,
-                      mb: 0.2,
+                      minWidth: 0,
                     }}
                   >
                     <Chip
@@ -375,8 +381,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                   sx={{
                     display: "inline-flex",
                     verticalAlign: "middle",
-                    mr: 0.5,
-                    mb: 0.2,
+                    minWidth: 0,
                   }}
                 >
                   <Chip
@@ -397,8 +402,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                     sx={{
                       display: "inline-flex",
                       verticalAlign: "middle",
-                      mr: 0.5,
-                      mb: 0.2,
+                      minWidth: 0,
                     }}
                   >
                     <Chip
@@ -420,8 +424,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                     sx={{
                       display: "inline-flex",
                       verticalAlign: "middle",
-                      mr: 0.5,
-                      mb: 0.2,
+                      minWidth: 0,
                     }}
                   >
                     <Chip
@@ -429,7 +432,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                       size="small"
                       variant="outlined"
                       icon={<InsertDriveFileIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
-                      label={`@${p}`}
+                      label={`@${formatComposerPathChipLabel(p)}`}
                       sx={semanticChipSx(fileTone)}
                     />
                   </Box>

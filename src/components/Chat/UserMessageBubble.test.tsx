@@ -47,7 +47,7 @@ describe("UserMessageBubble", () => {
 
     expect(html).toContain("hello");
     expect(html).toContain("/executor");
-    expect(html).toContain("@src/App.tsx");
+    expect(html).toContain("@App.tsx");
     expect(html).toContain("user-msg-inline-flow");
     expect(html).toContain("user-msg-inline-chip");
     expect(html).toContain("user-msg-agent-chip");
@@ -63,6 +63,19 @@ describe("UserMessageBubble", () => {
 
     expect(html).toContain("#sample@market");
     expect(html).toContain("user-msg-plugin-chip");
+  });
+
+  it("uses compact attachment labels while preserving full paths in tooltips", () => {
+    const path =
+      "/cluster/facility/yzhang/WorkSpace/code/EukDetect/附件1.xlsx";
+    const html = renderBubble({
+      attachedPaths: [path],
+      content: "这个文件包含哪些内容",
+      displayText: "这个文件包含哪些内容",
+    });
+
+    expect(html).toContain("@附件1.xlsx");
+    expect(html).toContain(path);
   });
 
   it("splits workflow slash commands so command chips flow inline with body text", () => {

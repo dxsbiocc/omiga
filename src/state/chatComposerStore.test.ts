@@ -97,3 +97,20 @@ describe("chatComposerStore execution workspace scopes", () => {
     ).toBe(true);
   });
 });
+
+describe("chatComposerStore attachments", () => {
+  beforeEach(() => {
+    useChatComposerStore.getState().resetToDefaults();
+  });
+
+  it("preserves absolute uploaded paths for model-facing attachment context", () => {
+    const path =
+      "/cluster/facility/yzhang/WorkSpace/code/EukDetect/附件1.xlsx";
+
+    useChatComposerStore.getState().addComposerAttachedPath(path);
+
+    expect(useChatComposerStore.getState().composerAttachedPaths).toEqual([
+      path,
+    ]);
+  });
+});

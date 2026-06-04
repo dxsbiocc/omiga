@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildComposerWorkspaceUploadPath,
+  composerPointInRect,
   COMPOSER_CONTEXT_ITEM_MAX_WIDTH,
   COMPOSER_CONTEXT_TRAY_MAX_HEIGHT,
   COMPOSER_CONTEXT_TRAY_PLACEMENT,
+  COMPOSER_DROP_UPLOAD_SNACKBAR_AUTO_HIDE_MS,
+  COMPOSER_DROP_UPLOAD_SNACKBAR_ERROR_AUTO_HIDE_MS,
   COMPOSER_INPUT_JOINED_BORDER_RADIUS,
   COMPOSER_INPUT_JOINED_Z_INDEX,
   COMPOSER_PROMPT_JOINED_BORDER_RADIUS,
@@ -12,6 +16,9 @@ import {
   COMPOSER_PROMPT_OVERLAY_WIDTH,
   COMPOSER_PROMPT_OVERLAY_Z_INDEX,
   COMPOSER_PERMISSION_MODE_MENU_WIDTH,
+  COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES,
+  COMPOSER_SSH_DROP_UPLOAD_MAX_FILES,
+  sanitizeComposerDroppedFileName,
 } from "./ChatComposer";
 
 describe("ChatComposer prompt overlay layout", () => {
@@ -33,5 +40,47 @@ describe("ChatComposer prompt overlay layout", () => {
     expect(COMPOSER_CONTEXT_TRAY_PLACEMENT).toBe("above-input");
     expect(COMPOSER_CONTEXT_TRAY_MAX_HEIGHT).toBe("min(28vh, 152px)");
     expect(COMPOSER_CONTEXT_ITEM_MAX_WIDTH).toBe("calc((100% - 16px) / 3)");
+  });
+});
+
+describe("ChatComposer SSH drop upload helpers", () => {
+  it("sanitizes dropped file names before writing remote paths", () => {
+    expect(sanitizeComposerDroppedFileName(" data.tsv ")).toBe("data.tsv");
+    expect(sanitizeComposerDroppedFileName("../secret.txt")).toBe("secret.txt");
+    expect(sanitizeComposerDroppedFileName("bad/name.txt")).toBe("name.txt");
+    expect(sanitizeComposerDroppedFileName("...")).toBe("upload.bin");
+  });
+
+  it("uploads dropped files into the current workspace root", () => {
+    expect(buildComposerWorkspaceUploadPath("/home/me/work", "data.tsv")).toBe(
+      "/home/me/work/data.tsv",
+    );
+    expect(buildComposerWorkspaceUploadPath("/home/me/work/", "data.tsv")).toBe(
+      "/home/me/work/data.tsv",
+    );
+    expect(buildComposerWorkspaceUploadPath("~/work", "data.tsv")).toBe(
+      "~/work/data.tsv",
+    );
+    expect(buildComposerWorkspaceUploadPath("/", "data.tsv")).toBe("/data.tsv");
+  });
+
+  it("keeps drag upload limits explicit", () => {
+    expect(COMPOSER_SSH_DROP_UPLOAD_MAX_FILES).toBeGreaterThan(0);
+    expect(COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES).toBe(50 * 1024 * 1024);
+  });
+
+  it("keeps completed upload notifications temporary", () => {
+    expect(COMPOSER_DROP_UPLOAD_SNACKBAR_AUTO_HIDE_MS).toBeGreaterThan(0);
+    expect(COMPOSER_DROP_UPLOAD_SNACKBAR_ERROR_AUTO_HIDE_MS).toBeGreaterThan(
+      COMPOSER_DROP_UPLOAD_SNACKBAR_AUTO_HIDE_MS,
+    );
+  });
+
+  it("accepts both CSS and physical pixel drag positions", () => {
+    const rect = { left: 100, right: 300, top: 200, bottom: 260 };
+
+    expect(composerPointInRect({ x: 150, y: 220 }, rect, 2)).toBe(true);
+    expect(composerPointInRect({ x: 300, y: 440 }, rect, 2)).toBe(true);
+    expect(composerPointInRect({ x: 40, y: 40 }, rect, 2)).toBe(false);
   });
 });

@@ -12,6 +12,8 @@ use std::{
 };
 use tauri::State;
 
+const MAX_DROPPED_FILE_BYTES: u64 = 50 * 1024 * 1024;
+
 /// Read file as raw bytes - fastest way to get content for Monaco
 pub async fn read_file_bytes_scoped(
     path: String,
@@ -376,6 +378,41 @@ pub async fn read_file_bytes_fast(
 ) -> CommandResult<Vec<u8>> {
     let workspace_root = resolve_read_workspace_root(&state, session_id, workspace_root).await?;
     read_file_bytes_scoped(path, workspace_root).await
+}
+
+/// Read a user-dropped local file as raw bytes.
+///
+/// This intentionally does not require a workspace root: the OS file-drop event
+/// is the user's selection gesture. Keep it read-only, file-only, and size-bound.
+#[tauri::command]
+pub async fn read_dropped_file_bytes(path: String) -> CommandResult<Vec<u8>> {
+    let p = PathBuf::from(&path);
+    validate_read_path_shape(&path, &p)?;
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| fs_io_error(format!("Could not resolve dropped file '{}': {}", path, e)))?;
+    if canonical.parent().is_none() || normal_component_count(&canonical) < 2 {
+        return Err(fs_io_error(format!(
+            "Refusing to read high-level dropped file path '{}'",
+            path
+        )));
+    }
+    if !canonical.is_file() {
+        return Err(AppError::Fs(FsError::InvalidPath { path }));
+    }
+    let meta = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|e: std::io::Error| AppError::Fs(FsError::from(e)))?;
+    if meta.len() > MAX_DROPPED_FILE_BYTES {
+        return Err(AppError::Fs(FsError::FileTooLarge {
+            path: canonical.to_string_lossy().into_owned(),
+            size: meta.len(),
+            max: MAX_DROPPED_FILE_BYTES,
+        }));
+    }
+    tokio::fs::read(&canonical)
+        .await
+        .map_err(|e: std::io::Error| AppError::Fs(FsError::from(e)))
 }
 
 #[tauri::command]
@@ -986,5 +1023,29 @@ mod tests {
             roots.iter().any(|root| root == &canonical_skills),
             "expected trusted roots to include user Omiga skills root {canonical_skills:?}; got {roots:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn read_dropped_file_bytes_reads_user_selected_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("drop.bin");
+        std::fs::write(&file, [0_u8, 1, 2, 255]).expect("write fixture");
+
+        let bytes = read_dropped_file_bytes(file.to_string_lossy().into_owned())
+            .await
+            .expect("read dropped file");
+
+        assert_eq!(bytes, vec![0, 1, 2, 255]);
+    }
+
+    #[tokio::test]
+    async fn read_dropped_file_bytes_rejects_directories() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let err = read_dropped_file_bytes(dir.path().to_string_lossy().into_owned())
+            .await
+            .expect_err("directory rejected");
+
+        assert!(err.to_string().contains("Invalid path"));
     }
 }
