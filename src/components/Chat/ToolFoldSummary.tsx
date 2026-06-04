@@ -108,6 +108,36 @@ export function toolGroupAnyError(messages: readonly ToolSummaryMessage[]): bool
   });
 }
 
+export function assistantTextIsToolLoopStop(text: string | undefined): boolean {
+  const normalized = text?.trim().toLowerCase();
+  if (!normalized) return false;
+  return [
+    "本轮没有稳定完成",
+    "没有生成可交付的最终回复",
+    "工具已执行，但没有生成最终回复",
+    "模型没有继续输出总结",
+    "已达到工具调用上限",
+    "exceeded maximum tool rounds",
+    "autopilot stopped",
+    "[cancelled",
+    "cancelled by user",
+  ].some((needle) => normalized.includes(needle));
+}
+
+export function toolGroupHeaderAnyError(
+  messages: readonly ToolSummaryMessage[],
+  finalAssistantText?: string,
+): boolean {
+  if (assistantTextIsToolLoopStop(finalAssistantText)) {
+    return true;
+  }
+  const hasFinalAssistantText = Boolean(finalAssistantText?.trim());
+  if (hasFinalAssistantText) {
+    return false;
+  }
+  return toolGroupAnyError(messages);
+}
+
 /** Name of a tool call still running (prefer the latest in the fold). */
 export function firstRunningToolName(
   messages: readonly ToolSummaryMessage[],

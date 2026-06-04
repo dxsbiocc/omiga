@@ -74,7 +74,7 @@ import {
   getNestedToolPanelOpen,
   summarizeReactFold,
   ToolFoldHeader,
-  toolGroupAnyError,
+  toolGroupHeaderAnyError,
   toolGroupAnyRunning,
   toolGroupFlowComplete,
 } from "./ToolFoldSummary";
@@ -828,7 +828,12 @@ function executionStepSummary(name: string, args?: string): string {
  */
 type RenderMsgItem =
   | { kind: "row"; message: Message; dividerBefore?: boolean }
-  | { kind: "react_fold"; id: string; fold: Message[] };
+  | {
+      kind: "react_fold";
+      id: string;
+      fold: Message[];
+      finalAssistantText?: string;
+    };
 
 function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
   const out: RenderMsgItem[] = [];
@@ -942,7 +947,12 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
     if (lastAssistantAfterTools >= 0) {
       const fold = segment.slice(0, lastAssistantAfterTools);
       if (fold.length > 0) {
-        out.push({ kind: "react_fold", id: `rf-${fold[0].id}`, fold });
+        out.push({
+          kind: "react_fold",
+          id: `rf-${fold[0].id}`,
+          fold,
+          finalAssistantText: segment[lastAssistantAfterTools].content,
+        });
       }
       out.push({
         kind: "row",
@@ -1458,7 +1468,7 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
   const toolMsgs = fold.filter((m) => m.role === "tool" && m.toolCall);
   const summary = summarizeReactFold(fold);
   const anyRunning = toolGroupAnyRunning(toolMsgs);
-  const anyError = toolGroupAnyError(toolMsgs);
+  const anyError = toolGroupHeaderAnyError(toolMsgs, item.finalAssistantText);
   const showGroupDone = toolGroupFlowComplete(toolMsgs);
   const runningToolName = firstRunningToolName(toolMsgs);
   const runningToolCount = toolMsgs.filter(
