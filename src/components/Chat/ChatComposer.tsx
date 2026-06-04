@@ -23,16 +23,11 @@ import {
   Stack,
   Tooltip,
   Button,
-  Alert,
   Menu,
   MenuItem,
   ListItemIcon,
   ListItemText,
   Divider,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
   Typography,
   Collapse,
   Select,
@@ -95,7 +90,6 @@ import {
   usePermissionStore,
   usePluginStore,
   type PermissionMode,
-  type BrowserUseMode,
   type SandboxBackend,
   type ExecutionEnvironment,
   type LocalVenvType,
@@ -117,13 +111,6 @@ import {
   RSYNC_INSTALL_HELP_URL,
   RSYNC_SSH_WARN_STORAGE_KEY,
 } from "../../lib/rsyncSsh";
-import {
-  browserOperatorErrorMessage,
-  isBrowserOperatorBackendReady,
-  type BrowserOperatorBackendStatus,
-  type BrowserOperatorInstallIntent,
-  type BrowserOperatorInstallResult,
-} from "../../lib/browserOperator";
 import {
   getLocalStorageItem,
   setLocalStorageItem,
@@ -169,13 +156,15 @@ const SANDBOX_LABEL: Record<SandboxBackend, string> = {
 /** 与 SessionList「Language」二级菜单一致：离开一级行后再关闭子菜单的延迟（ms） */
 const ENV_SUBMENU_PARENT_LEAVE_MS = 200;
 export const COMPOSER_PROMPT_OVERLAY_POSITION = "absolute";
-export const COMPOSER_PROMPT_OVERLAY_BOTTOM = "100%";
-export const COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT = "min(42vh, 420px)";
-export const COMPOSER_PROMPT_OVERLAY_Z_INDEX = 18;
-export const COMPOSER_INPUT_JOINED_Z_INDEX =
-  COMPOSER_PROMPT_OVERLAY_Z_INDEX;
-export const COMPOSER_PROMPT_JOINED_BORDER_RADIUS = "24px 24px 0 0";
-export const COMPOSER_INPUT_JOINED_BORDER_RADIUS = "0 0 24px 24px";
+export const COMPOSER_PROMPT_OVERLAY_BOTTOM = "calc(100% + 8px)";
+export const COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT = "min(48vh, 360px)";
+export const COMPOSER_PROMPT_OVERLAY_WIDTH =
+  "min(520px, calc(100vw - 48px))";
+export const COMPOSER_PROMPT_OVERLAY_Z_INDEX = 24;
+export const COMPOSER_INPUT_JOINED_Z_INDEX = 1;
+export const COMPOSER_PROMPT_JOINED_BORDER_RADIUS = "12px";
+export const COMPOSER_INPUT_JOINED_BORDER_RADIUS = "24px";
+export const COMPOSER_PERMISSION_MODE_MENU_WIDTH = 180;
 export const COMPOSER_CONTEXT_TRAY_PLACEMENT = "above-input";
 export const COMPOSER_CONTEXT_TRAY_MAX_HEIGHT = "min(28vh, 152px)";
 export const COMPOSER_CONTEXT_ITEM_MAX_WIDTH = "calc((100% - 16px) / 3)";
@@ -275,24 +264,6 @@ const PERMISSION_META: Record<PermissionMode, { label: string; hint: string }> =
     },
   };
 
-const BROWSER_USE_META: Record<
-  BrowserUseMode,
-  { label: string; hint: string }
-> = {
-  off: {
-    label: "浏览器：关闭",
-    hint: "关闭 Browser Operator。",
-  },
-  task: {
-    label: "浏览器：本次",
-    hint: "仅下一条消息启用 Browser Operator，发送后自动关闭。",
-  },
-  session: {
-    label: "浏览器：会话",
-    hint: "当前会话持续启用 Browser Operator；取消后继续仍保留。",
-  },
-};
-
 /** 解析 hex 相对亮度（0–1），非 hex 时返回 0.5 避免误判 */
 function hexRelativeLuminance(color: string): number {
   if (typeof color !== "string" || !color.startsWith("#")) return 0.5;
@@ -337,19 +308,6 @@ function permissionModeAccent(theme: Theme, mode: PermissionMode): string {
       return p.warning.main;
     default:
       return p.primary.main;
-  }
-}
-
-function browserUseModeAccent(theme: Theme, mode: BrowserUseMode): string {
-  const p = theme.palette;
-  switch (mode) {
-    case "task":
-      return askPermissionAccent(theme);
-    case "session":
-      return p.success.main;
-    case "off":
-    default:
-      return p.text.secondary;
   }
 }
 
@@ -838,8 +796,6 @@ export const ChatComposer = memo(function ChatComposer({
   const {
     permissionMode,
     setPermissionMode,
-    browserUseMode,
-    setBrowserUseMode,
     composerAgentType,
     setComposerAgentType,
     composerAttachedPaths,
@@ -885,25 +841,11 @@ export const ChatComposer = memo(function ChatComposer({
   );
 
   const permissionAccent = permissionModeAccent(theme, permissionMode);
-  const browserUseAccent = browserUseModeAccent(theme, browserUseMode);
 
   const [plusAnchor, setPlusAnchor] = useState<null | HTMLElement>(null);
   const [permissionAnchor, setPermissionAnchor] = useState<null | HTMLElement>(
     null,
   );
-  const [browserUseAnchor, setBrowserUseAnchor] =
-    useState<null | HTMLElement>(null);
-  const [pendingBrowserUseMode, setPendingBrowserUseMode] =
-    useState<BrowserUseMode | null>(null);
-  const [browserInstallDialogOpen, setBrowserInstallDialogOpen] =
-    useState(false);
-  const [browserBackendStatus, setBrowserBackendStatus] =
-    useState<BrowserOperatorBackendStatus | null>(null);
-  const [browserInstallError, setBrowserInstallError] = useState<string | null>(
-    null,
-  );
-  const [browserInstallIntent, setBrowserInstallIntent] =
-    useState<BrowserOperatorInstallIntent | null>(null);
   const [envAnchor, setEnvAnchor] = useState<null | HTMLElement>(null);
   const [sandboxMenuAnchor, setSandboxMenuAnchor] =
     useState<null | HTMLElement>(null);
@@ -918,110 +860,32 @@ export const ChatComposer = memo(function ChatComposer({
   >([]);
   const [localVenvsLoading, setLocalVenvsLoading] = useState(false);
 
-  const closeBrowserInstallDialog = useCallback(() => {
-    if (browserInstallIntent) return;
-    setBrowserInstallDialogOpen(false);
-    setPendingBrowserUseMode(null);
-    setBrowserInstallError(null);
-  }, [browserInstallIntent]);
+  const handlePermissionModeSelect = useCallback(
+    async (mode: PermissionMode) => {
+      setPermissionMode(mode);
+      setPermissionAnchor(null);
 
-  const handleBrowserUseModeSelect = useCallback(
-    async (mode: BrowserUseMode) => {
-      setBrowserUseAnchor(null);
-      setBrowserInstallError(null);
+      if (mode !== "auto") return;
 
-      if (mode === "off") {
-        setBrowserUseMode("off");
-        setPendingBrowserUseMode(null);
-        setBrowserInstallDialogOpen(false);
-        return;
-      }
+      const { pendingRequest, approveRequest, clearError } =
+        usePermissionStore.getState();
+      if (!pendingRequest) return;
 
-      setPendingBrowserUseMode(mode);
+      const autoEligible =
+        pendingRequest.risk_level === "safe" ||
+        pendingRequest.risk_level === "low" ||
+        pendingRequest.risk_level === "medium";
+      if (!autoEligible) return;
+
+      clearError();
       try {
-        const status = await invoke<BrowserOperatorBackendStatus>(
-          "browser_operator_backend_status",
-        );
-        setBrowserBackendStatus(status);
-
-        if (status.sidecarExists === false) {
-          setBrowserInstallError(
-            "未找到内置 Browser Operator sidecar，当前应用包无法启用浏览器控制。",
-          );
-          setBrowserInstallDialogOpen(true);
-          return;
-        }
-
-        if (isBrowserOperatorBackendReady(status)) {
-          setBrowserUseMode(mode);
-          setPendingBrowserUseMode(null);
-          return;
-        }
-
-        if (status.installerExists === false) {
-          setBrowserInstallError(
-            "未找到 Browser Operator 安装脚本，请检查当前应用包是否完整。",
-          );
-        }
-        setBrowserInstallDialogOpen(true);
-      } catch (error) {
-        setBrowserBackendStatus(null);
-        setBrowserInstallError(browserOperatorErrorMessage(error));
-        setBrowserInstallDialogOpen(true);
+        await approveRequest("Auto");
+      } catch {
+        // PermissionPromptBar will render the store error if the approval fails.
       }
     },
-    [setBrowserUseMode],
+    [setPermissionMode],
   );
-
-  const handleBrowserBackendInstall = useCallback(
-    async (intent: BrowserOperatorInstallIntent) => {
-      if (!pendingBrowserUseMode) return;
-      setBrowserInstallIntent(intent);
-      setBrowserInstallError(null);
-
-      try {
-        const result = await invoke<BrowserOperatorInstallResult>(
-          "browser_operator_install_backend",
-          {
-            confirmInstallIntent: true,
-            skipBrowserInstall: intent === "packages-only",
-            projectRoot: workspacePath.trim() ? workspacePath : undefined,
-            sessionId: sessionId ?? undefined,
-          },
-        );
-        if (result?.ok === false) {
-          throw new Error(result.error || "Browser Operator 后端安装失败。");
-        }
-
-        const status = await invoke<BrowserOperatorBackendStatus>(
-          "browser_operator_backend_status",
-        );
-        setBrowserBackendStatus(status);
-
-        if (status.sidecarExists === false) {
-          throw new Error(
-            "后端依赖已安装，但内置 Browser Operator sidecar 缺失，无法启用。",
-          );
-        }
-        if (!isBrowserOperatorBackendReady(status)) {
-          throw new Error("安装完成后仍未检测到 Browser Operator Python 后端。");
-        }
-
-        setBrowserUseMode(pendingBrowserUseMode);
-        setPendingBrowserUseMode(null);
-        setBrowserInstallDialogOpen(false);
-      } catch (error) {
-        setBrowserInstallError(browserOperatorErrorMessage(error));
-      } finally {
-        setBrowserInstallIntent(null);
-      }
-    },
-    [pendingBrowserUseMode, setBrowserUseMode],
-  );
-  const browserInstallBusy = browserInstallIntent !== null;
-  const browserInstallBlocked =
-    browserBackendStatus?.sidecarExists === false ||
-    browserBackendStatus?.installerExists === false;
 
   // 沙箱 / SSH 二级菜单：与 SessionList「Language」相同（定时器 + 嵌套 Menu + pointerEvents），避免 Popover 与一级 Menu 模态层事件死循环
   const sandboxSubmenuLeaveTimerRef = useRef<ReturnType<
@@ -2520,8 +2384,12 @@ export const ChatComposer = memo(function ChatComposer({
             aria-live="polite"
             sx={{
               position: COMPOSER_PROMPT_OVERLAY_POSITION,
-              left: 0,
+              left: askUserBlocksInput ? 0 : "auto",
               right: 0,
+              width: askUserBlocksInput
+                ? "100%"
+                : COMPOSER_PROMPT_OVERLAY_WIDTH,
+              maxWidth: "100%",
               bottom: COMPOSER_PROMPT_OVERLAY_BOTTOM,
               zIndex: COMPOSER_PROMPT_OVERLAY_Z_INDEX,
               borderRadius: COMPOSER_PROMPT_JOINED_BORDER_RADIUS,
@@ -2530,7 +2398,6 @@ export const ChatComposer = memo(function ChatComposer({
               backdropFilter: "blur(14px)",
               WebkitBackdropFilter: "blur(14px)",
               border: `1px solid ${alpha(accent, isDark ? 0.26 : 0.18)}`,
-              borderBottom: 0,
               boxShadow: `
                 0 -8px 28px ${alpha(theme.palette.common.black, isDark ? 0.3 : 0.12)},
                 0 0 0 1px ${alpha(accent, isDark ? 0.1 : 0.06)}
@@ -3546,9 +3413,26 @@ export const ChatComposer = memo(function ChatComposer({
             anchorEl={permissionAnchor}
             open={Boolean(permissionAnchor)}
             onClose={() => setPermissionAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 260, borderRadius: 2 } } }}
+            anchorOrigin={{
+              vertical: "top",
+              horizontal: "right",
+            }}
+            transformOrigin={{
+              vertical: "bottom",
+              horizontal: "right",
+            }}
+            slotProps={{
+              paper: {
+                sx: {
+                  mt: -1,
+                  width: COMPOSER_PERMISSION_MODE_MENU_WIDTH,
+                  minWidth: 0,
+                  borderRadius: 2,
+                },
+              },
+            }}
           >
-            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
+            <Box sx={{ px: 1.5, py: 0.85, borderBottom: 1, borderColor: "divider" }}>
               <Tooltip
                 title="工具与编辑的确认策略"
                 placement="top"
@@ -3579,11 +3463,10 @@ export const ChatComposer = memo(function ChatComposer({
                 >
                   <MenuItem
                     selected={permissionMode === key}
-                    onClick={() => {
-                      setPermissionMode(key);
-                      setPermissionAnchor(null);
-                    }}
+                    onClick={() => void handlePermissionModeSelect(key)}
                     sx={{
+                      minHeight: 38,
+                      px: 1.25,
                       "&.Mui-selected": {
                         bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
                         "&:hover": {
@@ -3594,7 +3477,7 @@ export const ChatComposer = memo(function ChatComposer({
                   >
                     <ListItemIcon
                       sx={{
-                        minWidth: 40,
+                        minWidth: 34,
                         lineHeight: 0,
                         color: rowAccent,
                         "& svg": { display: "block" },
@@ -3617,244 +3500,6 @@ export const ChatComposer = memo(function ChatComposer({
               );
             })}
           </Menu>
-
-          <Button
-            size="small"
-            variant="text"
-            color="inherit"
-            onClick={(e) => setBrowserUseAnchor(e.currentTarget)}
-            startIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: browserUseAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <Globe2
-                  size={18}
-                  strokeWidth={2}
-                  color={browserUseAccent}
-                />
-              </Box>
-            }
-            endIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: browserUseAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <ChevronDown
-                  size={18}
-                  strokeWidth={2}
-                  color={browserUseAccent}
-                />
-              </Box>
-            }
-            sx={{
-              textTransform: "none",
-              color: browserUseAccent,
-              ...composerLabelText,
-              borderRadius: 2.5,
-              px: 1,
-              minHeight: "var(--composer-toolbar-h)",
-              height: "var(--composer-toolbar-h)",
-              maxWidth: 200,
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              boxShadow: "none",
-              transition:
-                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease",
-              "@media (prefers-reduced-motion: reduce)": {
-                transition: "none",
-              },
-              "&:hover": {
-                bgcolor: alpha(browserUseAccent, 0.12),
-                borderColor: alpha(browserUseAccent, 0.28),
-                boxShadow: "none",
-              },
-            }}
-          >
-            <Typography
-              variant="body2"
-              noWrap
-              component="span"
-              sx={{ ...composerLabelText, color: "inherit" }}
-            >
-              {BROWSER_USE_META[browserUseMode].label}
-            </Typography>
-          </Button>
-          <Menu
-            anchorEl={browserUseAnchor}
-            open={Boolean(browserUseAnchor)}
-            onClose={() => setBrowserUseAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 280, borderRadius: 2 } } }}
-          >
-            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
-              <Tooltip
-                title="显式控制 Browser Operator 的启用范围"
-                placement="top"
-                enterDelay={200}
-              >
-                <Typography
-                  variant="subtitle2"
-                  component="span"
-                  sx={{
-                    display: "inline-block",
-                    cursor: "default",
-                    ...composerLabelText,
-                    color: ink,
-                  }}
-                >
-                  浏览器
-                </Typography>
-              </Tooltip>
-            </Box>
-            {(Object.keys(BROWSER_USE_META) as BrowserUseMode[]).map((key) => {
-              const rowAccent = browserUseModeAccent(theme, key);
-              return (
-                <Tooltip
-                  key={key}
-                  title={BROWSER_USE_META[key].hint}
-                  placement="left"
-                  enterDelay={200}
-                >
-                  <MenuItem
-                    selected={browserUseMode === key}
-                    onClick={() => void handleBrowserUseModeSelect(key)}
-                    sx={{
-                      "&.Mui-selected": {
-                        bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
-                        "&:hover": {
-                          bgcolor: alpha(rowAccent, isDark ? 0.26 : 0.16),
-                        },
-                      },
-                    }}
-                  >
-                    <ListItemIcon
-                      sx={{
-                        minWidth: 40,
-                        lineHeight: 0,
-                        color: rowAccent,
-                        "& svg": { display: "block" },
-                      }}
-                    >
-                      <Globe2
-                        size={20}
-                        strokeWidth={2}
-                        color={rowAccent}
-                      />
-                    </ListItemIcon>
-                    <ListItemText
-                      primary={BROWSER_USE_META[key].label}
-                      secondary={BROWSER_USE_META[key].hint}
-                      primaryTypographyProps={{
-                        sx: { ...composerLabelText, color: rowAccent },
-                      }}
-                      secondaryTypographyProps={{
-                        sx: {
-                          mt: 0.25,
-                          color: alpha(ink, 0.72),
-                          fontSize: 12,
-                          lineHeight: 1.4,
-                        },
-                      }}
-                    />
-                  </MenuItem>
-                </Tooltip>
-              );
-            })}
-          </Menu>
-          <Dialog
-            open={browserInstallDialogOpen}
-            onClose={closeBrowserInstallDialog}
-            maxWidth="sm"
-            fullWidth
-          >
-            <DialogTitle>需要安装 Browser Operator 后端</DialogTitle>
-            <DialogContent>
-              <Stack spacing={2} sx={{ pt: 0.5 }}>
-                <Typography variant="body2" color="text.secondary">
-                  Omiga 已内置 browser_* 工具封装，但不会在你未启用浏览器控制时自动安装
-                  browser-use 或下载 Playwright 浏览器。选择{" "}
-                  {pendingBrowserUseMode
-                    ? BROWSER_USE_META[pendingBrowserUseMode].label
-                    : "浏览器模式"}{" "}
-                  前，需要先完成一次本机 setup，而不是普通启用开关。
-                </Typography>
-                <Alert severity="warning" sx={{ borderRadius: 2 }}>
-                  点击下方按钮即表示你显式确认执行安装：会写入用户目录，且“安装并下载浏览器”可能联网下载
-                  browser-use / Playwright browsers。
-                </Alert>
-                <Alert severity="info" sx={{ borderRadius: 2 }}>
-                  后端会安装到用户目录，不会写入项目依赖。默认位置：
-                  {browserBackendStatus?.managedHome ||
-                    "~/.omiga/browser-operator"}
-                </Alert>
-                <Typography variant="caption" color="text.secondary">
-                  “只安装后端”会跳过 Playwright 浏览器下载，适合已配置
-                  Chrome/CDP 的场景；“安装并下载浏览器”适合首次完整启用。
-                </Typography>
-                {browserBackendStatus?.configuredPython ? (
-                  <Typography variant="caption" color="text.secondary">
-                    已配置外部 Python：{browserBackendStatus.configuredPython}
-                  </Typography>
-                ) : null}
-                {browserBackendStatus?.playwrightBrowsersPath ? (
-                  <Typography variant="caption" color="text.secondary">
-                    Playwright 浏览器缓存：
-                    {browserBackendStatus.playwrightBrowsersPath}
-                  </Typography>
-                ) : null}
-                {browserInstallError ? (
-                  <Alert severity="error" sx={{ borderRadius: 2 }}>
-                    {browserInstallError}
-                  </Alert>
-                ) : null}
-              </Stack>
-            </DialogContent>
-            <DialogActions sx={{ px: 3, pb: 2, gap: 1, flexWrap: "wrap" }}>
-              <Button
-                onClick={closeBrowserInstallDialog}
-                disabled={browserInstallBusy}
-              >
-                取消
-              </Button>
-              <Button
-                onClick={() =>
-                  void handleBrowserBackendInstall("packages-only")
-                }
-                disabled={browserInstallBusy || browserInstallBlocked}
-                startIcon={
-                  browserInstallIntent === "packages-only" ? (
-                    <CircularProgress size={16} />
-                  ) : undefined
-                }
-              >
-                只安装后端
-              </Button>
-              <Button
-                variant="contained"
-                onClick={() => void handleBrowserBackendInstall("full")}
-                disabled={browserInstallBusy || browserInstallBlocked}
-                startIcon={
-                  browserInstallIntent === "full" ? (
-                    <CircularProgress size={16} color="inherit" />
-                  ) : undefined
-                }
-              >
-                安装并下载浏览器
-              </Button>
-            </DialogActions>
-          </Dialog>
 
           <Stack
             direction="row"

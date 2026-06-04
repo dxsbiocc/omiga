@@ -2708,7 +2708,10 @@ pub async fn send_message(
         };
 
     let skills_system_section = if skills_exist {
-        "This project has skills available. For non-trivial tasks, use `list_skills` to discover specialized workflows before falling back to generic tools.".to_string()
+        let icfg = integrations_config::load_integrations_config(&project_root);
+        let loaded = skills::load_skills_cached(&project_root, skill_cache_ref).await;
+        let filtered = integrations_config::filter_skill_entries(loaded, &icfg);
+        skills::format_skills_index_system_section(&project_root, &filtered)
     } else {
         String::new()
     };
@@ -3251,7 +3254,9 @@ pub async fn send_message(
             }
         };
         validate_permission_deny_entries(&deny_entries);
-        let mut all_schemas = all_tool_schemas(skills_exist);
+        // Always expose skill tools. A slow/failed preflight should not hide
+        // `list_skills` / `skill_view` / `skill` and push the model toward bash.
+        let mut all_schemas = all_tool_schemas(true);
         if computer_use_mode.is_enabled() {
             all_schemas.extend(crate::domain::computer_use::facade_tool_schemas());
         }

@@ -670,7 +670,7 @@ const permissionActionButtonSx = {
   },
 };
 
-/** 内联在输入框上方，非弹窗 */
+/** 渲染在输入区上方的轻量权限浮层内容。 */
 export const PermissionPromptBar: React.FC = () => {
   const { pendingRequest, approveRequest, approveWorkspaceForSession, denyRequest, error, clearError } =
     usePermissionStore();
@@ -816,10 +816,8 @@ export const PermissionPromptBar: React.FC = () => {
   return (
     <Box
       sx={{
-        px: 2,
-        py: 1.25,
-        borderBottom: 1,
-        borderColor: "divider",
+        px: 1.5,
+        py: 1,
         bgcolor: (t) =>
           t.palette.mode === "dark"
             ? "rgba(255,255,255,0.04)"

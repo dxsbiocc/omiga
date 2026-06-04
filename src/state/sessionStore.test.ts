@@ -21,7 +21,7 @@ const baseSession = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
-describe("sessionStore sendMessage browserUseMode payload", () => {
+describe("sessionStore sendMessage computerUseMode payload", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue({
@@ -32,20 +32,18 @@ describe("sessionStore sendMessage browserUseMode payload", () => {
     useSessionStore.setState({ activeRounds: new Map() });
   });
 
-  it("passes browserUseMode through to the send_message payload", async () => {
+  it("passes computerUseMode through to the send_message payload", async () => {
     await useSessionStore.getState().sendMessage({
       content: "open example.com",
       use_tools: true,
-      browserUseMode: "task",
-      computerUseMode: "off",
+      computerUseMode: "task",
     });
 
     expect(invokeMock).toHaveBeenCalledWith("send_message", {
       request: expect.objectContaining({
         content: "open example.com",
         use_tools: true,
-        browserUseMode: "task",
-        computerUseMode: "off",
+        computerUseMode: "task",
       }),
     });
   });

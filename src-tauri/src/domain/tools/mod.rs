@@ -182,6 +182,7 @@ pub enum ToolKind {
     ReadMcpResource,
     #[serde(rename = "ListSkills")]
     ListSkills,
+    SkillView,
     #[serde(rename = "Skill")]
     SkillInvoke,
     #[serde(rename = "Agent")]
@@ -280,6 +281,7 @@ impl fmt::Display for ToolKind {
             ToolKind::ListMcpResources => write!(f, "list_mcp_resources"),
             ToolKind::ReadMcpResource => write!(f, "read_mcp_resource"),
             ToolKind::ListSkills => write!(f, "ListSkills"),
+            ToolKind::SkillView => write!(f, "skill_view"),
             ToolKind::SkillInvoke => write!(f, "Skill"),
             ToolKind::Agent => write!(f, "Agent"),
             ToolKind::SendUserMessage => write!(f, "SendUserMessage"),
@@ -361,6 +363,7 @@ pub enum Tool {
     ReadMcpResource(read_mcp_resource::ReadMcpResourceArgs),
     #[serde(rename = "ListSkills")]
     ListSkills(list_skills::ListSkillsArgs),
+    SkillView(skill_view::SkillViewArgs),
     #[serde(rename = "Skill")]
     SkillInvoke(skill_invoke::SkillInvokeArgs),
     Agent(agent::AgentArgs),
@@ -433,6 +436,7 @@ impl Tool {
             Tool::ListMcpResources(_) => ToolKind::ListMcpResources,
             Tool::ReadMcpResource(_) => ToolKind::ReadMcpResource,
             Tool::ListSkills(_) => ToolKind::ListSkills,
+            Tool::SkillView(_) => ToolKind::SkillView,
             Tool::SkillInvoke(_) => ToolKind::SkillInvoke,
             Tool::Agent(_) => ToolKind::Agent,
             Tool::SendUserMessage(_) => ToolKind::SendUserMessage,
@@ -501,6 +505,7 @@ impl Tool {
             Tool::ListMcpResources(_) => "ListMcpResources",
             Tool::ReadMcpResource(_) => "ReadMcpResource",
             Tool::ListSkills(_) => "ListSkills",
+            Tool::SkillView(_) => "skill_view",
             Tool::SkillInvoke(_) => "Skill",
             Tool::Agent(_) => "Agent",
             Tool::SendUserMessage(_) => "SendUserMessage",
@@ -577,6 +582,9 @@ impl Tool {
             Tool::ListMcpResources(_) => list_mcp_resources::DESCRIPTION,
             Tool::ReadMcpResource(_) => read_mcp_resource::DESCRIPTION,
             Tool::ListSkills(_) => list_skills::DESCRIPTION,
+            Tool::SkillView(_) => {
+                "Read full SKILL.md text for one skill, or a bundled reference file."
+            }
             Tool::SkillInvoke(_) => skill_invoke::DESCRIPTION,
             Tool::Agent(_) => agent::DESCRIPTION,
             Tool::SendUserMessage(_) => send_user_message::DESCRIPTION,
@@ -723,6 +731,32 @@ impl Tool {
                 let json =
                     skills::list_skills_metadata_json(&all_skills, args.query.as_deref(), task_ctx);
                 return Ok(stream_single(StreamOutputItem::Text(json)));
+            }
+            Tool::SkillView(args) => {
+                use crate::domain::skills;
+                use crate::infrastructure::streaming::{stream_single, StreamOutputItem};
+                let cache = ctx.skill_cache.clone().unwrap_or_else(|| {
+                    Arc::new(std::sync::Mutex::new(skills::SkillCacheMap::default()))
+                });
+                let all_skills = skills::load_skills_cached(&ctx.project_root, &cache).await;
+                match skills::execute_skill_view(
+                    &all_skills,
+                    args.skill.trim(),
+                    args.file_path.as_deref(),
+                )
+                .await
+                {
+                    Ok(value) => {
+                        let json = serde_json::to_string_pretty(&value)
+                            .unwrap_or_else(|_| "{\"success\":false}".to_string());
+                        return Ok(stream_single(StreamOutputItem::Text(json)));
+                    }
+                    Err(e) => {
+                        return Err(ToolError::ExecutionFailed {
+                            message: e.to_string(),
+                        })
+                    }
+                }
             }
             Tool::SkillInvoke(args) => {
                 use crate::domain::skills;
@@ -1040,6 +1074,12 @@ impl Tool {
                 })?;
                 Ok(Tool::ListSkills(args))
             }
+            ToolKind::SkillView => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid skill_view arguments: {}", e),
+                })?;
+                Ok(Tool::SkillView(args))
+            }
             ToolKind::SkillInvoke => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid SkillInvoke arguments: {}", e),
@@ -1237,8 +1277,9 @@ impl Tool {
             "ask_user_question" | "AskUserQuestion" => ToolKind::AskUserQuestion,
             "list_mcp_resources" | "ListMcpResourcesTool" => ToolKind::ListMcpResources,
             "read_mcp_resource" | "ReadMcpResourceTool" => ToolKind::ReadMcpResource,
-            "ListSkills" => ToolKind::ListSkills,
-            "Skill" => ToolKind::SkillInvoke,
+            "ListSkills" | "list_skills" | "skills_list" => ToolKind::ListSkills,
+            "skill_view" | "SkillView" => ToolKind::SkillView,
+            "Skill" | "skill" => ToolKind::SkillInvoke,
             "Agent" | "Task" | "agent" => ToolKind::Agent,
             "SendUserMessage" | "Brief" | "send_user_message" => ToolKind::SendUserMessage,
             "ExitPlanMode" | "exit_plan_mode" => ToolKind::ExitPlanMode,
@@ -2016,7 +2057,9 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "task_stop" | "TaskStop" => (3, 6),
         "sleep" => (3, 7),
         "ask_user_question" | "AskUserQuestion" => (3, 8),
-        "skill_manage" | "skill_config" | "list_skills" | "skill_view" | "Skill" => (3, 9),
+        "skill_manage" | "skill_config" | "list_skills" | "skill_view" | "Skill" | "skill" => {
+            (3, 9)
+        }
         "workflow" | "Workflow" => (3, 10),
         "visualization" => (3, 11),
         "enter_plan_mode" | "EnterPlanMode" => (3, 12),
@@ -2257,6 +2300,18 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("ReadMcpResourceTool", r#"{"server":"s","uri":"u"}"#).unwrap();
         assert!(matches!(t, Tool::ReadMcpResource(_)));
+
+        let t = Tool::from_json_str("list_skills", "{}").unwrap();
+        assert!(matches!(t, Tool::ListSkills(_)));
+
+        let t = Tool::from_json_str("skills_list", "{}").unwrap();
+        assert!(matches!(t, Tool::ListSkills(_)));
+
+        let t = Tool::from_json_str("skill_view", r#"{"skill":"diagnose"}"#).unwrap();
+        assert!(matches!(t, Tool::SkillView(_)));
+
+        let t = Tool::from_json_str("skill", r#"{"skill":"diagnose"}"#).unwrap();
+        assert!(matches!(t, Tool::SkillInvoke(_)));
 
         let t =
             Tool::from_json_str("Agent", r#"{"description":"test","prompt":"do thing"}"#).unwrap();

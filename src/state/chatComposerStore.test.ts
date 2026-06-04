@@ -12,48 +12,46 @@ import {
   useChatComposerStore,
 } from "./chatComposerStore";
 
-describe("chatComposerStore browserUseMode", () => {
+describe("chatComposerStore permissionMode", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
     useChatComposerStore.getState().resetToDefaults();
   });
 
-  it("defaults browserUseMode to off", () => {
-    expect(useChatComposerStore.getState().browserUseMode).toBe("off");
-  });
-
-  it("resets task-scoped browserUseMode after send-style cleanup", () => {
-    const store = useChatComposerStore.getState();
-
-    store.setBrowserUseMode("task");
-    store.resetTaskBrowserUseMode();
-
-    expect(useChatComposerStore.getState().browserUseMode).toBe("off");
-  });
-
-  it("keeps session-scoped browserUseMode enabled across task reset", () => {
-    const store = useChatComposerStore.getState();
-
-    store.setBrowserUseMode("session");
-    store.resetTaskBrowserUseMode();
-
-    expect(useChatComposerStore.getState().browserUseMode).toBe("session");
-  });
-
-  it("clears browserUseMode when switching sessions", () => {
-    useChatComposerStore.getState().setBrowserUseMode("session");
-
-    useChatComposerStore.getState().initForSession("session-2", {
+  it("syncs permission mode changes to the active backend session immediately", () => {
+    useChatComposerStore.getState().initForSession("session-stance", {
       composer_agent_type: "auto",
-      permission_mode: "auto",
+      permission_mode: "ask",
       execution_environment: "local",
       sandbox_backend: "docker",
       local_venv_type: "none",
       local_venv_name: "",
       use_worktree: false,
     });
+    invokeMock.mockClear();
 
-    expect(useChatComposerStore.getState().browserUseMode).toBe("off");
+    useChatComposerStore.getState().setPermissionMode("auto");
+
+    expect(invokeMock).toHaveBeenCalledWith("save_session_config_command", {
+      sessionId: "session-stance",
+      config: expect.objectContaining({ permission_mode: "auto" }),
+    });
+    expect(invokeMock).toHaveBeenCalledWith("permission_set_session_stance", {
+      sessionId: "session-stance",
+      stance: "auto",
+    });
+  });
+
+  it("does not sync permission stance before a session is active", () => {
+    invokeMock.mockClear();
+
+    useChatComposerStore.getState().setPermissionMode("auto");
+
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "permission_set_session_stance",
+      expect.anything(),
+    );
   });
 });
 

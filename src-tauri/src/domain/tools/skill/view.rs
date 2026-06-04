@@ -2,6 +2,17 @@
 //! Pair with `list_skills` for discovery; use `skill` to execute.
 
 use super::ToolSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillViewArgs {
+    /// Skill name. `name` is accepted for Hermes/Claude-compatible callers.
+    #[serde(alias = "name")]
+    pub skill: String,
+    /// Optional relative path under the skill directory.
+    #[serde(default)]
+    pub file_path: Option<String>,
+}
 
 pub fn schema() -> ToolSchema {
     ToolSchema::new(

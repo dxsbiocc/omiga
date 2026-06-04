@@ -873,7 +873,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
         let display_input =
             crate::domain::browser_operator::redact_arguments_for_display(&args_value).to_string();
         let error_msg = format!(
-            "Browser Operator facade tool `{tool_name}` is not enabled for this task. Enable Browser Use as `task` or `session` before using `browser_*` tools."
+            "Browser Operator facade tool `{tool_name}` is not enabled for this task. Select the Browser plugin or use a compatible Browser Operator gate before using `browser_*` tools."
         );
         let _ = app.emit(
             &format!("chat-stream-{}", message_id),
@@ -2414,7 +2414,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                 crate::domain::browser_operator::redact_arguments_for_display(&args_value)
                     .to_string();
             let error_msg = format!(
-                "Browser Operator facade tool `{tool_name}` is not enabled for this task. Enable Browser Use as `task` or `session` before using `browser_*` tools."
+                "Browser Operator facade tool `{tool_name}` is not enabled for this task. Select the Browser plugin or use a compatible Browser Operator gate before using `browser_*` tools."
             );
             let _ = app.emit(
                 &format!("chat-stream-{}", message_id),

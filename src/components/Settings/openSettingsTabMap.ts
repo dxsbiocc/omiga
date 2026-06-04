@@ -41,7 +41,7 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   notebook: 4,
   jupyter: 4,
   ipynb: 4,
-  /** Browser Operator setup lives in Execution; Composer controls per-turn/session enablement. */
+  /** Browser Operator setup lives in Execution; runtime access is handled through plugins. */
   "browser-operator": 9,
   browser_operator: 9,
   "browser-use": 9,

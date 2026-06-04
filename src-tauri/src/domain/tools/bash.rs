@@ -169,6 +169,80 @@ fn detect_blocked_sleep_pattern(command: &str, run_in_background: bool) -> Optio
     }
 }
 
+fn first_shell_word(segment: &str) -> Option<&str> {
+    let mut parts = segment.split_whitespace();
+    loop {
+        let word = parts.next()?;
+        if word.contains('=')
+            && !word.starts_with('-')
+            && word
+                .split_once('=')
+                .is_some_and(|(key, _)| key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()))
+        {
+            continue;
+        }
+        return Some(word.trim_matches(|c: char| c == '\'' || c == '"'));
+    }
+}
+
+fn dedicated_tool_preference_violation(command: &str) -> Option<&'static str> {
+    let trimmed = command.trim();
+    let (first_segment, _) = split_first_list_segment(trimmed);
+    let executable = first_shell_word(first_segment)?;
+    let executable = executable.rsplit('/').next().unwrap_or(executable);
+    let executable = executable.to_ascii_lowercase();
+
+    match executable.as_str() {
+        "grep" | "egrep" | "fgrep" | "rg" | "ripgrep" => {
+            return Some(
+                "Blocked: this is file/content search through bash. Use the dedicated `ripgrep` tool (`pattern`, optional `path`) so results are structured, bounded, and reviewable. If this task may need a workflow, call `list_skills` / `skill_view` before falling back to bash.",
+            );
+        }
+        "cat" | "head" | "tail" | "less" | "more" => {
+            return Some(
+                "Blocked: this reads file content through bash. Use the dedicated `file_read` tool instead. If this task may need a workflow, call `list_skills` / `skill_view` first.",
+            );
+        }
+        "sed" if first_segment.contains(" -n") || first_segment.starts_with("sed -n") => {
+            return Some(
+                "Blocked: this is a file-read style `sed` command. Use `file_read` for bounded file inspection, or `file_edit` for edits.",
+            );
+        }
+        "python" | "python3" | "node" | "ruby" | "perl" | "rscript" => {
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.contains(" -c ")
+                || lower.contains(" -e ")
+                || lower.contains(" <<")
+                || trimmed.len() > 240
+                || trimmed.contains('\n')
+            {
+                return Some(
+                    "Blocked: long inline code through bash is fragile and caused the repeated quoting/corruption failures. Write the code with `file_write` / `file_edit` (or `notebook_edit` for notebooks), then run the saved script with bash.",
+                );
+            }
+        }
+        _ => {}
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let looks_like_shell_write = lower.contains("<<")
+        || lower.starts_with("cat >")
+        || lower.contains(" cat >")
+        || lower.starts_with("tee ")
+        || lower.contains(" tee ")
+        || lower.starts_with("echo ")
+        || lower.starts_with("printf ");
+    if looks_like_shell_write
+        && (lower.contains(" >") || lower.contains(">>") || lower.contains("<<"))
+    {
+        return Some(
+            "Blocked: this writes code/content through shell quoting. Use `file_write` or `file_edit` to create/update the file, then run it with bash if execution is needed.",
+        );
+    }
+
+    None
+}
+
 fn re_git_reset_hard() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\bgit\s+reset\s+--hard\b").expect("regex"))
@@ -249,6 +323,12 @@ impl BashArgs {
                     "Blocked: {}. Run long-running work without polling sleep, use a sub-second sleep only for pacing, or set `run_in_background: true` for long waits.",
                     detail
                 ),
+            });
+        }
+
+        if let Some(message) = dedicated_tool_preference_violation(&self.command) {
+            return Err(BashError::ExecutionFailed {
+                message: message.to_string(),
             });
         }
 
@@ -1223,6 +1303,31 @@ mod tests {
             ..args("sleep 5")
         };
         assert!(ok_bg.validate().is_ok());
+    }
+
+    #[test]
+    fn file_search_and_read_are_rejected_when_typed_tools_exist() {
+        let grep = args(r#"grep -rn -i "slurm" src 2>/dev/null | head -30"#);
+        let grep_err = grep.validate().unwrap_err().to_string();
+        assert!(grep_err.contains("ripgrep"));
+
+        let cat = args("cat src/main.rs");
+        let cat_err = cat.validate().unwrap_err().to_string();
+        assert!(cat_err.contains("file_read"));
+    }
+
+    #[test]
+    fn shell_quoting_writes_and_inline_scripts_are_rejected() {
+        let heredoc = args("python3 - <<'PY'\nprint('hello')\nPY");
+        let heredoc_err = heredoc.validate().unwrap_err().to_string();
+        assert!(heredoc_err.contains("file_write"));
+
+        let echo_write = args("echo 'hello' > output.txt");
+        let echo_err = echo_write.validate().unwrap_err().to_string();
+        assert!(echo_err.contains("file_write"));
+
+        let saved_script = args("python3 scripts/analyse.py");
+        assert!(saved_script.validate().is_ok());
     }
 
     #[test]

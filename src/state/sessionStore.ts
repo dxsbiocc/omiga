@@ -337,8 +337,6 @@ interface SendMessageRequest {
   permissionMode?: string;
   /** `off` | `task` | `session` — explicit Computer Use gate for this turn */
   computerUseMode?: "off" | "task" | "session";
-  /** `off` | `task` | `session` — explicit Browser Operator gate for this turn */
-  browserUseMode?: "off" | "task" | "session";
   /** DB user row id — truncate after this row and reuse instead of inserting a duplicate user message */
   retryFromUserMessageId?: string;
   /** Session's stored provider entry name — passed through for lazy LLM config restoration. */

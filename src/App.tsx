@@ -54,6 +54,7 @@ import {
   LAYOUT_PANEL_MIN,
 } from "./state";
 import { listenTauriEvent } from "./utils/tauriEvents";
+import { computeTitleBarContentLeft } from "./utils/titleBarLayout";
 import {
   defaultWebSearchQuerySettings,
   parseStoredWebSearchSettings,
@@ -291,14 +292,14 @@ export default function App() {
     TITLE_BAR_LEFT_PANEL_TOGGLE_LEFT +
     TITLE_BAR_CONTROL_SIZE * 4 +
     TITLE_BAR_TITLE_GAP;
-  const titleBarChatRailLeft =
-    (!leftPanelCollapsed && !showSettingsPanel
-      ? leftW + TITLE_BAR_RESIZE_HANDLE_WIDTH
-      : 0) + TITLE_BAR_CHAT_RAIL_INSET;
-  const titleBarContentLeft = Math.max(
-    titleBarButtonRailEnd,
-    titleBarChatRailLeft,
-  );
+  const titleBarContentLeft = computeTitleBarContentLeft({
+    buttonRailEnd: titleBarButtonRailEnd,
+    chatRailInset: TITLE_BAR_CHAT_RAIL_INSET,
+    leftPanelCollapsed,
+    leftPanelWidth: leftW,
+    resizeHandleWidth: TITLE_BAR_RESIZE_HANDLE_WIDTH,
+    showSettingsPanel,
+  });
   const titleBarSessionTitle =
     currentSession && !isPlaceholderSessionTitle(currentSession.name)
       ? currentSession.name
