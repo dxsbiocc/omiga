@@ -95,18 +95,72 @@ function firstNamedString(args: AnyArgs, names: string[]): string | null {
 }
 
 function summarizeShellCommand(command: string): string {
-  const firstLine = command.trim().split(/\r?\n/).find(Boolean) ?? "";
+  const firstLine = formatPermissionShellCommand(command)
+    .trim()
+    .split(/\r?\n/)
+    .find(Boolean) ?? "";
   if (!firstLine) return "Shell 命令";
   return firstLine.length > 72 ? `${firstLine.slice(0, 72)}…` : firstLine;
 }
 
-function summarizeArgsFallback(args: AnyArgs): string | undefined {
-  if (!args || Object.keys(args).length === 0) return undefined;
+export function normalizePermissionCodeText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  return trimmed
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\r")
+    .replace(/\\t/g, "\t");
+}
+
+export function formatPermissionShellCommand(command: string): string {
+  const normalized = normalizePermissionCodeText(command);
+  if (!normalized) return "";
+  if (normalized.includes("\n")) return normalized;
+  return normalized
+    .replace(/\s+&&\s+/g, " &&\n")
+    .replace(/\s+\|\|\s+/g, " ||\n")
+    .replace(/\s+\|\s+/g, " |\n");
+}
+
+function formatPermissionValueForDisplay(value: unknown): string {
+  if (typeof value === "string") return normalizePermissionCodeText(value);
   try {
-    return JSON.stringify(args, null, 2);
+    return JSON.stringify(normalizePermissionJsonStrings(value), null, 2);
   } catch {
-    return String(args);
+    return String(value);
   }
+}
+
+function normalizePermissionJsonStrings(value: unknown): unknown {
+  if (typeof value === "string") return normalizePermissionCodeText(value);
+  if (Array.isArray(value)) return value.map(normalizePermissionJsonStrings);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      normalizePermissionJsonStrings(entry),
+    ]),
+  );
+}
+
+export function summarizeArgsFallback(args: AnyArgs): string | undefined {
+  if (!args || Object.keys(args).length === 0) return undefined;
+  return Object.entries(args)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => {
+      const formatted = formatPermissionValueForDisplay(value);
+      if (
+        typeof value === "string" &&
+        formatted &&
+        !formatted.includes("\n") &&
+        formatted.length <= 80
+      ) {
+        return `${key}: ${formatted}`;
+      }
+      return `${key}:\n${formatted}`;
+    })
+    .join("\n\n");
 }
 
 export function inferIntent(
@@ -204,7 +258,7 @@ export function inferIntent(
   }
   if (toolName === "bash" || toolName === "Bash") {
     const cmd = firstString(args?.command) ?? firstString(args?.cmd) ?? "";
-    const cmdTrim = cmd.trim();
+    const cmdTrim = formatPermissionShellCommand(cmd).trim();
     const commandDetail =
       cmdTrim || summarizeArgsFallback(args) || "未收到命令内容；请拒绝并让 Agent 重新发起。";
     const lower = cmdTrim.toLowerCase();
@@ -464,7 +518,7 @@ export function permissionSessionApprovalCopy(
 const INSTALL_LOCATION_QUESTION =
   "该命令会安装软件/依赖。请选择安装位置或处理方式。";
 const INSTALL_CURRENT_LABEL = "按当前命令安装（仅本次）";
-const INSTALL_PROJECT_LABEL = "安装到当前项目/虚拟环境（推荐）";
+const INSTALL_PROJECT_LABEL = "安装到当前项目/虚拟环境";
 const INSTALL_USER_LABEL = "安装到用户目录";
 const INSTALL_CUSTOM_LABEL = "自定义安装位置";
 const INSTALL_DENY_LABEL = "不安装";
@@ -521,6 +575,7 @@ export function permissionInstallChoiceQuestions(): AskUserQuestionItem[] {
           label: INSTALL_PROJECT_LABEL,
           description:
             "不要执行当前命令；让助手改用项目内依赖、虚拟环境或 lockfile 友好的安装方式。",
+          recommended: true,
         },
         {
           label: INSTALL_CURRENT_LABEL,
@@ -740,6 +795,13 @@ export const PermissionPromptBar: React.FC = () => {
     pendingRequest.tool_name,
     connectorIntent,
   );
+  const isShellPermission = ["bash", "Bash", "shell"].includes(
+    pendingRequest.tool_name,
+  );
+  const plainDescription = pendingRequest.plain_description?.trim();
+  const showPlainDescription = Boolean(
+    plainDescription && !(isShellPermission && detail),
+  );
 
   // "会话内放行工作区" button: show when workspace is configured, risk is Medium,
   // and it's not a connector write (those always need explicit confirmation per operation)
@@ -816,7 +878,7 @@ export const PermissionPromptBar: React.FC = () => {
         </Stack>
 
         {/* Human-readable plain description from backend (e.g. "AI wants to run: rm -rf /tmp/build") */}
-        {pendingRequest.plain_description && (
+        {showPlainDescription && plainDescription && (
           <Typography
             variant="body2"
             sx={{
@@ -838,7 +900,7 @@ export const PermissionPromptBar: React.FC = () => {
               wordBreak: "break-word",
             }}
           >
-            {pendingRequest.plain_description}
+            {plainDescription}
           </Typography>
         )}
 

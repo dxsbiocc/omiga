@@ -60,6 +60,26 @@ function isQuestionAnswered(
   return parseMultiLabels(v).length > 0;
 }
 
+function optionLabelAlreadyMarksRecommended(label: string): boolean {
+  return /(?:推荐|recommended)/i.test(label);
+}
+
+export function askUserOptionShouldShowRecommendedChip(
+  q: AskUserQuestionItem,
+  opt: AskUserQuestionOption,
+  index: number,
+): boolean {
+  if (optionLabelAlreadyMarksRecommended(opt.label)) return false;
+  if (opt.recommended) return true;
+  if (q.multiSelect) return false;
+  const hasExplicitRecommended = q.options.some(
+    (candidate) =>
+      candidate.recommended ||
+      optionLabelAlreadyMarksRecommended(candidate.label),
+  );
+  return !hasExplicitRecommended && index === 0;
+}
+
 type AskUserQuestionWizardProps = {
   /** Resets step index when a new pending tool call appears */
   resetKey: string;
@@ -175,10 +195,15 @@ export function AskUserQuestionWizard({
         <FormControl component="fieldset" sx={{ display: "block", width: "100%", mb: 1.5 }}>
           {q.multiSelect ? (
             <Stack spacing={0.35}>
-              {q.options.map((opt) => {
+              {q.options.map((opt, index) => {
                 const qt = q.question.trim();
                 const cur = parseMultiLabels(askUserSelectionRaw(selections, qt));
                 const checked = cur.includes(opt.label);
+                const recommended = askUserOptionShouldShowRecommendedChip(
+                  q,
+                  opt,
+                  index,
+                );
                 return (
                   <Box
                     key={opt.label}
@@ -223,7 +248,7 @@ export function AskUserQuestionWizard({
                             >
                               {opt.label}
                             </Typography>
-                            {opt.recommended ? (
+                            {recommended ? (
                               <Chip
                                 size="small"
                                 label="推荐"
@@ -268,10 +293,15 @@ export function AskUserQuestionWizard({
                 }))
               }
             >
-              {q.options.map((opt) => {
+              {q.options.map((opt, index) => {
                 const raw = askUserSelectionRaw(selections, q.question.trim());
                 const selected =
                   askUserSelectedOptionLabel(q, raw) === opt.label;
+                const recommended = askUserOptionShouldShowRecommendedChip(
+                  q,
+                  opt,
+                  index,
+                );
                 return (
                   <Box
                     key={opt.label}
@@ -297,7 +327,7 @@ export function AskUserQuestionWizard({
                             >
                               {opt.label}
                             </Typography>
-                            {opt.recommended ? (
+                            {recommended ? (
                               <Chip
                                 size="small"
                                 label="推荐"

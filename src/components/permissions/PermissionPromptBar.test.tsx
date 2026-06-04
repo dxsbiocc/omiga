@@ -7,6 +7,7 @@ import {
   PERMISSION_PROMPT_HEADER_MIN_HEIGHT,
   PERMISSION_PROMPT_ROOT_OVERFLOW_Y,
   PERMISSION_RUN_CONTENT_MAX_HEIGHT,
+  formatPermissionShellCommand,
   inferIntent,
   permissionCommandSafetyKind,
   permissionInstallChoiceQuestions,
@@ -85,13 +86,15 @@ describe("PermissionPromptBar connector intent", () => {
   it("uses Bash descriptions as the concrete request operation", () => {
     const intent = inferIntent("Bash", {
       description: "Per-group FCN3 expression statistics",
-      command: "python3 - <<'PYEOF'\nprint('stats')\nPYEOF",
+      command: "python3 - <<'PYEOF'\\nprint('stats')\\nPYEOF",
     });
 
     expect(intent.title).toBe("执行命令");
     expect(intent.operation).toBe("运行：Per-group FCN3 expression statistics");
     expect(intent.contentLabel).toBe("运行内容");
     expect(intent.detail).toContain("python3");
+    expect(intent.detail).toContain("\nprint('stats')\n");
+    expect(intent.detail).not.toContain("\\nprint");
   });
 
   it("shows only the concrete Bash title in the prompt header", () => {
@@ -106,12 +109,14 @@ describe("PermissionPromptBar connector intent", () => {
   it("falls back to raw Bash arguments when command text is missing", () => {
     const intent = inferIntent("Bash", {
       description: "生成最终可视化 JSON",
-      script: "python3 -c 'print(1)'",
+      script: "python3 - <<'PY'\\nprint(1)\\nPY",
     });
 
     expect(permissionPromptDisplayTitle(intent)).toBe("生成最终可视化 JSON");
-    expect(intent.detail).toContain('"script"');
-    expect(intent.detail).toContain("python3 -c");
+    expect(intent.detail).toContain("script:\npython3");
+    expect(intent.detail).toContain("\nprint(1)\n");
+    expect(intent.detail).not.toContain('"script"');
+    expect(intent.detail).not.toContain("\\nprint");
   });
 
   it("warns when a Bash request contains no displayable command arguments", () => {
@@ -168,14 +173,24 @@ describe("PermissionPromptBar connector intent", () => {
   it("asks install location through choices instead of yes/no", () => {
     const [question] = permissionInstallChoiceQuestions();
     const labels = question.options.map((opt) => opt.label);
+    const recommended = question.options.filter((opt) => opt.recommended);
 
     expect(question.question).toContain("请选择安装位置");
-    expect(labels).toContain("安装到当前项目/虚拟环境（推荐）");
+    expect(labels).toContain("安装到当前项目/虚拟环境");
     expect(labels).toContain("按当前命令安装（仅本次）");
     expect(labels).toContain("自定义安装位置");
     expect(labels).toContain("不安装");
     expect(labels).not.toContain("是");
     expect(labels).not.toContain("否");
+    expect(recommended.map((opt) => opt.label)).toEqual([
+      "安装到当前项目/虚拟环境",
+    ]);
+  });
+
+  it("formats compound shell commands for permission review", () => {
+    expect(formatPermissionShellCommand("cd app && bun test | cat")).toBe(
+      "cd app &&\nbun test |\ncat",
+    );
   });
 
   it("normalizes email connector send requests", () => {
