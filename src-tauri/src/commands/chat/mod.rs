@@ -119,9 +119,17 @@ fn tool_round_limit_follow_ups() -> Vec<FollowUpSuggestion> {
 }
 
 fn truncate_tool_error_for_fallback(output: &str) -> String {
+    truncate_tool_result_for_fallback(output, true)
+}
+
+fn truncate_tool_result_for_fallback(output: &str, is_error: bool) -> String {
     let trimmed = output.trim();
     if trimmed.is_empty() {
-        return "工具返回了错误，但没有提供可展示的错误文本。".to_string();
+        return if is_error {
+            "工具返回了错误，但没有提供可展示的错误文本。".to_string()
+        } else {
+            "工具执行完成，但没有返回可展示文本。".to_string()
+        };
     }
     let prefix = truncate_utf8_prefix(trimmed, 240).trim();
     if prefix.len() < trimmed.len() {
@@ -129,6 +137,44 @@ fn truncate_tool_error_for_fallback(output: &str) -> String {
     } else {
         prefix.to_string()
     }
+}
+
+fn tool_no_final_answer_message(tool_results: &[(String, String, bool)]) -> String {
+    let has_errors = tool_results.iter().any(|(_, _, is_error)| *is_error);
+    if has_errors {
+        return tool_failure_no_final_answer_message(tool_results);
+    }
+
+    let snippets: Vec<String> = tool_results
+        .iter()
+        .rev()
+        .take(5)
+        .map(|(name, output, is_error)| {
+            let summary = truncate_tool_result_for_fallback(output, *is_error).replace('`', "'");
+            format!("`{}`：{}", name.replace('`', "'"), summary)
+        })
+        .collect();
+
+    let mut message = String::from(
+        "### 工具已执行，但没有生成最终回复\n\n\
+上方工具调用已经返回结果，但模型没有继续输出总结。为避免界面显示“已完成”却没有交代，我已停止本轮并保留工具记录。\n\n",
+    );
+
+    if !snippets.is_empty() {
+        message.push_str("**最近工具结果**\n");
+        for (idx, snippet) in snippets.iter().enumerate() {
+            message.push_str(&format!("{}. {snippet}\n", idx + 1));
+        }
+        message.push('\n');
+    }
+
+    message.push_str(
+        "**建议下一步**\n\
+1. 展开上方最后几个工具，确认写入文件、输出和错误状态是否符合预期。\n\
+2. 让我基于当前工具结果继续整理最终答案，不要重新从头执行。\n\
+3. 如果要继续自动执行，请先按“一个最小命令 → 验证 → 再下一步”的方式收敛。\n",
+    );
+    message
 }
 
 fn tool_failure_no_final_answer_message(tool_results: &[(String, String, bool)]) -> String {
@@ -174,6 +220,8 @@ fn should_update_memory_after_turn(final_reply: &str, had_tool_errors: bool) -> 
         "已达到工具调用上限",
         "本轮没有稳定完成",
         "没有生成可交付的最终回复",
+        "工具已执行，但没有生成最终回复",
+        "模型没有继续输出总结",
         "exceeded maximum tool rounds",
         "autopilot stopped",
         "[cancelled",
@@ -4818,15 +4866,24 @@ pub async fn send_message(
                 }
             }
 
-            let synthesized_failure_reply = next_tools.is_empty()
-                && next_text.trim().is_empty()
-                && tool_results.iter().any(|(_, _, is_error)| *is_error);
-            let assistant_text_for_turn = if synthesized_failure_reply {
-                tool_failure_no_final_answer_message(&tool_results)
+            let synthesized_empty_final_reply =
+                next_tools.is_empty() && next_text.trim().is_empty() && !tool_results.is_empty();
+            let assistant_text_for_turn = if synthesized_empty_final_reply {
+                tool_no_final_answer_message(&tool_results)
             } else {
                 next_text.clone()
             };
             final_reply_for_follow_up = assistant_text_for_turn.clone();
+
+            if synthesized_empty_final_reply
+                && !agent_runtime.runtime_constraints_config.buffer_responses
+            {
+                emit_buffered_assistant_text(
+                    &app_clone,
+                    &message_id_clone,
+                    &assistant_text_for_turn,
+                );
+            }
 
             if agent_runtime.runtime_constraints_config.buffer_responses && !next_tools.is_empty() {
                 emit_buffered_assistant_text(&app_clone, &message_id_clone, &next_text);
@@ -5479,6 +5536,31 @@ mod tests {
     }
 
     #[test]
+    fn empty_final_after_successful_tools_gets_visible_summary_message() {
+        let results = vec![
+            (
+                "file_write".to_string(),
+                "File created (1251 bytes)".to_string(),
+                false,
+            ),
+            (
+                "bash".to_string(),
+                "Created /tmp/run_slurm.sh".to_string(),
+                false,
+            ),
+        ];
+
+        let message = tool_no_final_answer_message(&results);
+
+        assert!(message.contains("工具已执行，但没有生成最终回复"));
+        assert!(message.contains("最近工具结果"));
+        assert!(message.contains("File created"));
+        assert!(message.contains("Created /tmp/run_slurm.sh"));
+        assert!(message.contains("建议下一步"));
+        assert!(!should_update_memory_after_turn(&message, false));
+    }
+
+    #[test]
     fn safety_stop_replies_do_not_update_memory() {
         assert!(!should_update_memory_after_turn("", false));
         assert!(!should_update_memory_after_turn(
@@ -5492,6 +5574,10 @@ mod tests {
         assert!(!should_update_memory_after_turn(
             "任务完成：中间有一次命令失败但后来恢复。",
             true,
+        ));
+        assert!(!should_update_memory_after_turn(
+            "### 工具已执行，但没有生成最终回复\n\n模型没有继续输出总结。",
+            false,
         ));
         assert!(should_update_memory_after_turn(
             "任务完成：已写入文件并通过测试。",
