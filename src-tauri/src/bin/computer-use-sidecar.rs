@@ -29,6 +29,7 @@ const MAX_VISUAL_TEXT_ITEMS: usize = 40;
 const MAX_VISUAL_TEXT_CHARS: usize = 120;
 const BACKEND_RUST_MOCK: &str = "computer-use-rust-mock-mcp";
 const BACKEND_RUST_MACOS: &str = "computer-use-rust-macos-mcp";
+const BACKEND_RUST_UNAVAILABLE: &str = "computer-use-rust-unavailable-mcp";
 const VISION_OCR_SWIFT: &str = r#"
 import Foundation
 import Vision
@@ -122,6 +123,7 @@ enum BackendMode {
     Mock,
     Real,
     Auto,
+    Unavailable,
 }
 
 impl BackendMode {
@@ -132,19 +134,32 @@ impl BackendMode {
             .to_ascii_lowercase()
             .as_str()
         {
-            "mock" | "test" => Self::Mock,
+            "mock" | "test" if mock_backend_allowed() => Self::Mock,
+            "mock" | "test" => Self::Unavailable,
             "real" | "macos" | "mac" => Self::Real,
             _ => Self::Auto,
         }
     }
+}
 
-    fn uses_real_backend(self) -> bool {
-        match self {
-            Self::Mock => false,
-            Self::Real => true,
-            Self::Auto => cfg!(target_os = "macos"),
+fn mock_backend_allowed() -> bool {
+    for key in [
+        "OMIGA_ALLOW_MOCK_BACKENDS",
+        "OMIGA_ALLOW_MOCK_COMPUTER_USE",
+        "OMIGA_COMPUTER_USE_ALLOW_MOCK",
+    ] {
+        if let Ok(v) = env::var(key) {
+            let trimmed = v.trim();
+            if trimmed == "1"
+                || trimmed.eq_ignore_ascii_case("true")
+                || trimmed.eq_ignore_ascii_case("yes")
+                || trimmed.eq_ignore_ascii_case("on")
+            {
+                return true;
+            }
         }
     }
+    false
 }
 
 #[derive(Clone, Debug)]
@@ -336,10 +351,27 @@ fn tool_result(
     stopped_runs: &mut HashSet<String>,
     observations: &mut HashMap<String, Value>,
 ) -> Value {
-    if BackendMode::from_env().uses_real_backend() {
-        return real_tool_result(name, args, stopped_runs, observations);
+    match BackendMode::from_env() {
+        BackendMode::Real => return real_tool_result(name, args, stopped_runs, observations),
+        BackendMode::Auto if cfg!(target_os = "macos") => {
+            return real_tool_result(name, args, stopped_runs, observations)
+        }
+        BackendMode::Mock => return mock_tool_result(name, args, stopped_runs),
+        BackendMode::Auto | BackendMode::Unavailable => {}
     }
-    mock_tool_result(name, args, stopped_runs)
+    unavailable_backend_result(name)
+}
+
+fn unavailable_backend_result(name: &str) -> Value {
+    json!({
+        "ok": false,
+        "backend": BACKEND_RUST_UNAVAILABLE,
+        "action": name,
+        "error": "computer_use_backend_unavailable",
+        "message": "Computer Use Rust sidecar has no backend on this platform/configuration.",
+        "safeToAct": false,
+        "requiresPermission": false,
+    })
 }
 
 fn mock_tool_result(

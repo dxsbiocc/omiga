@@ -3,7 +3,7 @@
 //! Aligned with main-repo [`src/tools/BashTool/BashTool.tsx`] and [`src/utils/timeouts.ts`]:
 //! - Optional **`timeout` in milliseconds** (same as upstream); falls back to **`timeout_secs`** or env
 //! - Default **120s** unless `BASH_DEFAULT_TIMEOUT_MS` is set; max **600s** unless `BASH_MAX_TIMEOUT_MS`
-//! - Optional fields: `description`, `run_in_background`, `dangerously_disable_sandbox` (parity with Zod schema)
+//! - Optional fields: `description`, `exec_session_id`, `run_in_background`, `dangerously_disable_sandbox` (parity with Zod schema)
 //! - Uses **`bash -l -c`** so the environment matches login-shell init (see `bashProvider.ts` `getSpawnArgs`)
 //!
 //! Working directory resolution matches filesystem tools: project-relative paths,
@@ -32,6 +32,7 @@ use tokio::time::timeout;
 
 /// Total stdout+stderr cap to avoid huge tool results / memory use (≈2 MiB).
 const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+const SANDBOX_DENIED_PREFIX: &str = "SANDBOX_DENIED:";
 
 pub const DESCRIPTION: &str = r#"Execute a bash command in the given working directory.
 
@@ -39,8 +40,9 @@ Defaults (same as upstream Claude Code bash / `src/tools/BashTool`):
 - Optional **`timeout`** in **milliseconds** (preferred). If omitted, `timeout_secs` or `BASH_DEFAULT_TIMEOUT_MS` applies (default **120s**).
 - Maximum duration is **600s** (10 minutes), overridable via `BASH_MAX_TIMEOUT_MS`.
 - Optional **`description`**: short human summary of what the command does (shown in UI / metadata).
+- **`exec_session_id`**: optional local-only persistent bash session id. When set, commands run in a reused piped `bash -l` process so shell state like exported variables can persist across calls. No PTY is allocated, so interactive/TUI programs are not supported.
 - **`run_in_background`**: when true, the command runs in a **detached** task (like `spawnShellTask`); the tool returns immediately with a task id and output file path. Completion is emitted as Tauri event `background-shell-complete`.
-- **`dangerously_disable_sandbox`**: ignored (no sandbox layer in Omiga); kept for API compatibility.
+- **`dangerously_disable_sandbox`**: when true, skip the local platform sandbox escape hatch. Background shell callers cannot pass this per-call flag, so they default to sandboxed execution and can use `OMIGA_SANDBOX_DISABLE=1` only as a process-wide emergency escape.
 - `cwd` is optional: omit to use the session working directory (usually the project root), or set a path relative to the project root, or an absolute path / `~/...`.
 - Workspace hygiene: when inspecting a user-provided data/input directory, treat that directory as read-only by default. For commands that create scripts, notebooks, logs, temporary files, figures, or result tables, run from the session working directory and pass input data paths explicitly unless the user asked to write inside the input directory.
 
@@ -55,6 +57,9 @@ pub struct BashArgs {
     /// Relative to project root, absolute, or `~/...`; omit for session `cwd`
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Local-only persistent bash session id.
+    #[serde(default)]
+    pub exec_session_id: Option<String>,
     /// Milliseconds — matches upstream `timeout` on the bash tool (takes precedence over `timeout_secs`)
     #[serde(default)]
     pub timeout: Option<u64>,
@@ -406,8 +411,6 @@ fn pick_ssh_profile(cfg: &LlmConfigFile) -> Option<(&String, &SshExecConfig)> {
 #[derive(Clone, Copy)]
 enum RemoteBackend {
     Ssh,
-    Modal,
-    Daytona,
     Docker,
     Singularity,
 }
@@ -417,36 +420,34 @@ fn pick_remote_backend(cfg: &LlmConfigFile, ctx: &ToolContext) -> Result<RemoteB
     if sb != "auto" && !sb.is_empty() {
         return match sb.as_str() {
             "ssh" => Ok(RemoteBackend::Ssh),
-            "modal" => Ok(RemoteBackend::Modal),
-            "daytona" => Ok(RemoteBackend::Daytona),
             "docker" => Ok(RemoteBackend::Docker),
             "singularity" => Ok(RemoteBackend::Singularity),
+            "modal" | "daytona" => Err(format!(
+                "sandbox backend `{}` is not available in this build",
+                sb
+            )),
             _ => Err(format!("unknown sandbox backend: {}", sb)),
         };
     }
     if let Ok(s) = std::env::var("OMIGA_REMOTE_BACKEND") {
         return match s.to_lowercase().as_str() {
             "ssh" => Ok(RemoteBackend::Ssh),
-            "modal" => Ok(RemoteBackend::Modal),
-            "daytona" => Ok(RemoteBackend::Daytona),
             "docker" => Ok(RemoteBackend::Docker),
             "singularity" => Ok(RemoteBackend::Singularity),
+            "modal" | "daytona" => Err(format!(
+                "OMIGA_REMOTE_BACKEND={} is not available in this build",
+                s
+            )),
             _ => Err(format!("unknown OMIGA_REMOTE_BACKEND={}", s)),
         };
     }
     if pick_ssh_profile(cfg).is_some() {
         return Ok(RemoteBackend::Ssh);
     }
-    if cfg.is_modal_configured() {
-        return Ok(RemoteBackend::Modal);
-    }
-    if cfg.is_daytona_configured() {
-        return Ok(RemoteBackend::Daytona);
-    }
     Err(
         "「远程」bash 需要可用的远端执行配置：在 omiga.yaml 的 execution_envs.ssh 下添加已启用且含 HostName/User 的主机；\
-         或在沙箱菜单选择 SSH / Modal / Daytona / Docker / Singularity，\
-         或设置 OMIGA_REMOTE_BACKEND=modal|daytona|docker|singularity 并配置对应环境。\
+         或在沙箱菜单选择 SSH / Docker / Singularity，\
+         或设置 OMIGA_REMOTE_BACKEND=docker|singularity 并配置对应环境。\
          可选环境变量：OMIGA_SSH_PROFILE（指定 ssh 配置名）。"
             .to_string(),
     )
@@ -533,48 +534,6 @@ async fn run_remote_bash_ssh(
     Ok(exec_result_to_bash_raw(exec_result))
 }
 
-async fn run_remote_bash_modal(
-    cfg: &LlmConfigFile,
-    command: &str,
-    timeout_ms: u64,
-) -> Result<BashRawOutput, ToolError> {
-    let image = cfg
-        .execution_envs
-        .as_ref()
-        .and_then(|e| e.modal.as_ref())
-        .and_then(|m| m.default_image.clone())
-        .unwrap_or_else(|| "ubuntu:22.04".to_string());
-    let cwd = "/workspace".to_string();
-    let config = EnvironmentConfig {
-        r#type: EnvironmentType::Modal,
-        image: Some(image),
-        cwd: cwd.clone(),
-        timeout: timeout_ms.max(1_000),
-        task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
-        ..Default::default()
-    };
-    let env = create_environment(config)
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Modal 远程: {}", e),
-        })?;
-    let exec_opts = ExecOptions {
-        timeout: Some(timeout_ms),
-        cwd: Some(cwd),
-        stdin_data: None,
-    };
-    let exec_result = {
-        let mut guard = env.lock().await;
-        let r = guard.execute(command, exec_opts).await;
-        let _ = guard.cleanup().await;
-        r
-    }
-    .map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Modal 远程执行: {}", e),
-    })?;
-    Ok(exec_result_to_bash_raw(exec_result))
-}
-
 async fn run_remote_bash_docker(
     _cfg: &LlmConfigFile,
     command: &str,
@@ -651,48 +610,6 @@ async fn run_remote_bash_singularity(
     Ok(exec_result_to_bash_raw(exec_result))
 }
 
-async fn run_remote_bash_daytona(
-    cfg: &LlmConfigFile,
-    command: &str,
-    timeout_ms: u64,
-) -> Result<BashRawOutput, ToolError> {
-    let image = cfg
-        .execution_envs
-        .as_ref()
-        .and_then(|e| e.daytona.as_ref())
-        .and_then(|d| d.default_image.clone())
-        .unwrap_or_else(|| "ubuntu:22.04".to_string());
-    let cwd = "/workspace".to_string();
-    let config = EnvironmentConfig {
-        r#type: EnvironmentType::Daytona,
-        image: Some(image),
-        cwd: cwd.clone(),
-        timeout: timeout_ms.max(1_000),
-        task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
-        ..Default::default()
-    };
-    let env = create_environment(config)
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Daytona 远程: {}", e),
-        })?;
-    let exec_opts = ExecOptions {
-        timeout: Some(timeout_ms),
-        cwd: Some(cwd),
-        stdin_data: None,
-    };
-    let exec_result = {
-        let mut guard = env.lock().await;
-        let r = guard.execute(command, exec_opts).await;
-        let _ = guard.cleanup().await;
-        r
-    }
-    .map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Daytona 远程执行: {}", e),
-    })?;
-    Ok(exec_result_to_bash_raw(exec_result))
-}
-
 async fn run_remote_bash(
     ctx: &ToolContext,
     cfg: &LlmConfigFile,
@@ -712,8 +629,6 @@ async fn run_remote_bash(
             let remote_cwd = ssh_remote_cwd(&ctx.project_root, local_cwd);
             run_remote_bash_ssh(ctx, profile.1, remote_cwd, command, timeout_ms).await
         }
-        RemoteBackend::Modal => run_remote_bash_modal(cfg, command, timeout_ms).await,
-        RemoteBackend::Daytona => run_remote_bash_daytona(cfg, command, timeout_ms).await,
         RemoteBackend::Docker => run_remote_bash_docker(cfg, command, timeout_ms).await,
         RemoteBackend::Singularity => run_remote_bash_singularity(cfg, command, timeout_ms).await,
     }
@@ -732,7 +647,7 @@ impl super::ToolImpl for BashTool {
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         if args.dangerously_disable_sandbox == Some(true) {
-            tracing::debug!("bash: dangerously_disable_sandbox ignored (no sandbox in Omiga)");
+            tracing::debug!("bash: sandbox disabled by caller");
         }
 
         args.validate().map_err(|e| ToolError::ExecutionFailed {
@@ -745,6 +660,12 @@ impl super::ToolImpl for BashTool {
         let destructive = destructive_command_warning(&args.command).map(str::to_string);
 
         if ctx.execution_environment == "ssh" {
+            if args.exec_session_id.is_some() {
+                return Err(ToolError::InvalidArguments {
+                    message: "exec_session_id is only supported for local bash execution."
+                        .to_string(),
+                });
+            }
             if args.run_in_background == Some(true) {
                 return Err(ToolError::InvalidArguments {
                     message:
@@ -790,6 +711,12 @@ impl super::ToolImpl for BashTool {
 
         // For sandbox environments, use env_store if available to avoid per-call env create/destroy
         if ctx.execution_environment == "sandbox" || ctx.execution_environment == "remote" {
+            if args.exec_session_id.is_some() {
+                return Err(ToolError::InvalidArguments {
+                    message: "exec_session_id is only supported for local bash execution."
+                        .to_string(),
+                });
+            }
             if args.run_in_background == Some(true) {
                 return Err(ToolError::InvalidArguments {
                     message: "run_in_background is not supported when execution environment is remote/sandbox."
@@ -855,6 +782,54 @@ impl super::ToolImpl for BashTool {
             });
         }
 
+        if let Some(exec_session_id) = args.exec_session_id.as_ref() {
+            if args.run_in_background == Some(true) {
+                return Err(ToolError::InvalidArguments {
+                    message: "exec_session_id cannot be combined with run_in_background."
+                        .to_string(),
+                });
+            }
+
+            let session_command = if args.cwd.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+                let cwd_string = cwd.to_string_lossy().to_string();
+                format!(
+                    "cd {} && {{\n{}\n}}",
+                    shell_escape_arg(&cwd_string),
+                    command
+                )
+            } else {
+                command.clone()
+            };
+            let result = crate::domain::tools::exec_session::ExecSessionManager::global()
+                .exec_with_initial_cwd(
+                    exec_session_id,
+                    &session_command,
+                    Duration::from_millis(timeout_ms),
+                    Some(&cwd),
+                )
+                .await
+                .map_err(exec_session_error_to_tool_error)?;
+
+            match result {
+                crate::domain::tools::exec_session::ExecSessionResult::Completed(output) => {
+                    return Ok(BashOutput {
+                        command,
+                        description,
+                        destructive_warning: destructive,
+                        exit_code: output.exit_code,
+                        stdout: output.stdout,
+                        stderr: output.stderr,
+                        background_task_id: None,
+                        output_file: None,
+                    }
+                    .into_stream());
+                }
+                crate::domain::tools::exec_session::ExecSessionResult::Timeout(t) => {
+                    return Err(BashError::Timeout { seconds: t.seconds }.into());
+                }
+            }
+        }
+
         if args.run_in_background == Some(true) {
             let Some(bg) = ctx.background_shell.clone() else {
                 return Err(ToolError::InvalidArguments {
@@ -901,7 +876,15 @@ impl super::ToolImpl for BashTool {
         }
 
         let cancel = ctx.cancel.clone();
-        let output = run_bash_command(&cwd, &command, cancel, timeout_ms, args.stream).await?;
+        let output = run_bash_command_inner(
+            &cwd,
+            &command,
+            cancel,
+            timeout_ms,
+            args.stream,
+            args.dangerously_disable_sandbox == Some(true),
+        )
+        .await?;
 
         Ok(BashOutput {
             command,
@@ -944,6 +927,21 @@ pub(crate) fn prepend_venv_activation(venv_type: &str, venv_name: &str, command:
 /// Single-quote a shell argument. Delegates to the shared crate utility.
 fn shell_escape_arg(s: &str) -> String {
     shell_single_quote(s)
+}
+
+fn exec_session_error_to_tool_error(
+    err: crate::domain::tools::exec_session::ExecSessionError,
+) -> ToolError {
+    match err {
+        crate::domain::tools::exec_session::ExecSessionError::InvalidSessionId => {
+            ToolError::InvalidArguments {
+                message: "exec_session_id must be non-empty, at most 128 bytes, and contain no newlines or NUL bytes.".to_string(),
+            }
+        }
+        other => ToolError::ExecutionFailed {
+            message: other.to_string(),
+        },
+    }
 }
 
 fn resolve_bash_cwd(ctx: &ToolContext, cwd: Option<&str>) -> Result<PathBuf, FsError> {
@@ -1009,9 +1007,22 @@ pub(crate) async fn run_bash_command(
     timeout_ms: u64,
     _stream: bool,
 ) -> Result<BashRawOutput, ToolError> {
-    let mut cmd = Command::new("bash");
-    // Login shell + command, matching `bashProvider.ts` `getSpawnArgs` when no snapshot is used.
-    cmd.arg("-l").arg("-c").arg(command);
+    // Compatibility path for background-shell callers. They cannot currently
+    // pass the per-call `dangerously_disable_sandbox` flag without changing the
+    // background module API, so the safer default is sandboxed execution with a
+    // process-wide `OMIGA_SANDBOX_DISABLE=1` escape hatch.
+    run_bash_command_inner(cwd, command, cancel, timeout_ms, _stream, false).await
+}
+
+async fn run_bash_command_inner(
+    cwd: &Path,
+    command: &str,
+    cancel: tokio_util::sync::CancellationToken,
+    timeout_ms: u64,
+    _stream: bool,
+    sandbox_disabled: bool,
+) -> Result<BashRawOutput, ToolError> {
+    let (mut cmd, sandboxed) = local_bash_command(command, cwd, sandbox_disabled);
     cmd.current_dir(cwd);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -1077,11 +1088,87 @@ pub(crate) async fn run_bash_command(
 
     let exit_code = status.code().unwrap_or(-1);
 
+    if sandboxed && exit_code != 0 && output_looks_like_sandbox_denial(&stderr) {
+        let message = sandbox_denied_message(&stderr);
+        return Err(ToolError::ExecutionFailed { message });
+    }
+
     Ok(BashRawOutput {
         exit_code,
         stdout,
         stderr,
     })
+}
+
+fn local_bash_command(command: &str, cwd: &Path, sandbox_disabled: bool) -> (Command, bool) {
+    // Read the process-global disable flag here, then delegate the decision to
+    // the pure `build_local_bash_command`. Tests exercise the pure builder with
+    // an explicit flag so they never call `setenv`, which is not thread-safe
+    // against concurrent `getenv` under parallel `cargo test`.
+    build_local_bash_command(command, cwd, sandbox_disabled || sandbox_disabled_by_env())
+}
+
+fn build_local_bash_command(command: &str, cwd: &Path, disabled: bool) -> (Command, bool) {
+    if disabled {
+        return (raw_bash_command(command), false);
+    }
+
+    if super::sandbox::is_supported() {
+        let policy = super::sandbox::SandboxPolicy::from_env();
+        let writable_roots = super::sandbox::default_writable_roots(cwd);
+        tracing::debug!(
+            network = ?policy.network,
+            "bash: using macOS seatbelt local sandbox"
+        );
+        return (
+            super::sandbox::wrap_local_command(&policy, &writable_roots, command),
+            true,
+        );
+    }
+
+    tracing::debug!("bash: {}", super::sandbox::unavailable_reason());
+    (raw_bash_command(command), false)
+}
+
+fn sandbox_disabled_by_env() -> bool {
+    parse_sandbox_disable_flag(std::env::var("OMIGA_SANDBOX_DISABLE").ok().as_deref())
+}
+
+fn parse_sandbox_disable_flag(raw: Option<&str>) -> bool {
+    raw.map(str::trim)
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn raw_bash_command(command: &str) -> Command {
+    let mut cmd = Command::new("bash");
+    // Login shell + command, matching `bashProvider.ts` `getSpawnArgs` when no snapshot is used.
+    cmd.arg("-l").arg("-c").arg(command);
+    cmd
+}
+
+fn output_looks_like_sandbox_denial(stderr: &[String]) -> bool {
+    stderr.iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("operation not permitted")
+            || lower.contains("sandbox")
+            || lower.contains("deny")
+            || lower.contains("not permitted")
+    })
+}
+
+fn sandbox_denied_message(stderr: &[String]) -> String {
+    let stderr_text = stderr.join("\n");
+    if stderr_text.trim().is_empty() {
+        format!(
+            "{} local sandbox denied this command. Single-run unsandboxed retry requires explicit approval by a higher layer.",
+            SANDBOX_DENIED_PREFIX
+        )
+    } else {
+        format!(
+            "{} local sandbox denied this command. Single-run unsandboxed retry requires explicit approval by a higher layer.\nstderr:\n{}",
+            SANDBOX_DENIED_PREFIX, stderr_text
+        )
+    }
 }
 
 async fn read_lines_capped(
@@ -1203,6 +1290,10 @@ pub fn schema() -> ToolSchema {
                     "type": "string",
                     "description": "Working directory: omit for session cwd, or project-relative / absolute / ~/ path. For commands that create scripts, notebooks, logs, figures, result tables, or temp files, use the session cwd and pass data/input paths explicitly unless the user asked to write inside that input directory."
                 },
+                "exec_session_id": {
+                    "type": "string",
+                    "description": "Optional local-only persistent bash session id. Commands with the same id reuse a piped bash process so shell state can persist. No PTY is allocated; interactive/TUI programs are not supported. On timeout, the session is terminated and the next call starts fresh."
+                },
                 "timeout": {
                     "type": "integer",
                     "description": "Timeout in milliseconds (preferred; max from BASH_MAX_TIMEOUT_MS or 600000). Takes precedence over timeout_secs."
@@ -1221,7 +1312,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "dangerously_disable_sandbox": {
                     "type": "boolean",
-                    "description": "Ignored in Omiga (no sandbox); kept for API compatibility with Claude Code"
+                    "description": "When true, skip the local platform sandbox. Background shell callers default to sandboxed execution and can only use OMIGA_SANDBOX_DISABLE=1 as a process-wide escape hatch."
                 }
             },
             "required": ["command"]
@@ -1235,12 +1326,28 @@ mod tests {
     use super::*;
     use crate::domain::tools::ToolImpl;
     use futures::StreamExt;
+    use std::sync::MutexGuard;
+
+    // Shared with the sandbox network/seatbelt test modules: `local_bash_command`
+    // reads the `OMIGA_SANDBOX_*` env vars, so all sandbox env tests must
+    // serialize through one process-wide lock (see `sandbox::sandbox_env_test_lock`).
+    fn bash_env_lock() -> MutexGuard<'static, ()> {
+        crate::domain::tools::sandbox::sandbox_env_test_lock()
+    }
+
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
 
     fn args(cmd: &str) -> BashArgs {
         BashArgs {
             command: cmd.to_string(),
             description: None,
             cwd: None,
+            exec_session_id: None,
             timeout: None,
             timeout_secs: Some(60),
             stream: true,
@@ -1275,6 +1382,98 @@ mod tests {
             Err(e) => panic!("expected InvalidArguments, got {:?}", e),
             Ok(_) => panic!("expected error when background_shell is unset"),
         }
+    }
+
+    #[test]
+    fn background_compat_path_defaults_to_sandbox_when_supported() {
+        // Pure builder: not disabled -> sandbox wrapper when the platform
+        // supports it. No `setenv`, so this is safe under parallel test runs.
+        let dir = tempfile::tempdir().unwrap();
+        let (cmd, sandboxed) = build_local_bash_command("true", dir.path(), false);
+
+        if crate::domain::tools::sandbox::is_supported() {
+            assert!(sandboxed);
+            assert!(
+                format!("{:?}", cmd).contains("sandbox-exec"),
+                "expected sandbox-exec wrapper, got {:?}",
+                cmd
+            );
+        } else {
+            assert!(!sandboxed);
+        }
+    }
+
+    #[test]
+    fn global_sandbox_disable_env_bypasses_local_wrapper() {
+        // The disable flag short-circuits the wrapper regardless of platform.
+        let dir = tempfile::tempdir().unwrap();
+        let (_cmd, sandboxed) = build_local_bash_command("true", dir.path(), true);
+        assert!(!sandboxed);
+    }
+
+    #[test]
+    fn sandbox_disable_flag_parsing_matches_truthy_values() {
+        assert!(parse_sandbox_disable_flag(Some("1")));
+        assert!(parse_sandbox_disable_flag(Some(" true ")));
+        assert!(parse_sandbox_disable_flag(Some("YES")));
+        assert!(!parse_sandbox_disable_flag(Some("0")));
+        assert!(!parse_sandbox_disable_flag(Some("")));
+        assert!(!parse_sandbox_disable_flag(None));
+    }
+
+    #[test]
+    fn sandbox_denied_message_has_machine_readable_prefix() {
+        let message = sandbox_denied_message(&["Operation not permitted".to_string()]);
+        assert!(message.starts_with(SANDBOX_DENIED_PREFIX));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    // Heavyweight: spawns a real sandboxed bash process. Under the default
+    // multi-threaded suite it holds the env lock across `.await` while other
+    // threads read `OMIGA_SANDBOX_*` via libc `getenv` (not thread-safe against
+    // the `setenv` a locked writer performs), which makes it flaky. Gated to
+    // run on demand; the `SANDBOX_DENIED:` prefix logic is covered
+    // deterministically by `sandbox_denied_message_has_machine_readable_prefix`.
+    #[ignore = "run on demand: spawns a real sandbox-exec bash process"]
+    async fn sandbox_denial_returns_structured_error() {
+        let _guard = bash_env_lock();
+        let previous = std::env::var_os("OMIGA_SANDBOX_DISABLE");
+        std::env::remove_var("OMIGA_SANDBOX_DISABLE");
+
+        if !crate::domain::tools::sandbox::is_supported() {
+            restore_env("OMIGA_SANDBOX_DISABLE", previous);
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let deny_path =
+            Path::new(&std::env::var("HOME").expect("HOME")).join("omiga_sb_denied_signal.txt");
+        let _ = std::fs::remove_file(&deny_path);
+
+        let result = run_bash_command_inner(
+            dir.path(),
+            r#"echo x > "$HOME/omiga_sb_denied_signal.txt""#,
+            tokio_util::sync::CancellationToken::new(),
+            30_000,
+            true,
+            false,
+        )
+        .await;
+
+        match result {
+            Err(ToolError::ExecutionFailed { message }) => {
+                assert!(message.starts_with(SANDBOX_DENIED_PREFIX), "{message}");
+            }
+            Ok(output) => panic!(
+                "expected structured sandbox denial, got successful exit code {}",
+                output.exit_code
+            ),
+            Err(other) => panic!("expected structured sandbox denial, got error {other}"),
+        }
+        assert!(!deny_path.exists());
+
+        restore_env("OMIGA_SANDBOX_DISABLE", previous);
     }
 
     #[test]

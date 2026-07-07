@@ -7,8 +7,8 @@ export type PermissionMode = "ask" | "auto" | "bypass";
 /** Computer Use 显式开启范围：默认关闭，task 发送后自动回到 off。 */
 export type ComputerUseMode = "off" | "task" | "session";
 
-/** 与 `omiga/src-tauri/src/execution/types.rs` `EnvironmentType` 对齐（不含 Local）。 */
-export type SandboxBackend = "modal" | "daytona" | "docker" | "singularity";
+/** User-facing sandbox backends with real local integrations. */
+export type SandboxBackend = "docker" | "singularity";
 
 /** 本地虚拟环境类型 */
 export type LocalVenvType = "none" | "conda" | "venv" | "pyenv";
@@ -70,8 +70,9 @@ function asNullableString(v: unknown): string | null {
   return typeof v === "string" ? v : null;
 }
 
-function asBoolean(v: unknown, fallback: boolean): boolean {
-  return typeof v === "boolean" ? v : fallback;
+function normalizeSandboxBackendValue(v: unknown): SandboxBackend {
+  const value = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return value === "singularity" ? "singularity" : "docker";
 }
 
 export function normalizeSessionConfig(
@@ -92,10 +93,7 @@ export function normalizeSessionConfig(
       DEFAULT_SESSION_CONFIG.execution_environment,
     ),
     ssh_server: asNullableString(cfg?.ssh_server),
-    sandbox_backend: asString(
-      cfg?.sandbox_backend,
-      DEFAULT_SESSION_CONFIG.sandbox_backend,
-    ),
+    sandbox_backend: normalizeSandboxBackendValue(cfg?.sandbox_backend),
     local_venv_type: asString(
       cfg?.local_venv_type,
       DEFAULT_SESSION_CONFIG.local_venv_type,
@@ -104,10 +102,9 @@ export function normalizeSessionConfig(
       cfg?.local_venv_name,
       DEFAULT_SESSION_CONFIG.local_venv_name,
     ),
-    use_worktree: asBoolean(
-      cfg?.use_worktree,
-      DEFAULT_SESSION_CONFIG.use_worktree,
-    ),
+    // Worktree mode is intentionally hidden for the focused research UI.
+    // Keep the response field for backward compatibility, but never re-enable it.
+    use_worktree: false,
     runtime_constraints: cfg?.runtime_constraints,
   };
 }
@@ -121,7 +118,6 @@ interface ChatComposerState {
   composerAttachedPaths: string[];
   /** `@` 选择器选中的 Omiga 插件 ID（仅本轮内存态，不持久化） */
   composerSelectedPluginIds: string[];
-  useWorktree: boolean;
   /** 执行环境：本地、SSH、沙箱 */
   environment: ExecutionEnvironment;
   /** SSH 服务器名称；仅在 `environment === "ssh"` 时生效。 */
@@ -148,7 +144,6 @@ interface ChatComposerState {
   removeComposerSelectedPluginId: (pluginId: string) => void;
   popComposerSelectedPluginId: () => void;
   clearComposerSelectedPluginIds: () => void;
-  setUseWorktree: (v: boolean) => void;
   setEnvironment: (e: ExecutionEnvironment) => void;
   setSshServer: (name: string | null) => void;
   setSandboxBackend: (b: SandboxBackend) => void;
@@ -170,7 +165,6 @@ function defaults() {
     composerAgentType: "auto",
     composerAttachedPaths: [] as string[],
     composerSelectedPluginIds: [] as string[],
-    useWorktree: false,
     environment: "local" as ExecutionEnvironment,
     sshServer: null as string | null,
     sandboxBackend: "docker" as SandboxBackend,
@@ -194,7 +188,6 @@ async function saveSessionConfig(
     removeComposerSelectedPluginId: unknown;
     popComposerSelectedPluginId: unknown;
     clearComposerSelectedPluginIds: unknown;
-    setUseWorktree: unknown;
     setEnvironment: unknown;
     setSshServer: unknown;
     setSandboxBackend: unknown;
@@ -220,7 +213,7 @@ async function saveSessionConfig(
         sandbox_backend: state.sandboxBackend,
         local_venv_type: state.localVenvType,
         local_venv_name: state.localVenvName,
-        use_worktree: state.useWorktree,
+        use_worktree: false,
       },
     });
   } catch (e) {
@@ -309,11 +302,6 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       composerSelectedPluginIds: s.composerSelectedPluginIds.slice(0, -1),
     })),
   clearComposerSelectedPluginIds: () => set({ composerSelectedPluginIds: [] }),
-  setUseWorktree: (useWorktree) => {
-    set({ useWorktree });
-    const { activeSessionId } = get();
-    if (activeSessionId) saveSessionConfig(activeSessionId, get());
-  },
   setEnvironment: (environment) => {
     set({ environment });
     const { activeSessionId } = get();
@@ -351,7 +339,6 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       sandboxBackend: normalized.sandbox_backend as SandboxBackend,
       localVenvType: normalized.local_venv_type as LocalVenvType,
       localVenvName: normalized.local_venv_name,
-      useWorktree: normalized.use_worktree,
       // Keep one-turn picker selections empty on switch
       composerAttachedPaths: [],
       composerSelectedPluginIds: [],

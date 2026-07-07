@@ -184,7 +184,7 @@ export function buildComposerPathInjection(paths: string[]): string {
   if (normalized.length === 0) return "";
   return [
     "<omiga-selected-paths>",
-    "The user selected or uploaded these exact file paths. Use these exact path strings when reading or editing files. Absolute paths and ~/ paths are already resolved; read them directly. Relative paths are relative to the current workspace. Do not run find/locate/recursive search to rediscover these attachments unless the user explicitly asks to search elsewhere:",
+    "The user selected or uploaded these exact file or directory paths. Use these exact path strings when reading or editing files. Absolute paths and ~/ paths are already resolved; read them directly. Relative paths are relative to the current workspace. Do not run find/locate/recursive search to rediscover these attachments unless the user explicitly asks to search elsewhere:",
     ...normalized.map((path) => `- ${path}`),
     "</omiga-selected-paths>",
   ].join("\n");

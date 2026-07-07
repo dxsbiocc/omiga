@@ -87,4 +87,5 @@ pub fn schema() -> ToolSchema {
             "required": ["id"]
         }),
     )
+    .concurrency_safe()
 }

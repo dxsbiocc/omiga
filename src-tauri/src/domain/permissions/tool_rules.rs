@@ -75,8 +75,6 @@ pub fn canonical_permission_tool_name(name: &str) -> String {
         "SendUserMessage" | "Brief" | "send_user_message" => "send_user_message".to_string(),
         "ExitPlanMode" | "exit_plan_mode" | "ExitPlanModeTool" => "exit_plan_mode".to_string(),
         "EnterPlanMode" | "enter_plan_mode" | "EnterPlanModeTool" => "enter_plan_mode".to_string(),
-        "EnterWorktree" | "enter_worktree" => "enter_worktree".to_string(),
-        "ExitWorktree" | "exit_worktree" => "exit_worktree".to_string(),
         "Monitor" | "monitor" => "monitor".to_string(),
         "PushNotification" | "push_notification" => "push_notification".to_string(),
         "TaskStop" | "task_stop" | "KillShell" => "task_stop".to_string(),

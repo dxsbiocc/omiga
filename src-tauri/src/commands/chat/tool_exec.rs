@@ -5,8 +5,8 @@ use super::permissions::{
     wait_for_permission_tool_resolution, AskUserQuestionExecution, PermissionToolResolutionRequest,
 };
 use super::subagent::{
-    is_agent_tool_name, is_parallelizable_tool, run_skill_forked, run_subagent_session,
-    ForkedSkillRequest, SubagentSessionRequest,
+    is_agent_tool_name, run_skill_forked, run_subagent_session, ForkedSkillRequest,
+    SubagentSessionRequest,
 };
 use super::{
     append_truncated_results_note, apply_empty_structured_tool_placeholder,
@@ -20,6 +20,7 @@ use crate::constants::tool_limits::{
 use crate::domain::agents::subagent_tool_filter::{
     should_block_subagent_builtin_call, SubagentFilterOptions,
 };
+use crate::domain::chat_state::{McpToolCache, MCP_TOOL_CACHE_TTL};
 use crate::domain::integrations_config;
 use crate::domain::permissions::{
     canonical_permission_tool_name, load_merged_permission_deny_rule_entries, matching_deny_entry,
@@ -27,10 +28,11 @@ use crate::domain::permissions::{
 use crate::domain::session::{AgentTask, TodoItem};
 use crate::domain::skills;
 use crate::domain::tools::{
-    normalize_legacy_retrieval_tool_arguments, normalize_legacy_retrieval_tool_name, Tool,
-    ToolContext, WebSearchApiKeys,
+    all_tool_schemas, normalize_legacy_retrieval_tool_arguments,
+    normalize_legacy_retrieval_tool_name, Tool, ToolContext, ToolSchema, WebSearchApiKeys,
 };
 use crate::infrastructure::streaming::StreamOutputItem;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager};
@@ -59,6 +61,90 @@ fn normalize_runtime_tool_call(tool_name: &str, arguments: &str) -> (String, Str
     let normalized_arguments =
         normalize_legacy_web_tool_arguments(tool_name, &normalized_name, arguments);
     (normalized_name, normalized_arguments)
+}
+
+fn concurrency_safe_tool_names_from_schemas<'a>(
+    schemas: impl IntoIterator<Item = &'a ToolSchema>,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for schema in schemas {
+        if schema.concurrency_safe {
+            names.insert(schema.name.clone());
+            names.insert(canonical_permission_tool_name(&schema.name));
+        }
+    }
+    names
+}
+
+fn tool_name_declared_concurrency_safe(
+    tool_name: &str,
+    concurrency_safe_tool_names: &HashSet<String>,
+) -> bool {
+    concurrency_safe_tool_names.contains(tool_name)
+        || concurrency_safe_tool_names.contains(&canonical_permission_tool_name(tool_name))
+}
+
+fn partition_tool_call_indices_by_concurrency(
+    indices: impl IntoIterator<Item = usize>,
+    tool_calls: &[(String, String, String)],
+    concurrency_safe_tool_names: &HashSet<String>,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut parallel_indices = Vec::new();
+    let mut sequential_indices = Vec::new();
+
+    for idx in indices {
+        let (_, tool_name, _) = &tool_calls[idx];
+        if tool_name_declared_concurrency_safe(tool_name, concurrency_safe_tool_names) {
+            parallel_indices.push(idx);
+        } else {
+            sequential_indices.push(idx);
+        }
+    }
+
+    (parallel_indices, sequential_indices)
+}
+
+async fn current_mcp_tool_schemas(app: &AppHandle, project_root: &Path) -> Vec<ToolSchema> {
+    let app_state = app.state::<OmigaAppState>();
+    let config_signature = crate::domain::mcp::merged_mcp_servers_signature(project_root);
+    if let Some(schemas) = {
+        let cache = app_state.chat.mcp_tool_cache.lock().await;
+        cache
+            .get(project_root)
+            .filter(|cached| {
+                cached.cached_at.elapsed() < MCP_TOOL_CACHE_TTL
+                    && cached.config_signature == config_signature
+            })
+            .map(|cached| cached.schemas.clone())
+    } {
+        return schemas;
+    }
+
+    let mcp_timeout = std::time::Duration::from_secs(10);
+    let schemas =
+        crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(project_root, mcp_timeout).await;
+    app_state.chat.mcp_tool_cache.lock().await.insert(
+        project_root.to_path_buf(),
+        McpToolCache {
+            schemas: schemas.clone(),
+            cached_at: std::time::Instant::now(),
+            config_signature,
+        },
+    );
+    schemas
+}
+
+async fn load_concurrency_safe_tool_names(
+    app: &AppHandle,
+    project_root: &Path,
+    include_mcp_tools: bool,
+) -> HashSet<String> {
+    let mut schemas = all_tool_schemas(true);
+    schemas.extend(crate::domain::operators::enabled_operator_tool_schemas());
+    if include_mcp_tools {
+        schemas.extend(current_mcp_tool_schemas(app, project_root).await);
+    }
+    concurrency_safe_tool_names_from_schemas(&schemas)
 }
 
 fn working_memory_query_text(
@@ -236,15 +322,20 @@ pub(super) async fn execute_tool_calls(
         })
         .collect::<Vec<_>>();
     let tool_calls = normalized_tool_calls.as_slice();
+    let include_mcp_tools = tool_calls
+        .iter()
+        .any(|(_, tool_name, _)| tool_name.starts_with("mcp__"));
+    let concurrency_safe_tool_names =
+        load_concurrency_safe_tool_names(app, project_root, include_mcp_tools).await;
 
     // Pre-compute permission + subagent-filter results for every call (fast, sequential).
     // Calls that pass become futures; blocked calls become immediate error results.
-    enum CallPrep<'a> {
+    enum CallPrep {
         Blocked(String, String, bool), // (tool_use_id, error_msg, is_error=true)
-        Ready(&'a str),                // tool_name only (indices carry id+args via tool_calls[idx])
+        Ready,
     }
 
-    let prepped: Vec<CallPrep<'_>> = tool_calls
+    let prepped: Vec<CallPrep> = tool_calls
         .iter()
         .map(|(tool_use_id, tool_name, _arguments)| {
             if let Some(hit) = matching_deny_entry(
@@ -279,7 +370,7 @@ pub(super) async fn execute_tool_calls(
                     return CallPrep::Blocked(tool_use_id.clone(), error_msg, true);
                 }
             }
-            CallPrep::Ready(tool_name)
+            CallPrep::Ready
         })
         .collect();
 
@@ -287,8 +378,7 @@ pub(super) async fn execute_tool_calls(
     // We need to maintain index alignment so we can merge parallel results back in order.
     let mut ordered_results: Vec<Option<(String, String, bool)>> = vec![None; tool_calls.len()];
 
-    let mut parallel_indices: Vec<usize> = Vec::new();
-    let mut sequential_indices: Vec<usize> = Vec::new();
+    let mut ready_indices: Vec<usize> = Vec::new();
 
     for (idx, prep) in prepped.iter().enumerate() {
         match prep {
@@ -306,15 +396,14 @@ pub(super) async fn execute_tool_calls(
                 );
                 ordered_results[idx] = Some((tool_use_id.clone(), error_msg.clone(), *is_error));
             }
-            CallPrep::Ready(tool_name) => {
-                if is_parallelizable_tool(tool_name) {
-                    parallel_indices.push(idx);
-                } else {
-                    sequential_indices.push(idx);
-                }
-            }
+            CallPrep::Ready => ready_indices.push(idx),
         }
     }
+    let (parallel_indices, sequential_indices) = partition_tool_call_indices_by_concurrency(
+        ready_indices,
+        tool_calls,
+        &concurrency_safe_tool_names,
+    );
 
     // --- Parallel batch: spawn all parallelizable futures at once ---
     if !parallel_indices.is_empty() {
@@ -861,6 +950,41 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                     },
                 );
                 return (tool_use_id.clone(), error_msg, true);
+            }
+        }
+    }
+
+    // G11 hooks are loaded on demand from `.omiga/hooks.toml` because AppState is
+    // outside this task's allowed edit set. Missing config is a fast path: no
+    // engine is constructed and execution continues unchanged.
+    let hook_engine = if crate::domain::hooks::hook_config_path(project_root).exists() {
+        Some(crate::domain::hooks::HookEngine::load_for_project(
+            project_root,
+        ))
+    } else {
+        None
+    };
+    if let Some(engine) = hook_engine.as_ref().filter(|engine| !engine.is_empty()) {
+        match engine
+            .run_pre_tool_use(tool_name, &effective_arguments)
+            .await
+        {
+            crate::domain::hooks::PreHookOutcome::Proceed => {}
+            crate::domain::hooks::PreHookOutcome::ModifyArgs { new_args_json } => {
+                effective_arguments = new_args_json;
+            }
+            crate::domain::hooks::PreHookOutcome::Block { reason } => {
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: effective_arguments.clone(),
+                        output: reason.clone(),
+                        is_error: true,
+                    },
+                );
+                return (tool_use_id.clone(), reason, true);
             }
         }
     }
@@ -2794,6 +2918,20 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                         }
 
                         let is_error = stream_error || exit_code.map(|c| c != 0).unwrap_or(false);
+                        if let Some(engine) =
+                            hook_engine.as_ref().filter(|engine| !engine.is_empty())
+                        {
+                            if let crate::domain::hooks::PostHookOutcome::AppendFeedback { text } =
+                                engine
+                                    .run_post_tool_use(tool_name, arguments, &output_text, is_error)
+                                    .await
+                            {
+                                if !text.trim().is_empty() {
+                                    output_text.push_str("\n\n");
+                                    output_text.push_str(&text);
+                                }
+                            }
+                        }
 
                         // Truncate streamed UI preview — align with TS `PREVIEW_SIZE_BYTES` (2000 bytes).
                         // Full `output_text` is still returned for DB persistence; large-result
@@ -3009,6 +3147,62 @@ fn register_web_source_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_tool_call(name: &str) -> (String, String, String) {
+        (format!("call-{name}"), name.to_string(), "{}".to_string())
+    }
+
+    #[test]
+    fn declared_concurrency_safe_tool_lands_in_parallel_batch() {
+        let schemas = vec![
+            ToolSchema::new("file_read", "Read", serde_json::json!({})).concurrency_safe(),
+            ToolSchema::new("file_write", "Write", serde_json::json!({})),
+        ];
+        let safe_names = concurrency_safe_tool_names_from_schemas(&schemas);
+        let tool_calls = vec![test_tool_call("file_read"), test_tool_call("file_write")];
+
+        let (parallel, sequential) = partition_tool_call_indices_by_concurrency(
+            0..tool_calls.len(),
+            &tool_calls,
+            &safe_names,
+        );
+
+        assert_eq!(parallel, vec![0]);
+        assert_eq!(sequential, vec![1]);
+    }
+
+    #[test]
+    fn tool_without_concurrency_safe_declaration_runs_serially() {
+        let schemas = vec![ToolSchema::new("file_read", "Read", serde_json::json!({}))];
+        let safe_names = concurrency_safe_tool_names_from_schemas(&schemas);
+        let tool_calls = vec![test_tool_call("file_read")];
+
+        let (parallel, sequential) = partition_tool_call_indices_by_concurrency(
+            0..tool_calls.len(),
+            &tool_calls,
+            &safe_names,
+        );
+
+        assert!(parallel.is_empty());
+        assert_eq!(sequential, vec![0]);
+    }
+
+    #[test]
+    fn legacy_alias_uses_canonical_concurrency_safe_schema() {
+        let schemas =
+            vec![ToolSchema::new("file_read", "Read", serde_json::json!({})).concurrency_safe()];
+        let safe_names = concurrency_safe_tool_names_from_schemas(&schemas);
+        let tool_calls = vec![test_tool_call("Read")];
+
+        let (parallel, sequential) = partition_tool_call_indices_by_concurrency(
+            0..tool_calls.len(),
+            &tool_calls,
+            &safe_names,
+        );
+
+        assert_eq!(parallel, vec![0]);
+        assert!(sequential.is_empty());
+    }
 
     #[test]
     fn working_memory_query_prefers_recall_query_field() {

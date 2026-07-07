@@ -2,14 +2,13 @@
 //!
 //! Interactive UI is wired from the chat path (`commands::chat::execute_ask_user_question_interactive`):
 //! the tool blocks until the user submits answers in the Omiga chat UI. The standalone
-//! `execute_tool` IPC path still uses immediate stub output when no UI is attached.
+//! `execute_tool` IPC path is intentionally disabled so questions never degrade into
+//! plain-text or JSON mock output.
 
 use super::{ToolContext, ToolError, ToolSchema};
-use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::pin::Pin;
 
 const MAX_QUESTIONS: usize = 4;
 const MIN_QUESTIONS: usize = 1;
@@ -174,53 +173,11 @@ impl super::ToolImpl for AskUserQuestionTool {
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         validate(&args)?;
-
-        let mut body = serde_json::Map::new();
-        body.insert(
-            "questions".to_string(),
-            serde_json::to_value(&args.questions).map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to serialize questions: {}", e),
-            })?,
-        );
-        body.insert("answers".to_string(), serde_json::json!({}));
-        if let Some(a) = args.annotations {
-            body.insert("annotations".to_string(), a);
-        }
-        body.insert(
-            "_omiga".to_string(),
-            serde_json::Value::String(
-                "Interactive multiple-choice UI is not wired in Omiga yet. Continue by asking the user in plain text, or use their next chat message as the answer."
+        Err(ToolError::ExecutionFailed {
+            message:
+                "ask_user_question requires the interactive chat path; standalone execution is disabled so questions are not rendered as plain text."
                     .to_string(),
-            ),
-        );
-
-        let json = serde_json::to_string_pretty(&serde_json::Value::Object(body)).map_err(|e| {
-            ToolError::ExecutionFailed {
-                message: format!("Failed to serialize result: {}", e),
-            }
-        })?;
-
-        let preamble = "User has not answered yet (Omiga interactive picker is not connected). Treat the JSON below as the question set; ask the user in natural language or wait for their reply.\n\n";
-
-        Ok(AskUserQuestionOutput {
-            text: format!("{}{}", preamble, json),
-        }
-        .into_stream())
-    }
-}
-
-struct AskUserQuestionOutput {
-    text: String,
-}
-
-impl StreamOutput for AskUserQuestionOutput {
-    fn into_stream(self) -> Pin<Box<dyn futures::Stream<Item = StreamOutputItem> + Send>> {
-        use futures::stream;
-        Box::pin(stream::iter(vec![
-            StreamOutputItem::Start,
-            StreamOutputItem::Content(self.text),
-            StreamOutputItem::Complete,
-        ]))
+        })
     }
 }
 

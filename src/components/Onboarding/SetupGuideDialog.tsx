@@ -44,12 +44,6 @@ providers:
     model: gpt-4o
     enabled: false
 
-  gemini:
-    type: google
-    api_key: \${GOOGLE_API_KEY}
-    model: gemini-2.0-flash
-    enabled: false
-
 settings:
   max_tokens: 4096
   temperature: 0.7
@@ -59,7 +53,6 @@ settings:
 const ENV_VARS = [
   { label: "DeepSeek", cmd: 'export DEEPSEEK_API_KEY="sk-..."' },
   { label: "OpenAI", cmd: 'export OPENAI_API_KEY="sk-..."' },
-  { label: "Google Gemini", cmd: 'export GOOGLE_API_KEY="AIza..."' },
 ];
 
 export function SetupGuideDialog() {

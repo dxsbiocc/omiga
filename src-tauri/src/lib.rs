@@ -160,7 +160,6 @@ pub fn run() {
             commands::chat::research_goal::update_research_goal_criteria,
             commands::chat::research_goal::update_research_goal_settings,
             commands::chat::list_orchestration_events,
-            commands::chat::run_mock_orchestration_scenario,
             commands::chat::list_session_background_tasks,
             commands::chat::load_background_agent_transcript,
             commands::chat::cancel_background_agent_task,
@@ -381,19 +380,11 @@ pub fn run() {
             commands::extensions::list_vscode_extensions,
             commands::extensions::read_vscode_extension_file,
 
-            // Execution environments configuration
-            commands::execution_envs::get_execution_envs_config,
-            commands::execution_envs::save_execution_envs_config,
-            commands::execution_envs::get_modal_config,
-            commands::execution_envs::save_modal_config,
-            commands::execution_envs::get_daytona_config,
-            commands::execution_envs::save_daytona_config,
+            // Execution environments configuration (only implemented SSH UI is exposed)
             commands::execution_envs::get_ssh_configs,
             commands::execution_envs::get_ssh_config,
             commands::execution_envs::save_ssh_config,
             commands::execution_envs::delete_ssh_config,
-            commands::execution_envs::is_modal_configured,
-            commands::execution_envs::is_daytona_configured,
             commands::execution_envs::get_execution_envs_config_path,
             commands::execution_envs::is_rsync_available,
 

@@ -323,6 +323,78 @@ mod tests {
     }
 
     #[test]
+    fn test_token_usage_cache_fields_roundtrip_and_legacy_json() {
+        let usage = MessageTokenUsage {
+            input: 1_000,
+            output: 200,
+            total: Some(1_200),
+            provider: Some("anthropic".to_string()),
+            cache_read: Some(5_000),
+            cache_creation: Some(300),
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+
+        assert!(json.contains(r#""cacheRead":5000"#));
+        assert!(json.contains(r#""cacheCreation":300"#));
+        let decoded: MessageTokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, usage);
+
+        let legacy_json = r#"{"input":1000,"output":200,"total":1200,"provider":"openai"}"#;
+        let legacy: MessageTokenUsage = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.cache_read, None);
+        assert_eq!(legacy.cache_creation, None);
+    }
+
+    #[test]
+    fn test_assistant_token_usage_codec_preserves_cache_fields() {
+        let msg = Message::Assistant {
+            content: "Done".to_string(),
+            tool_calls: None,
+            token_usage: Some(MessageTokenUsage {
+                input: 1_000,
+                output: 200,
+                total: Some(1_200),
+                provider: Some("anthropic".to_string()),
+                cache_read: Some(5_000),
+                cache_creation: Some(300),
+            }),
+            reasoning_content: None,
+            follow_up_suggestions: None,
+            turn_summary: None,
+        };
+
+        let record = SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
+        let token_usage_json = record.token_usage_json.as_deref().unwrap();
+        assert!(token_usage_json.contains(r#""cacheRead":5000"#));
+
+        let record = MessageRecord {
+            id: record.id,
+            session_id: record.session_id,
+            role: record.role,
+            content: record.content,
+            tool_calls: record.tool_calls,
+            tool_call_id: record.tool_call_id,
+            tool_is_error: None,
+            token_usage_json: record.token_usage_json,
+            reasoning_content: record.reasoning_content,
+            follow_up_suggestions_json: record.follow_up_suggestions_json,
+            turn_summary: record.turn_summary,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        match SessionCodec::record_to_message(record) {
+            Message::Assistant {
+                token_usage: Some(decoded),
+                ..
+            } => {
+                assert_eq!(decoded.cache_read, Some(5_000));
+                assert_eq!(decoded.cache_creation, Some(300));
+            }
+            other => panic!("expected assistant with token usage, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_record_to_message_conversion() {
         let record = MessageRecord {
             id: "msg-1".to_string(),

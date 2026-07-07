@@ -35,6 +35,20 @@ pub struct SaveProviderConfigRequest {
     reasoning_effort: Option<String>,
 }
 
+fn provider_is_user_exposed(provider: LlmProvider) -> bool {
+    !matches!(provider, LlmProvider::Google)
+}
+
+fn ensure_user_exposed_provider(provider: LlmProvider) -> Result<(), OmigaError> {
+    if provider_is_user_exposed(provider) {
+        Ok(())
+    } else {
+        Err(OmigaError::Config(
+            "Provider is not available in this build.".to_string(),
+        ))
+    }
+}
+
 #[tauri::command]
 pub async fn list_provider_configs(
     state: State<'_, OmigaAppState>,
@@ -58,6 +72,13 @@ pub async fn list_provider_configs(
 
     let entries: Vec<ProviderConfigEntry> = providers
         .iter()
+        .filter(|(_, config)| {
+            config
+                .provider_type
+                .parse::<LlmProvider>()
+                .map(provider_is_user_exposed)
+                .unwrap_or(true)
+        })
         .map(|(name, config)| {
             let api_key_preview = config
                 .api_key
@@ -134,6 +155,7 @@ pub async fn switch_provider(
         .provider_type
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
+    ensure_user_exposed_provider(provider_enum)?;
 
     // Get API key with env var expansion
     let api_key = provider_config
@@ -228,6 +250,7 @@ pub async fn save_provider_config(
         .provider_type
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
+    ensure_user_exposed_provider(provider_enum)?;
 
     // Load existing config or create new one
     let mut config_file = crate::llm::config::load_config_file().unwrap_or_default();
@@ -441,6 +464,7 @@ pub(crate) async fn apply_named_provider_runtime(
         .provider_type
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
+    ensure_user_exposed_provider(provider_enum)?;
 
     let api_key = provider_config
         .api_key
@@ -557,6 +581,11 @@ pub async fn set_default_provider_config(
             name
         )));
     }
+    let provider_enum = entry
+        .provider_type
+        .parse::<LlmProvider>()
+        .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
+    ensure_user_exposed_provider(provider_enum)?;
 
     config_file.default_provider = Some(name.to_string());
 

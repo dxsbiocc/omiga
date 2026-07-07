@@ -1445,10 +1445,6 @@ export function TaskStatus() {
     void (async () => {
       const listeners = await Promise.all([
         listenTauriEvent<TaskPanelRefreshEventPayload>(
-          "mock-orchestration-scenario-loaded",
-          (event) => refreshIfCurrentSession(event.payload),
-        ),
-        listenTauriEvent<TaskPanelRefreshEventPayload>(
           "background-agent-update",
           (event) => refreshIfCurrentSession(event.payload),
         ),

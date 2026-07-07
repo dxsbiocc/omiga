@@ -289,7 +289,7 @@ fn build_intake_output(
     let assessment = context.sections.get("intake_assessment");
     json!({
         "user_goal": assessment.and_then(|value| value.get("user_goal")).cloned().unwrap_or_else(|| json!("")),
-        "assumptions": assessment.and_then(|value| value.get("assumptions")).cloned().unwrap_or_else(|| json!(["The request can be structured deterministically in MVP mode."])),
+        "assumptions": assessment.and_then(|value| value.get("assumptions")).cloned().unwrap_or_else(|| json!(["The request can be structured deterministically before execution."])),
         "ambiguities": assessment.and_then(|value| value.get("ambiguities")).cloned().unwrap_or_else(|| json!(["No explicit missing requirement was found."])),
         "execution_route": assessment.and_then(|value| value.get("execution_route")).cloned().unwrap_or_else(|| json!("solo")),
         "complexity_score": assessment.and_then(|value| value.get("complexity_score")).cloned().unwrap_or_else(|| json!(1)),

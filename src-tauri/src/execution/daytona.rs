@@ -110,10 +110,10 @@ impl DaytonaEnvironment {
 
     /// 初始化 Daytona 工作空间
     async fn init_workspace(&mut self) -> Result<(), ExecutionError> {
-        // Daytona HTTP API 集成尚未实现，返回明确错误
+        // Daytona backend is not shipped in this product build.
         Err(ExecutionError::NotAvailable(
-            "Daytona workspace API integration is not yet implemented. \
-             Please add HTTP client calls to the Daytona API."
+            "Daytona workspace is not available in this build. \
+             Select Docker, Singularity, or SSH instead."
                 .to_string(),
         ))
     }
@@ -124,10 +124,10 @@ impl DaytonaEnvironment {
         _cmd_string: &str,
         _timeout_ms: u64,
     ) -> Result<(String, i32), ExecutionError> {
-        // Daytona HTTP API 集成尚未实现，返回明确错误
+        // Return a hard error rather than a synthetic success.
         Err(ExecutionError::NotAvailable(
-            "Daytona execution is not yet implemented. \
-             Please integrate Daytona HTTP API client."
+            "Daytona execution is not available in this build. \
+             Select Docker, Singularity, or SSH instead."
                 .to_string(),
         ))
     }

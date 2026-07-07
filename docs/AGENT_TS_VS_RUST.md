@@ -31,7 +31,7 @@ export type AgentDefinition = {
   mcpServers?: MCPServerSpec[]  // MCP 服务器
   memoryScope?: string
   maxTurns?: number
-  isolation?: 'worktree' | 'bubble'
+  isolation?: 'workspace' | 'bubble'
   background?: boolean
   omitClaudeMd?: boolean
   color?: string

@@ -7,6 +7,7 @@ import {
   COMPOSER_CONTEXT_TRAY_PLACEMENT,
   COMPOSER_DROP_UPLOAD_SNACKBAR_AUTO_HIDE_MS,
   COMPOSER_DROP_UPLOAD_SNACKBAR_ERROR_AUTO_HIDE_MS,
+  COMPOSER_FILE_CONTEXT_CHIP_MAX_WIDTH,
   COMPOSER_INPUT_JOINED_BORDER_RADIUS,
   COMPOSER_INPUT_JOINED_Z_INDEX,
   COMPOSER_PROMPT_JOINED_BORDER_RADIUS,
@@ -18,6 +19,7 @@ import {
   COMPOSER_PERMISSION_MODE_MENU_WIDTH,
   COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES,
   COMPOSER_SSH_DROP_UPLOAD_MAX_FILES,
+  normalizeComposerDroppedLocalPath,
   sanitizeComposerDroppedFileName,
 } from "./ChatComposer";
 
@@ -76,11 +78,54 @@ describe("ChatComposer SSH drop upload helpers", () => {
     );
   });
 
+  it("keeps file attachment chips compact inside the composer reference tray", () => {
+    expect(COMPOSER_FILE_CONTEXT_CHIP_MAX_WIDTH).toBe("min(46vw, 240px)");
+  });
+
   it("accepts both CSS and physical pixel drag positions", () => {
     const rect = { left: 100, right: 300, top: 200, bottom: 260 };
 
     expect(composerPointInRect({ x: 150, y: 220 }, rect, 2)).toBe(true);
     expect(composerPointInRect({ x: 300, y: 440 }, rect, 2)).toBe(true);
     expect(composerPointInRect({ x: 40, y: 40 }, rect, 2)).toBe(false);
+  });
+
+  it("turns local desktop drops inside the workspace into @-relative paths", () => {
+    expect(
+      normalizeComposerDroppedLocalPath(
+        "/Users/me/project",
+        "/Users/me/project/src/App.tsx",
+      ),
+    ).toBe("src/App.tsx");
+    expect(
+      normalizeComposerDroppedLocalPath(
+        "/Users/me/project/",
+        "/Users/me/project/data",
+      ),
+    ).toBe("data");
+    expect(
+      normalizeComposerDroppedLocalPath(
+        "/Users/me/project",
+        "/Users/me/project",
+      ),
+    ).toBe(".");
+    expect(normalizeComposerDroppedLocalPath("/", "/data.tsv")).toBe(
+      "data.tsv",
+    );
+  });
+
+  it("preserves exact local desktop drop paths outside the workspace", () => {
+    expect(
+      normalizeComposerDroppedLocalPath(
+        "/Users/me/project",
+        "/Users/me/Downloads/data.csv",
+      ),
+    ).toBe("/Users/me/Downloads/data.csv");
+    expect(
+      normalizeComposerDroppedLocalPath(
+        "C:\\Users\\me\\project",
+        "C:\\Users\\me\\project\\data\\raw.csv",
+      ),
+    ).toBe("data/raw.csv");
   });
 });

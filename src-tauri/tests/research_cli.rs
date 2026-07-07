@@ -39,17 +39,16 @@ fn cli_init_does_not_overwrite_existing_agent_cards() {
 }
 
 #[test]
-fn run_command_includes_control_plane_report() {
+fn run_command_is_not_user_facing_until_real_execution_exists() {
     let temp = tempdir().expect("temp dir");
-    let output = run_research_cli(
+    let err = run_research_cli(
         &["run".to_string(), "写一个简短总结".to_string()],
         temp.path(),
     )
-    .expect("run research");
+    .expect_err("internal run command must stay hidden");
 
-    assert!(output.contains("\"control_plane_report\""));
-    assert!(output.contains("mind_hunter.intake"));
-    assert!(output.contains("planner.task_graph"));
+    assert!(err.contains("internal command"));
+    assert!(err.contains("/research <scientific task>"));
 }
 
 #[test]

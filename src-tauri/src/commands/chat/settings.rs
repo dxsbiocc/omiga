@@ -962,14 +962,6 @@ pub struct OrchestrationEventDto {
     pub created_at: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MockOrchestrationScenarioRequest {
-    pub session_id: String,
-    pub project_root: String,
-    pub scenario: String,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MockOrchestrationScenarioResult {
@@ -1318,29 +1310,6 @@ pub async fn seed_mock_orchestration_scenario(
         background_task_count: task_count,
         event_count,
     })
-}
-
-#[tauri::command]
-pub async fn run_mock_orchestration_scenario(
-    app_state: State<'_, OmigaAppState>,
-    app: AppHandle,
-    request: MockOrchestrationScenarioRequest,
-) -> CommandResult<MockOrchestrationScenarioResult> {
-    let result = seed_mock_orchestration_scenario(
-        &app_state.repo,
-        Path::new(&request.project_root),
-        &request.session_id,
-        &request.scenario,
-    )
-    .await?;
-    let _ = app.emit(
-        "mock-orchestration-scenario-loaded",
-        serde_json::json!({
-            "sessionId": result.session_id,
-            "scenario": result.scenario,
-        }),
-    );
-    Ok(result)
 }
 
 /// Background Agent tasks for one session (Claude Code–style teammate follow-ups).

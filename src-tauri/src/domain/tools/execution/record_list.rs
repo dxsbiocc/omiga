@@ -129,6 +129,7 @@ pub fn schema() -> ToolSchema {
             }
         }),
     )
+    .concurrency_safe()
 }
 
 fn lineage_summary(

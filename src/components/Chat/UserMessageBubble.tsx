@@ -53,6 +53,7 @@ interface UserMessageBubbleProps {
   chat: ChatTokenSet;
   bubbleRadiusPx: number;
   maxWidth: string;
+  canRetry?: boolean;
   onRetry: () => void;
   onEdit: () => void;
   onCopy: () => void;
@@ -98,6 +99,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
   chat,
   bubbleRadiusPx,
   maxWidth,
+  canRetry = true,
   onRetry,
   onEdit,
   onCopy,
@@ -110,6 +112,12 @@ export const UserMessageBubble = memo(function UserMessageBubble({
     ? null
     : splitUserMessageInlineCommand(displayText);
   const inlineText = inlineCommand ? inlineCommand.body : displayText;
+  const hasMessageMetadata = Boolean(
+    inlineCommand ||
+      composerAgentType ||
+      selectedPluginIds.length > 0 ||
+      attachedPaths.length > 0,
+  );
   const isDark = theme.palette.mode === "dark";
   const commandTone = theme.palette.success.main;
   const fileTone = theme.palette.info.main;
@@ -192,12 +200,12 @@ export const UserMessageBubble = memo(function UserMessageBubble({
             color: isEditing ? chat.textPrimary : chat.userBubbleText,
             fontFamily: chat.font,
             overflow: "hidden",
-            display: isEditing ? "flex" : "block",
-            flexDirection: isEditing ? "column" : "row",
-            flexWrap: isEditing ? "nowrap" : "wrap",
-            alignItems: isEditing ? "stretch" : "center",
-            alignContent: isEditing ? "stretch" : "center",
-            gap: 0.25,
+            display: "flex",
+            flexDirection: "column",
+            flexWrap: "nowrap",
+            alignItems: "stretch",
+            alignContent: "stretch",
+            gap: isEditing ? 0.25 : 0.75,
             boxShadow: isEditing
               ? theme.palette.mode === "dark"
                 ? `0 1px 4px ${alpha(theme.palette.common.black, 0.45)}`
@@ -330,124 +338,131 @@ export const UserMessageBubble = memo(function UserMessageBubble({
             composerAgentType ||
             selectedPluginIds.length > 0 ||
             attachedPaths.length > 0 ? (
-            <Typography
-              component="div"
-              className="user-msg-inline-flow"
-              sx={{
-                fontSize: 13,
-                lineHeight: 1.45,
-                display: "inline-flex",
-                flexWrap: "wrap",
-                alignItems: "center",
-                columnGap: 0.5,
-                rowGap: 0.25,
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-                overflowWrap: "anywhere",
-                minWidth: 0,
-                textAlign: "left",
-              }}
-            >
-              {inlineCommand ? (
-                <Tooltip
-                  placement="top"
-                  enterDelay={180}
-                  title={inlineCommand.command.description}
-                >
-                  <Box
-                    component="span"
-                    className="user-msg-inline-chip"
-                    sx={{
-                      display: "inline-flex",
-                      verticalAlign: "middle",
-                      minWidth: 0,
-                    }}
-                  >
-                    <Chip
-                      size="small"
-                      className="user-msg-command-chip"
-                      variant="outlined"
-                      icon={<RouteIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
-                      label={inlineCommand.command.label}
-                      sx={semanticChipSx(commandTone)}
-                    />
-                  </Box>
-                </Tooltip>
-              ) : null}
-              {composerAgentType ? (
-                <Box
-                  component="span"
-                  className="user-msg-inline-chip"
+            <>
+              {hasMessageMetadata ? (
+                <Stack
+                  className="user-msg-meta-row"
+                  direction="row"
+                  flexWrap="wrap"
+                  alignItems="center"
+                  useFlexGap
+                  spacing={0.5}
                   sx={{
-                    display: "inline-flex",
-                    verticalAlign: "middle",
                     minWidth: 0,
+                    maxWidth: "100%",
                   }}
                 >
-                  <Chip
-                    className="user-msg-agent-chip"
-                    size="small"
-                    variant="outlined"
-                    icon={<SmartToy sx={{ fontSize: 14, opacity: 0.9 }} />}
-                    label={`/${composerAgentType}`}
-                    sx={semanticChipSx(agentTone)}
-                  />
-                </Box>
+                  {inlineCommand ? (
+                    <Tooltip
+                      placement="top"
+                      enterDelay={180}
+                      title={inlineCommand.command.description}
+                    >
+                      <Box
+                        component="span"
+                        className="user-msg-inline-chip"
+                        sx={{
+                          display: "inline-flex",
+                          verticalAlign: "middle",
+                          minWidth: 0,
+                        }}
+                      >
+                        <Chip
+                          size="small"
+                          className="user-msg-command-chip"
+                          variant="outlined"
+                          icon={<RouteIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
+                          label={inlineCommand.command.label}
+                          sx={semanticChipSx(commandTone)}
+                        />
+                      </Box>
+                    </Tooltip>
+                  ) : null}
+                  {composerAgentType ? (
+                    <Box
+                      component="span"
+                      className="user-msg-inline-chip"
+                      sx={{
+                        display: "inline-flex",
+                        verticalAlign: "middle",
+                        minWidth: 0,
+                      }}
+                    >
+                      <Chip
+                        className="user-msg-agent-chip"
+                        size="small"
+                        variant="outlined"
+                        icon={<SmartToy sx={{ fontSize: 14, opacity: 0.9 }} />}
+                        label={`/${composerAgentType}`}
+                        sx={semanticChipSx(agentTone)}
+                      />
+                    </Box>
+                  ) : null}
+                  {selectedPluginIds.map((pluginId) => (
+                    <Tooltip key={pluginId} title={pluginId} placement="top">
+                      <Box
+                        component="span"
+                        className="user-msg-inline-chip"
+                        sx={{
+                          display: "inline-flex",
+                          verticalAlign: "middle",
+                          minWidth: 0,
+                        }}
+                      >
+                        <Chip
+                          className="user-msg-plugin-chip"
+                          size="small"
+                          variant="outlined"
+                          icon={<ExtensionIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
+                          label={`#${pluginId}`}
+                          sx={semanticChipSx(pluginTone)}
+                        />
+                      </Box>
+                    </Tooltip>
+                  ))}
+                  {attachedPaths.map((p) => (
+                    <Tooltip key={p} title={p} placement="top">
+                      <Box
+                        component="span"
+                        className="user-msg-inline-chip"
+                        sx={{
+                          display: "inline-flex",
+                          verticalAlign: "middle",
+                          minWidth: 0,
+                        }}
+                      >
+                        <Chip
+                          className="user-msg-file-chip"
+                          size="small"
+                          variant="outlined"
+                          icon={<InsertDriveFileIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
+                          label={`@${formatComposerPathChipLabel(p)}`}
+                          sx={semanticChipSx(fileTone)}
+                        />
+                      </Box>
+                    </Tooltip>
+                  ))}
+                </Stack>
               ) : null}
-              {selectedPluginIds.map((pluginId) => (
-                <Tooltip key={pluginId} title={pluginId} placement="top">
-                  <Box
-                    component="span"
-                    className="user-msg-inline-chip"
-                    sx={{
-                      display: "inline-flex",
-                      verticalAlign: "middle",
-                      minWidth: 0,
-                    }}
-                  >
-                    <Chip
-                      className="user-msg-plugin-chip"
-                      size="small"
-                      variant="outlined"
-                      icon={<ExtensionIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
-                      label={`#${pluginId}`}
-                      sx={semanticChipSx(pluginTone)}
-                    />
-                  </Box>
-                </Tooltip>
-              ))}
-              {attachedPaths.map((p) => (
-                <Tooltip key={p} title={p} placement="top">
-                  <Box
-                    component="span"
-                    className="user-msg-inline-chip"
-                    sx={{
-                      display: "inline-flex",
-                      verticalAlign: "middle",
-                      minWidth: 0,
-                    }}
-                  >
-                    <Chip
-                      className="user-msg-file-chip"
-                      size="small"
-                      variant="outlined"
-                      icon={<InsertDriveFileIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
-                      label={`@${formatComposerPathChipLabel(p)}`}
-                      sx={semanticChipSx(fileTone)}
-                    />
-                  </Box>
-                </Tooltip>
-              ))}
               {inlineText ? (
-                <Box
-                  component="span"
+                <Typography
+                  component="div"
                   className="user-msg-body-text"
-                  sx={{ color: chat.userBubbleText }}
+                  sx={{
+                    color: chat.userBubbleText,
+                    fontSize: 13,
+                    lineHeight: 1.5,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    overflowWrap: "anywhere",
+                    minWidth: 0,
+                    textAlign: "left",
+                  }}
                 >
                   {inlineText}
-                </Box>
+                </Typography>
               ) : null}
-            </Typography>
+            </>
           ) : null}
         </Box>
 
@@ -492,7 +507,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
           >
             {formatUserMessageTimestamp(timestamp)}
           </Typography>
-          {!isEditing ? (
+          {!isEditing && canRetry ? (
             <Tooltip title="重试">
               <IconButton
                 size="small"

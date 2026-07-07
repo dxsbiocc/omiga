@@ -2009,6 +2009,7 @@ pub fn schema() -> ToolSchema {
             "required": ["connector", "operation"]
         }),
     )
+    .concurrency_safe()
 }
 
 #[cfg(test)]

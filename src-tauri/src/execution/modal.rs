@@ -95,10 +95,10 @@ impl ModalEnvironment {
 
     /// 初始化 Modal Sandbox
     async fn init_sandbox(&mut self) -> Result<(), ExecutionError> {
-        // Modal SDK (modal-client) 尚未集成，返回明确错误
+        // Modal backend is not shipped in this product build.
         Err(ExecutionError::NotAvailable(
-            "Modal sandbox initialization is not yet implemented. \
-             Please integrate modal-client crate."
+            "Modal sandbox is not available in this build. \
+             Select Docker, Singularity, or SSH instead."
                 .to_string(),
         ))
     }
@@ -109,11 +109,10 @@ impl ModalEnvironment {
         _cmd_string: &str,
         _timeout_ms: u64,
     ) -> Result<(String, i32), ExecutionError> {
-        // Modal SDK (modal-client) 尚未集成。
-        // 返回明确错误而非静默假装成功，避免调用方误判执行结果。
+        // Return a hard error rather than a synthetic success.
         Err(ExecutionError::NotAvailable(
-            "Modal execution is not yet implemented. \
-             Please integrate modal-client crate to enable Modal sandbox execution."
+            "Modal execution is not available in this build. \
+             Select Docker, Singularity, or SSH instead."
                 .to_string(),
         ))
     }

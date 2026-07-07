@@ -32,8 +32,6 @@ import {
   Collapse,
   Select,
   FormControl,
-  FormControlLabel,
-  Checkbox,
   Paper,
   Chip,
   Popover,
@@ -79,10 +77,7 @@ import {
   Terminal,
   Server,
   Container,
-  Cloud,
-  Gauge,
   Atom,
-  Settings,
 } from "lucide-react";
 import {
   useUiStore,
@@ -136,22 +131,16 @@ import {
 
 const SANDBOX_BACKENDS: { id: SandboxBackend; label: string }[] = [
   { id: "docker", label: "Docker" },
-  { id: "modal", label: "Modal" },
-  { id: "daytona", label: "Daytona" },
   { id: "singularity", label: "Singularity" },
 ];
 
 /** 与各沙箱后端对应的图标（与二级菜单一致） */
 const SANDBOX_BACKEND_ICON: Record<SandboxBackend, LucideIcon> = {
   docker: Container,
-  modal: Cloud,
-  daytona: Gauge,
   singularity: Atom,
 };
 
 const SANDBOX_LABEL: Record<SandboxBackend, string> = {
-  modal: "Modal",
-  daytona: "Daytona",
   docker: "Docker",
   singularity: "Singularity",
 };
@@ -170,6 +159,7 @@ export const COMPOSER_PERMISSION_MODE_MENU_WIDTH = 180;
 export const COMPOSER_CONTEXT_TRAY_PLACEMENT = "above-input";
 export const COMPOSER_CONTEXT_TRAY_MAX_HEIGHT = "min(28vh, 152px)";
 export const COMPOSER_CONTEXT_ITEM_MAX_WIDTH = "calc((100% - 16px) / 3)";
+export const COMPOSER_FILE_CONTEXT_CHIP_MAX_WIDTH = "min(46vw, 240px)";
 export const COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
 export const COMPOSER_SSH_DROP_UPLOAD_MAX_FILES = 20;
 export const COMPOSER_DROP_UPLOAD_SNACKBAR_AUTO_HIDE_MS = 6000;
@@ -241,6 +231,10 @@ interface ComposerUploadItem {
   size: number;
   getBase64: () => Promise<string>;
 }
+
+type DataTransferFileWithPath = File & {
+  path?: string;
+};
 
 function sshResolvedHost(cfg: SshServerConfig): string | undefined {
   return cfg.HostName ?? cfg.host_name ?? cfg.host ?? undefined;
@@ -390,6 +384,51 @@ async function fileToBase64(file: File): Promise<string> {
 
 function basenameFromDroppedPath(path: string): string {
   return path.split(/[/\\]/u).pop() || path;
+}
+
+function normalizeDroppedFilesystemPath(path: string): string {
+  const normalized = path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/");
+  if (normalized === "/" || /^[a-z]:\/$/iu.test(normalized)) {
+    return normalized;
+  }
+  return normalized.replace(/\/+$/u, "");
+}
+
+function pathStartsWithRoot(path: string, root: string): boolean {
+  if (!root) return false;
+  if (path === root) return true;
+  const rootPrefix = root === "/" ? "/" : `${root}/`;
+  if (path.startsWith(rootPrefix)) return true;
+
+  // Windows drive letters are case-insensitive; keep POSIX paths case-sensitive.
+  if (/^[a-z]:\//iu.test(root)) {
+    return path.toLowerCase().startsWith(rootPrefix.toLowerCase());
+  }
+  return false;
+}
+
+export function normalizeComposerDroppedLocalPath(
+  workspacePath: string,
+  droppedPath: string,
+): string {
+  const dropped = normalizeDroppedFilesystemPath(droppedPath);
+  if (!dropped) return "";
+
+  const root = normalizeDroppedFilesystemPath(workspacePath);
+  if (!root || root === ".") return dropped;
+  if (!pathStartsWithRoot(dropped, root)) return dropped;
+  if (dropped === root) return ".";
+
+  const rootPrefix = root === "/" ? "/" : `${root}/`;
+  return dropped.slice(rootPrefix.length).replace(/^\/+/u, "") || ".";
+}
+
+function droppedFileSystemPath(file: File): string {
+  const withPath = file as DataTransferFileWithPath;
+  return withPath.path || file.webkitRelativePath || "";
 }
 
 type AvailableAgentRow = { agentType: string; description: string; background: boolean };
@@ -818,6 +857,11 @@ export const ChatComposer = memo(function ChatComposer({
   const def = theme.palette.background.default;
   const ink = theme.palette.text.primary;
   const mut = theme.palette.text.secondary;
+  const chromeText = theme.palette.text.secondary;
+  const chromeTextStrong =
+    theme.palette.mode === "dark"
+      ? theme.palette.text.primary
+      : theme.palette.text.secondary;
   const warningMain = theme.palette.warning.main;
   const errorMain = theme.palette.error.main;
   const errorDark = theme.palette.error.dark;
@@ -844,14 +888,14 @@ export const ChatComposer = memo(function ChatComposer({
   const semanticChipSurface = (tone: string) => {
     const readableTone = isDark ? lighten(tone, 0.28) : tone;
     return {
-      color: ink,
+      color: chromeTextStrong,
       bgcolor: alpha(tone, isDark ? 0.2 : 0.11),
       borderColor: alpha(tone, isDark ? 0.62 : 0.45),
       boxShadow: `0 1px 2px ${alpha(tone, isDark ? 0.2 : 0.14)}`,
       "& .MuiChip-label": {
         overflow: "hidden",
         textOverflow: "ellipsis",
-        color: ink,
+        color: chromeTextStrong,
       },
       "& .MuiChip-icon": {
         color: readableTone,
@@ -859,7 +903,7 @@ export const ChatComposer = memo(function ChatComposer({
         marginBottom: 0,
       },
       "& .MuiChip-deleteIcon": {
-        color: alpha(ink, 0.72),
+        color: chromeText,
         "&:hover": {
           color: readableTone,
         },
@@ -875,6 +919,34 @@ export const ChatComposer = memo(function ChatComposer({
     maxWidth: COMPOSER_CONTEXT_ITEM_MAX_WIDTH,
     fontWeight,
   } as const);
+  const composerFileContextChipSx = [
+    composerContextChipSx(fileTone, 500),
+    {
+      maxWidth: COMPOSER_FILE_CONTEXT_CHIP_MAX_WIDTH,
+      bgcolor: alpha(fileTone, isDark ? 0.14 : 0.075),
+      borderColor: alpha(fileTone, isDark ? 0.38 : 0.22),
+      boxShadow: "none",
+      color: chromeTextStrong,
+      "& .MuiChip-icon": {
+        color: isDark ? theme.palette.info.light : theme.palette.info.main,
+      },
+      "& .MuiChip-label": {
+        minWidth: 0,
+        maxWidth: "100%",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        color: chromeTextStrong,
+        fontSize: 12.5,
+        fontWeight: 500,
+      },
+      "& .MuiChip-deleteIcon": {
+        color: chromeText,
+        "&:hover": {
+          color: theme.palette.info.main,
+        },
+      },
+    },
+  ] as const;
   /** Input card — closer to solid paper so the typing area reads lighter */
   const composerBg = alpha(paper, isDark ? 0.97 : 0.99);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
@@ -896,8 +968,6 @@ export const ChatComposer = memo(function ChatComposer({
     addComposerSelectedPluginId,
     removeComposerSelectedPluginId,
     popComposerSelectedPluginId,
-    useWorktree,
-    setUseWorktree,
     environment,
     setEnvironment,
     sshServer,
@@ -1102,9 +1172,9 @@ export const ChatComposer = memo(function ChatComposer({
       });
   }, []);
 
-  /** Settings → Execution（侧栏 index 9），内层 Tab：0 Modal / 1 Daytona / 2 SSH */
+  /** Settings → Execution（侧栏 index 9），当前仅暴露 SSH 配置子页。 */
   const openExecutionSettings = useCallback(
-    (executionSubTab: 0 | 1 | 2) => {
+    (executionSubTab: 0) => {
       setSettingsTabIndex(9);
       setSettingsExecutionSubTab(executionSubTab);
       setSettingsOpen(true);
@@ -2043,6 +2113,14 @@ export const ChatComposer = memo(function ChatComposer({
     Boolean(sshServer?.trim()) &&
     Boolean(workspacePath.trim()) &&
     workspacePath.trim() !== ".";
+  const canDropReferenceLocalPaths =
+    !inputDisabled &&
+    !needsWorkspacePath &&
+    environment === "local" &&
+    Boolean(workspacePath.trim()) &&
+    workspacePath.trim() !== ".";
+  const canHandleComposerDrop =
+    canDropUploadToSsh || canDropReferenceLocalPaths;
 
   const handleComposerFileDragEnter = useCallback(
     (event: React.DragEvent<HTMLElement>) => {
@@ -2061,10 +2139,73 @@ export const ChatComposer = memo(function ChatComposer({
       if (!dataTransferHasFiles(event.dataTransfer)) return;
       event.preventDefault();
       event.stopPropagation();
-      event.dataTransfer.dropEffect = canDropUploadToSsh ? "copy" : "none";
+      event.dataTransfer.dropEffect = canHandleComposerDrop ? "copy" : "none";
       setDropUploadActive(true);
     },
-    [canDropUploadToSsh],
+    [canHandleComposerDrop],
+  );
+
+  const attachDroppedLocalPaths = useCallback(
+    (paths: string[]) => {
+      const normalizedPaths = paths
+        .map((path) => normalizeComposerDroppedLocalPath(workspacePath, path))
+        .filter(Boolean);
+
+      if (normalizedPaths.length === 0) return;
+
+      if (inputDisabled) {
+        setDropUploadStatus({
+          severity: "error",
+          message: "当前输入区不可引用文件。",
+        });
+        return;
+      }
+      if (environment !== "local") {
+        setDropUploadStatus({
+          severity: "error",
+          message: "拖拽引用当前仅用于本地工作区，请切换到本地执行环境。",
+        });
+        return;
+      }
+      if (
+        needsWorkspacePath ||
+        !workspacePath.trim() ||
+        workspacePath.trim() === "."
+      ) {
+        setDropUploadStatus({
+          severity: "error",
+          message: "请先选择本地工作目录后再拖拽引用文件。",
+        });
+        return;
+      }
+      if (normalizedPaths.length > COMPOSER_SSH_DROP_UPLOAD_MAX_FILES) {
+        setDropUploadStatus({
+          severity: "error",
+          message: `一次最多引用 ${COMPOSER_SSH_DROP_UPLOAD_MAX_FILES} 个文件或目录。`,
+        });
+        return;
+      }
+
+      normalizedPaths.forEach(addComposerAttachedPath);
+      setDropUploadStatus({
+        severity: "success",
+        message:
+          normalizedPaths.length === 1
+            ? `已添加 @${formatComposerPathChipLabel(
+                normalizedPaths[0],
+              )} 文件引用。`
+            : `已添加 ${normalizedPaths.length} 个 @ 文件引用。`,
+      });
+      queueMicrotask(() => focusEditableEnd());
+    },
+    [
+      addComposerAttachedPath,
+      environment,
+      focusEditableEnd,
+      inputDisabled,
+      needsWorkspacePath,
+      workspacePath,
+    ],
   );
 
   const handleComposerFileDragLeave = useCallback(
@@ -2187,6 +2328,14 @@ export const ChatComposer = memo(function ChatComposer({
       setDropUploadActive(false);
 
       const files = Array.from(event.dataTransfer.files ?? []);
+      if (environment === "local") {
+        const paths = files.map(droppedFileSystemPath).filter(Boolean);
+        if (paths.length > 0) {
+          attachDroppedLocalPaths(paths);
+        }
+        return;
+      }
+
       await uploadComposerItemsToSsh(
         files.map((file) => ({
           name: file.name,
@@ -2195,7 +2344,7 @@ export const ChatComposer = memo(function ChatComposer({
         })),
       );
     },
-    [uploadComposerItemsToSsh],
+    [attachDroppedLocalPaths, environment, uploadComposerItemsToSsh],
   );
 
   const nativeDragPositionInsideComposer = useCallback(
@@ -2240,6 +2389,11 @@ export const ChatComposer = memo(function ChatComposer({
             return;
           }
 
+          if (environment === "local") {
+            attachDroppedLocalPaths(payload.paths);
+            return;
+          }
+
           void uploadComposerItemsToSsh(
             payload.paths.map((path) => ({
               name: basenameFromDroppedPath(path),
@@ -2267,29 +2421,51 @@ export const ChatComposer = memo(function ChatComposer({
         unlisten = null;
       }
     };
-  }, [nativeDragPositionInsideComposer, uploadComposerItemsToSsh]);
+  }, [
+    attachDroppedLocalPaths,
+    environment,
+    nativeDragPositionInsideComposer,
+    uploadComposerItemsToSsh,
+  ]);
 
   const dropUploadBannerVisible =
     dropUploadActive || dropUploadBusy || Boolean(dropUploadStatus);
   const dropUploadBannerSeverity: ComposerDropUploadStatus["severity"] =
-    dropUploadActive && !canDropUploadToSsh
+    dropUploadActive && !canHandleComposerDrop
       ? "error"
       : dropUploadStatus?.severity ?? "info";
   const dropUploadBannerMessage = dropUploadActive
-    ? canDropUploadToSsh
-      ? "松开后上传到 SSH 工作目录。"
-      : "请选择 SSH 服务器和工作目录后再上传。"
+    ? canDropReferenceLocalPaths
+      ? "松开后作为 @ 文件路径引用。"
+      : canDropUploadToSsh
+        ? "松开后上传到 SSH 工作目录。"
+        : environment === "local"
+          ? "请先选择本地工作目录后再拖拽引用文件。"
+          : environment === "ssh"
+            ? "请选择 SSH 服务器和工作目录后再上传。"
+            : "拖拽本地文件当前支持本地 @ 引用或 SSH 上传。"
     : dropUploadStatus?.message ??
       (dropUploadBusy ? "正在上传文件到 SSH 工作目录…" : "");
-  const dropUploadTone =
+  const dropUploadPalette =
     dropUploadBannerSeverity === "success"
-      ? theme.palette.success.main
+      ? theme.palette.success
       : dropUploadBannerSeverity === "error"
-        ? errorMain
-        : theme.palette.info.main;
-  const dropUploadReadableTone = isDark
-    ? lighten(dropUploadTone, 0.28)
-    : dropUploadTone;
+        ? theme.palette.error
+        : theme.palette.info;
+  const dropUploadTone = dropUploadPalette.main;
+  const dropUploadIconColor = isDark
+    ? dropUploadPalette.light
+    : dropUploadPalette.main;
+  const dropUploadTextColor = theme.palette.text.secondary;
+  const dropUploadCloseColor = theme.palette.text.secondary;
+  const dropUploadSurface = alpha(
+    dropUploadPalette.main,
+    isDark ? 0.16 : 0.075,
+  );
+  const dropUploadBorder = alpha(
+    dropUploadPalette.main,
+    isDark ? 0.38 : 0.22,
+  );
   const dropUploadSnackbarClosable =
     Boolean(dropUploadStatus) && !dropUploadBusy;
 
@@ -2582,7 +2758,7 @@ export const ChatComposer = memo(function ChatComposer({
                       sx={{
                         flexShrink: 0,
                         borderRadius: 2,
-                        bgcolor: alpha(ink, isDark ? 0.08 : 0.04),
+                        bgcolor: theme.palette.action.hover,
                         border: `1px solid ${pen.borderSubtle}`,
                         p: 0.25,
                       }}
@@ -2800,52 +2976,47 @@ export const ChatComposer = memo(function ChatComposer({
             }
             sx={{
               mb: 1,
-              px: 1.25,
-              py: 0.85,
+              px: 1,
+              py: 0.65,
               borderRadius: 2,
               display: "flex",
               alignItems: "center",
-              gap: 1,
-              color: ink,
-              bgcolor: alpha(paper, isDark ? 0.94 : 0.98),
-              border: `1px solid ${alpha(
+              gap: 0.75,
+              color: dropUploadTextColor,
+              bgcolor: alpha(theme.palette.background.paper, isDark ? 0.96 : 0.98),
+              border: `1px solid ${dropUploadBorder}`,
+              boxShadow: `0 8px 22px ${alpha(
                 dropUploadTone,
-                isDark ? 0.42 : 0.24,
-              )}`,
-              boxShadow: isDark
-                ? `0 12px 36px ${alpha("#000", 0.3)}, inset 0 1px 0 ${edge(0.08)}`
-                : `0 12px 30px ${alpha(
-                    dropUploadTone,
-                    0.12,
-                  )}, inset 0 1px 0 ${edge(0.08)}`,
-              backdropFilter: "blur(14px)",
-              WebkitBackdropFilter: "blur(14px)",
+                isDark ? 0.18 : 0.1,
+              )}, inset 0 1px 0 ${edge(0.06)}`,
+              backdropFilter: "blur(12px)",
+              WebkitBackdropFilter: "blur(12px)",
             }}
           >
             <Box
               sx={{
-                width: 28,
-                height: 28,
+                width: 24,
+                height: 24,
                 flex: "0 0 auto",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
                 borderRadius: "50%",
-                color: dropUploadReadableTone,
-                bgcolor: alpha(dropUploadTone, isDark ? 0.18 : 0.1),
+                color: dropUploadIconColor,
+                bgcolor: dropUploadSurface,
               }}
             >
-              <InsertDriveFile sx={{ fontSize: 18 }} />
+              <InsertDriveFile sx={{ fontSize: 16 }} />
             </Box>
             <Typography
-              variant="body2"
+              variant="caption"
               sx={{
                 minWidth: 0,
                 flex: 1,
-                fontSize: 13,
-                fontWeight: 600,
-                lineHeight: 1.45,
-                color: ink,
+                fontSize: 12.5,
+                fontWeight: 500,
+                lineHeight: 1.35,
+                color: dropUploadTextColor,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: { xs: "normal", sm: "nowrap" },
@@ -2859,13 +3030,13 @@ export const ChatComposer = memo(function ChatComposer({
                 size="small"
                 onClick={dismissDropUploadStatus}
                 sx={{
-                  width: 30,
-                  height: 30,
+                  width: 26,
+                  height: 26,
                   flex: "0 0 auto",
-                  color: alpha(ink, 0.72),
+                  color: dropUploadCloseColor,
                   "&:hover": {
-                    color: dropUploadReadableTone,
-                    bgcolor: alpha(dropUploadTone, isDark ? 0.16 : 0.08),
+                    color: theme.palette.text.primary,
+                    bgcolor: theme.palette.action.hover,
                   },
                   "&:focus-visible": {
                     outline: `2px solid ${alpha(dropUploadTone, 0.48)}`,
@@ -2873,7 +3044,7 @@ export const ChatComposer = memo(function ChatComposer({
                   },
                 }}
               >
-                <Close sx={{ fontSize: 18 }} />
+                <Close sx={{ fontSize: 16 }} />
               </IconButton>
             ) : null}
           </Box>
@@ -2896,14 +3067,14 @@ export const ChatComposer = memo(function ChatComposer({
             WebkitBackdropFilter: "blur(12px)",
             border: dropUploadActive
               ? `1px solid ${alpha(
-                  canDropUploadToSsh ? accent : errorMain,
+                  canHandleComposerDrop ? accent : errorMain,
                   0.55,
                 )}`
               : `1px solid ${edge(0.12)}`,
             boxShadow: `
               0 1px 2px ${edge(0.06)},
               0 8px 24px ${alpha(
-                dropUploadActive && !canDropUploadToSsh ? errorMain : accent,
+                dropUploadActive && !canHandleComposerDrop ? errorMain : accent,
                 dropUploadActive ? 0.16 : 0.08,
               )},
               inset 0 1px 0 ${edge(0.08)}
@@ -3084,7 +3255,7 @@ export const ChatComposer = memo(function ChatComposer({
                       icon={<InsertDriveFile sx={{ fontSize: 16 }} />}
                       label={`@${formatComposerPathChipLabel(p)}`}
                       onDelete={() => removeComposerAttachedPath(p)}
-                      sx={composerContextChipSx(fileTone, 600)}
+                      sx={composerFileContextChipSx}
                     />
                   </Tooltip>
                 ))}
@@ -3910,7 +4081,7 @@ export const ChatComposer = memo(function ChatComposer({
                     display: "inline-block",
                     cursor: "default",
                     ...composerLabelText,
-                    color: ink,
+                    color: chromeTextStrong,
                   }}
                 >
                   权限模式
@@ -3986,7 +4157,7 @@ export const ChatComposer = memo(function ChatComposer({
                 py: 0,
                 borderRadius: 2.5,
                 borderColor: edge(0.14),
-                color: ink,
+                color: chromeTextStrong,
                 ...composerLabelText,
                 bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
                 boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
@@ -4069,7 +4240,7 @@ export const ChatComposer = memo(function ChatComposer({
         </Paper>
       </Box>
 
-      {/* Bottom: left = path + branch · right = worktree + remote/local */}
+      {/* Bottom: focused workspace and execution controls */}
       <Stack
         direction="row"
         alignItems="center"
@@ -4218,7 +4389,7 @@ export const ChatComposer = memo(function ChatComposer({
             onClick={onPickWorkspace}
             sx={{
               textTransform: "none",
-              color: needsWorkspacePath ? warningMain : ink,
+              color: needsWorkspacePath ? warningMain : chromeTextStrong,
               ...composerLabelText,
               display: "inline-flex",
               alignItems: "center",
@@ -4298,7 +4469,7 @@ export const ChatComposer = memo(function ChatComposer({
                     minHeight: "var(--composer-footer-h)",
                     height: "var(--composer-footer-h)",
                     bgcolor: "transparent",
-                    color: ink,
+                    color: chromeTextStrong,
                     borderRadius: 2,
                     ...composerLabelText,
                     boxShadow: "none",
@@ -4358,49 +4529,6 @@ export const ChatComposer = memo(function ChatComposer({
             ml: { xs: 0, sm: "auto" },
           }}
         >
-          <FormControlLabel
-            control={
-              <Checkbox
-                size="small"
-                checked={useWorktree}
-                onChange={(_, v) => setUseWorktree(v)}
-                sx={{
-                  py: 0,
-                  color: mut,
-                  "&.Mui-checked": { color: accent },
-                  "& .MuiSvgIcon-root": { fontSize: 20 },
-                }}
-              />
-            }
-            label={
-              <Typography
-                variant="body2"
-                sx={{ ...composerLabelText, color: ink }}
-              >
-                worktree
-              </Typography>
-            }
-            sx={{
-              mr: 0,
-              px: 0.5,
-              py: 0,
-              minHeight: "var(--composer-footer-h)",
-              height: "var(--composer-footer-h)",
-              borderRadius: 2,
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              transition: "background-color 0.2s ease, border-color 0.2s ease",
-              "& .MuiFormControlLabel-label": {
-                ...composerLabelText,
-                color: ink,
-              },
-              "&:hover": {
-                bgcolor: alpha(accent, 0.3),
-                borderColor: alpha(accent, 0.24),
-              },
-            }}
-          />
-
           <Menu
             anchorEl={envAnchor}
             open={Boolean(envAnchor)}
@@ -4463,7 +4591,7 @@ export const ChatComposer = memo(function ChatComposer({
                       : "在本机运行工具与终端"
                   }
                   primaryTypographyProps={{
-                    sx: { ...composerLabelText, color: ink },
+                    sx: { ...composerLabelText, color: chromeTextStrong },
                   }}
                   secondaryTypographyProps={{
                     sx: { fontSize: 11, color: mut },
@@ -4519,7 +4647,7 @@ export const ChatComposer = memo(function ChatComposer({
                       : "点击配置 SSH 连接"
                   }
                   primaryTypographyProps={{
-                    sx: { ...composerLabelText, color: ink },
+                    sx: { ...composerLabelText, color: chromeTextStrong },
                   }}
                   secondaryTypographyProps={{
                     sx: { fontSize: 11, color: mut },
@@ -4556,7 +4684,7 @@ export const ChatComposer = memo(function ChatComposer({
                   primary="沙箱"
                   secondary="远程容器化执行环境"
                   primaryTypographyProps={{
-                    sx: { ...composerLabelText, color: ink },
+                    sx: { ...composerLabelText, color: chromeTextStrong },
                   }}
                   secondaryTypographyProps={{
                     sx: { fontSize: 11, color: mut },
@@ -4623,7 +4751,7 @@ export const ChatComposer = memo(function ChatComposer({
                 <Divider sx={{ my: 0.5 }} />
                 <MenuItem
                   onClick={() => {
-                    openExecutionSettings(2);
+                    openExecutionSettings(0);
                     setSshMenuAnchor(null);
                     setEnvAnchor(null);
                   }}
@@ -4634,7 +4762,7 @@ export const ChatComposer = memo(function ChatComposer({
                   <ListItemText
                     primary="添加 SSH 配置"
                     primaryTypographyProps={{
-                      sx: { fontSize: 13, color: ink, fontWeight: 500 },
+                      sx: { fontSize: 13, color: chromeTextStrong, fontWeight: 500 },
                     }}
                   />
                 </MenuItem>
@@ -4661,7 +4789,7 @@ export const ChatComposer = memo(function ChatComposer({
                       primary={name}
                       secondary={sshConnectionLabel(cfg)}
                       primaryTypographyProps={{
-                        sx: { fontSize: 13, fontWeight: 500, color: ink },
+                        sx: { fontSize: 13, fontWeight: 500, color: chromeTextStrong },
                       }}
                       secondaryTypographyProps={{
                         sx: { fontSize: 11, color: mut },
@@ -4672,7 +4800,7 @@ export const ChatComposer = memo(function ChatComposer({
                 <Divider sx={{ my: 0.5 }} />
                 <MenuItem
                   onClick={() => {
-                    openExecutionSettings(2);
+                    openExecutionSettings(0);
                     setSshMenuAnchor(null);
                     setEnvAnchor(null);
                   }}
@@ -4744,31 +4872,12 @@ export const ChatComposer = memo(function ChatComposer({
                   <ListItemText
                     primary={b.label}
                     primaryTypographyProps={{
-                      sx: { fontSize: 13, fontWeight: 500, color: ink },
+                      sx: { fontSize: 13, fontWeight: 500, color: chromeTextStrong },
                     }}
                   />
                 </MenuItem>
               );
             })}
-            <Divider sx={{ my: 0.5 }} />
-            <MenuItem
-              onClick={() => {
-                openExecutionSettings(0);
-                setSandboxMenuAnchor(null);
-                setEnvAnchor(null);
-              }}
-              sx={{ px: 1.5, py: 0.75 }}
-            >
-              <ListItemIcon sx={{ minWidth: 36 }}>
-                <Settings size={18} strokeWidth={2} color={mut} />
-              </ListItemIcon>
-              <ListItemText
-                primary="配置沙箱后端"
-                primaryTypographyProps={{
-                  sx: { fontSize: 13, color: mut, fontWeight: 500 },
-                }}
-              />
-            </MenuItem>
           </Menu>
 
           {/* 本地虚拟环境二级菜单 */}
@@ -4820,7 +4929,7 @@ export const ChatComposer = memo(function ChatComposer({
               <ListItemText
                 primary="无虚拟环境"
                 primaryTypographyProps={{
-                  sx: { fontSize: 13, fontWeight: 500, color: ink },
+                  sx: { fontSize: 13, fontWeight: 500, color: chromeTextStrong },
                 }}
               />
             </MenuItem>
@@ -4871,7 +4980,7 @@ export const ChatComposer = memo(function ChatComposer({
                     <ListItemText
                       primary={v.label}
                       primaryTypographyProps={{
-                        sx: { fontSize: 13, fontWeight: 500, color: ink },
+                        sx: { fontSize: 13, fontWeight: 500, color: chromeTextStrong },
                       }}
                     />
                   </MenuItem>

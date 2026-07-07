@@ -130,9 +130,9 @@ describe("connector product integration state", () => {
       false,
     );
 
-    expect(message).toContain("Gmail 浏览器登录暂未在当前构建启用");
-    expect(message).toContain("Google 应用专用密码备用方式");
-    expect(message).toContain("不会跳转到 OpenAI/Codex 托管授权页");
+    expect(message).toContain("Gmail 浏览器授权未在当前构建开放");
+    expect(message).toContain("本机授权方式或外部 token");
+    expect(message).not.toContain("已尝试启动 Omiga 授权");
     expect(message).not.toContain("OMIGA_GMAIL_OAUTH_CLIENT_ID");
   });
 
@@ -173,10 +173,9 @@ describe("connector product integration state", () => {
       true,
     );
 
-    expect(message).toContain("一键登录即将支持");
-    expect(message).toContain("当前构建没有可用的 Omiga 授权服务");
-    expect(message).toContain("高级 token 仍可作为备用方式");
-    expect(message).toContain("不会跳转到 OpenAI/Codex 托管授权页");
+    expect(message).toContain("已尝试启动 Omiga 授权");
+    expect(message).toContain("Slack 浏览器授权未在当前构建开放");
+    expect(message).toContain("本机授权方式或外部 token");
     expect(message).not.toContain("SLACK_BOT_TOKEN");
     expect(message).not.toContain("OMIGA_SLACK_OAUTH_CLIENT_ID");
     expect(message).not.toContain("chatgpt.com");

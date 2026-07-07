@@ -222,7 +222,7 @@ function authHint(connector: ConnectorInfo): string {
     return "Use Slack login/authorization; env bot tokens are advanced fallbacks";
   }
   if (connector.definition.id === "gmail") {
-    return "优先使用 Gmail 浏览器 OAuth；不可用时使用 Google 应用专用密码备用，密钥只进系统安全存储";
+    return "使用 Google 应用专用密码连接，密钥只进入系统安全存储";
   }
   if (connector.definition.id === "qq_mail") {
     return "输入 QQ 邮箱账号和授权码；Omiga 保存到系统安全存储并完成本机校验";
@@ -809,12 +809,26 @@ function connectorHasProductConnectionFlow(connector: ConnectorInfo): boolean {
 }
 
 export function connectorIsProductIntegrated(connector: ConnectorInfo): boolean {
-  return connectorHasProductConnectionFlow(connector) && connector.definition.tools.length > 0;
+  return (
+    connector.definition.tools.length > 0 &&
+    (connectorHasProductConnectionFlow(connector) ||
+      connector.accessible ||
+      connector.envConfigured)
+  );
+}
+
+function connectorIsUserVisible(connector: ConnectorInfo): boolean {
+  return (
+    connectorIsProductIntegrated(connector) ||
+    connector.accessible ||
+    connector.enabled ||
+    connector.source === "custom"
+  );
 }
 
 function connectorRuntimeLabel(connector: ConnectorInfo): string {
   if (!connectorIsProductIntegrated(connector)) {
-    return "暂未接入";
+    return "不可连接";
   }
   const nativeCount = nativeToolCount(connector);
   if (nativeCount > 0) {
@@ -827,7 +841,7 @@ function connectorRuntimeLabel(connector: ConnectorInfo): string {
     return "邮箱授权码连接";
   }
   if (connector.definition.tools.length > 0) {
-    return "声明能力，等待 MCP/插件/native 执行器";
+    return "外部工具声明";
   }
   return "仅元数据";
 }
@@ -866,13 +880,13 @@ function connectorAuthLabel(connector: ConnectorInfo): string {
     return "GitHub 登录 / GitHub CLI / 高级凭证";
   }
   if (connector.definition.id === "notion") {
-    return "Notion 浏览器登录 / 高级凭证";
+    return "Notion token / 高级凭证";
   }
   if (connector.definition.id === "slack") {
-    return "Slack 浏览器登录 / 高级凭证";
+    return "Slack bot token / 高级凭证";
   }
   if (connector.definition.id === "gmail") {
-    return "Gmail OAuth / Google 应用专用密码";
+    return "Google 应用专用密码";
   }
   if (connector.definition.id === "qq_mail") {
     return "QQ 邮箱账号 / 授权码";
@@ -928,12 +942,7 @@ function connectorStatusText(connector: ConnectorInfo): string {
 }
 
 function connectorSupportsLogin(connector: ConnectorInfo): boolean {
-  return (
-    connector.definition.id === "gmail" ||
-    connector.definition.id === "github" ||
-    connector.definition.id === "notion" ||
-    connector.definition.id === "slack"
-  );
+  return connector.definition.id === "github";
 }
 
 function connectorHasMissingProductOAuthConfig(
@@ -978,16 +987,13 @@ export function connectorLoginFailureMessage(
 ): string {
   const action = openedHostedPage ? "已尝试启动 Omiga 授权；" : "";
   if (connectorHasMissingProductOAuthConfig(connector, errorMessage)) {
-    if (connector.definition.id === "gmail") {
-      return `${action}Gmail 浏览器登录暂未在当前构建启用，已保留 Google 应用专用密码备用方式。Omiga 不会跳转到 OpenAI/Codex 托管授权页。`;
-    }
-    return `${action}${connector.definition.name} 一键登录即将支持。当前构建没有可用的 Omiga 授权服务；高级 token 仍可作为备用方式。Omiga 不会跳转到 OpenAI/Codex 托管授权页。`;
+    return `${action}${connector.definition.name} 浏览器授权未在当前构建开放；请使用已配置的本机授权方式或外部 token。`;
   }
   return errorMessage || `${connector.definition.name} 登录启动失败。`;
 }
 
 function connectorConnectionCtaLabel(connector: ConnectorInfo): string {
-  if (!connectorIsProductIntegrated(connector)) return "暂未接入";
+  if (!connectorIsProductIntegrated(connector)) return "不可连接";
   if (connector.accessible) return "已连接";
   if (connector.definition.id === "gmail" && connectorSupportsLogin(connector)) {
     return "浏览器登录 Gmail";
@@ -995,14 +1001,14 @@ function connectorConnectionCtaLabel(connector: ConnectorInfo): string {
   if (connectorSupportsBothTokenAndMailboxLogin(connector)) return "浏览器登录";
   if (connectorSupportsLogin(connector)) return `一键连接 ${connector.definition.name}`;
   if (connectorSupportsCredentialValidation(connector)) return `连接 ${connector.definition.name}`;
-  return "暂未接入";
+  return "不可连接";
 }
 
 function connectorAuthFlowButtonLabel(flow: ConnectorAuthFlow): string {
   if (flow.status === "opening") return "打开中…";
   if (flow.status === "checking") return "检测中…";
   if (flow.status === "setup_required") {
-    return flow.provider === "credential_validation" ? "需要授权码" : "即将支持";
+    return flow.provider === "credential_validation" ? "需要授权码" : "需要配置";
   }
   if (flow.status === "error") return "重新连接";
   return "等待授权";
@@ -1034,7 +1040,7 @@ function connectorAuthFlowTitle(
   if (connector.accessible) return "连接已可用";
   if (connectorSupportsLogin(connector)) return "需要授权";
   if (connectorSupportsCredentialValidation(connector)) return "需要连接";
-  return "等待真实接入";
+  return "不可连接";
 }
 
 function connectorAuthFlowChipColor(
@@ -1051,7 +1057,7 @@ function connectorSetupRequiredTitle(connector: ConnectorInfo): string {
   }
   return connectorSupportsCredentialValidation(connector)
     ? "需要邮箱账号和授权码"
-    : "一键登录即将支持";
+    : "需要外部授权";
 }
 
 function connectorAuthFlowAttentionTitle(
@@ -1061,7 +1067,7 @@ function connectorAuthFlowAttentionTitle(
   if (flow?.status !== "setup_required") return "登录流程已停止，可重试连接。";
   return connectorSupportsCredentialValidation(connector)
     ? "需要授权码或应用专用密码才能完成连接。"
-    : "一键登录暂不可用。";
+    : "需要先配置外部授权。";
 }
 
 function ConnectorSetupHintChips({ hints }: { hints: string[] }) {
@@ -1078,17 +1084,11 @@ function ConnectorSetupHintChips({ hints }: { hints: string[] }) {
 function connectorSetupHints(connector: ConnectorInfo): string[] {
   switch (connector.definition.id) {
     case "gmail":
-      return ["推荐浏览器 OAuth；当前不可用时使用 Google 应用专用密码备用。"];
+      return ["使用 Google 应用专用密码完成连接。"];
     case "notion":
-      return [
-        "Notion 一键登录即将支持。",
-        "高级 token 可作为备用方式。",
-      ];
+      return ["请先配置 Notion token。"];
     case "slack":
-      return [
-        "Slack 一键登录即将支持。",
-        "高级 token 可作为备用方式。",
-      ];
+      return ["请先配置 Slack bot token。"];
     case "github":
       return ["可以使用 GitHub CLI 登录；OAuth 服务未内置时 Omiga 会自动尝试本机 GitHub CLI。"];
     case "qq_mail":
@@ -1107,13 +1107,13 @@ function connectorAuthFlowMessage(
   if (!flow) {
     if (connector.accessible) return "已连接，可以在对话中使用该连接器。";
     if (connectorSupportsBothTokenAndMailboxLogin(connector)) {
-      return "会优先打开浏览器登录；不可用时可切换到服务商授权码备用方式。";
+      return "使用服务商授权码或应用专用密码完成连接。";
     }
     if (connectorSupportsLogin(connector)) return "点击连接后会在默认浏览器打开授权页。";
     if (connectorSupportsCredentialValidation(connector)) {
       return "输入邮箱账号和授权码后，Omiga 会保存到系统安全存储并校验连接状态。";
     }
-    return "暂未接入真实登录或工具执行方式。";
+    return "此连接器不会显示在可连接列表中。";
   }
   return flow.message;
 }
@@ -1185,11 +1185,11 @@ function connectorConnectRows(connector: ConnectorInfo): Array<{
       },
       {
         title: "不经过 OpenAI/Codex 托管授权页",
-        body: "授权链接由 Omiga 自己的连接逻辑生成，完成后会自动检测 token 是否可用。",
+        body: "授权完成后 Omiga 会自动检测 token 是否可用。",
       },
       {
-        title: "应用专用密码只是备用方式",
-        body: "只有浏览器 token 登录不可用时，才需要切换到邮箱授权码或应用专用密码。",
+        title: "应用专用密码用于本机直连",
+        body: "Omiga 保存到系统安全存储，不写入 connectors/config.json。",
       },
     ];
   }
@@ -1227,8 +1227,8 @@ function connectorConnectRows(connector: ConnectorInfo): Array<{
   }
   return [
     {
-      title: "暂未接入真实连接方式",
-      body: "当前只展示连接器元数据。接入 OAuth、本机软件登录或原生工具后才能连接。",
+      title: "需要外部授权",
+      body: "该服务需要先完成官方授权或配置外部 token。",
     },
   ];
 }
@@ -1370,7 +1370,7 @@ function ConnectorConnectDialog({
     : isWorking
       ? "正在连接…"
       : setupBlocked
-        ? "即将支持"
+        ? "需要配置"
       : isMailCredentialFlow
         ? `连接 ${connector.definition.name}`
         : displayAuthFlow
@@ -2018,9 +2018,8 @@ function ConnectorDetailsDialog({
 
               {!isProductIntegrated && (
                 <Alert severity="info" sx={{ borderRadius: 2 }}>
-                  {connector.definition.name} 暂未接入真实软件登录和可执行工具，
-                  当前仅展示灰色元数据，不能启用或连接。后续接入 OAuth / 本地软件登录 /
-                  native 工具后会自动变为可用。
+                  {connector.definition.name} 当前没有可用执行入口，已从默认可连接列表隐藏。
+                  完成官方授权或外部 token 配置后再启用。
                 </Alert>
               )}
 
@@ -2711,7 +2710,7 @@ export function ConnectorsPanel({
   const categories = useMemo(() => {
     return Array.from(
       new Set(
-        (catalog?.connectors ?? []).map(
+        (catalog?.connectors ?? []).filter(connectorIsUserVisible).map(
           (connector) => connector.definition.category || "other",
         ),
       ),
@@ -2750,6 +2749,7 @@ export function ConnectorsPanel({
 
   const filteredConnectors = useMemo(() => {
     return (catalog?.connectors ?? []).filter((connector) => {
+      if (!connectorIsUserVisible(connector)) return false;
       if (!connectorMatchesSearch(connector, deferredSearchQuery)) return false;
       if (statusFilter !== "all" && connector.status !== statusFilter)
         return false;
@@ -3166,7 +3166,6 @@ export function ConnectorsPanel({
                       "connected",
                       "needs_auth",
                       "disabled",
-                      "metadata_only",
                     ] as const
                   ).map((status) => (
                     <MenuItem key={status} value={status}>

@@ -63,7 +63,7 @@ pub struct MemoryConfig {
     /// Default: 10MB
     pub max_file_size: usize,
 
-    /// Whether to use shared memory across worktrees
+    /// Whether to use shared memory across workspace roots
     /// Default: false
     pub shared_memory: bool,
 

@@ -17,7 +17,7 @@ export interface UiState {
   /** Settings sidebar index — see `Settings/index.tsx` SETTINGS_SECTIONS (0–15) */
   settingsTabIndex: number;
   setSettingsTabIndex: (index: number) => void;
-  /** When sidebar tab is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
+  /** When sidebar tab is Execution (9): inner tab; currently SSH-only */
   settingsExecutionSubTab: number;
   setSettingsExecutionSubTab: (index: number) => void;
   settingsOpen: boolean;

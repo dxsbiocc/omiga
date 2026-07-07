@@ -758,8 +758,7 @@ async fn continue_goal_once_with_llm(
     }
 
     let request = build_continuation_request(&goal);
-    let args = vec!["run".to_string(), request.clone()];
-    let output = super::cli::run_research_cli(&args, &layout.root)?;
+    let output = super::cli::execute_research_request(&layout.root, &request)?;
     let output_json = serde_json::from_str::<Value>(&output).unwrap_or_else(|_| {
         serde_json::json!({
             "status": "completed",
@@ -2771,6 +2770,7 @@ mod tests {
                 prompt_tokens: 11,
                 completion_tokens: 7,
                 total_tokens: 18,
+                ..Default::default()
             })],
         );
 
@@ -2861,11 +2861,13 @@ mod tests {
                     prompt_tokens: 11,
                     completion_tokens: 7,
                     total_tokens: 18,
+                    ..Default::default()
                 }),
                 Some(TestLlmTokenUsage {
                     prompt_tokens: 11,
                     completion_tokens: 7,
                     total_tokens: 18,
+                    ..Default::default()
                 }),
             ],
         );

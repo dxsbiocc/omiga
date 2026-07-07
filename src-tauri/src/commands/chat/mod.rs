@@ -27,7 +27,7 @@ use crate::domain::runtime_constraints::{
     ModelConstraintContext, RuntimeConstraintHarness, RuntimeConstraintState, ToolConstraintContext,
 };
 use crate::domain::session::SessionCodec;
-use crate::domain::session::{Session, ToolCall};
+use crate::domain::session::{Message, MessageTokenUsage, Session, ToolCall};
 use crate::domain::skills;
 use crate::domain::tools::{
     all_tool_schemas, normalize_legacy_retrieval_tool_arguments,
@@ -62,6 +62,43 @@ struct SkillToolArgs {
 
 fn default_execution_mode() -> String {
     "inline".to_string()
+}
+
+fn last_turn_input_tokens_for_compaction(messages: &[Message]) -> Option<u32> {
+    messages.iter().rev().find_map(|message| {
+        if let Message::Assistant {
+            token_usage: Some(usage),
+            ..
+        } = message
+        {
+            Some(full_prefix_input_tokens_for_compaction(usage))
+        } else {
+            None
+        }
+    })
+}
+
+fn full_prefix_input_tokens_for_compaction(usage: &MessageTokenUsage) -> u32 {
+    if provider_reports_cache_read_outside_input(usage.provider.as_deref()) {
+        // Anthropic reports cache_read_input_tokens separately from input_tokens, so the
+        // next-request prefix scale is input + cache_read. OpenAI prompt_tokens already includes
+        // cached prompt tokens, and unknown providers conservatively keep input only.
+        usage.input.saturating_add(usage.cache_read.unwrap_or(0))
+    } else {
+        usage.input
+    }
+}
+
+fn provider_reports_cache_read_outside_input(provider: Option<&str>) -> bool {
+    let Some(provider) = provider else {
+        return false;
+    };
+    let provider = provider.trim().to_ascii_lowercase();
+    matches!(provider.as_str(), "anthropic" | "claude")
+        || provider.starts_with("anthropic-")
+        || provider.starts_with("anthropic_")
+        || provider.starts_with("claude-")
+        || provider.starts_with("claude_")
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -842,18 +879,13 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
             };
             let ask_tool_calls = vec![ask_tool_call.clone()];
 
-            let _ = app.emit(
-                &format!("chat-stream-{}", message_id),
-                &StreamOutputItem::Text(format!("\n\n{}", block.assistant_response)),
-            );
-
             let ask_tool_calls_json = serde_json::to_string(&ask_tool_calls).ok();
             if let Err(e) = repo
                 .save_message(NewMessageRecord {
                     id: &ask_assistant_id,
                     session_id,
                     role: "assistant",
-                    content: &block.assistant_response,
+                    content: "",
                     tool_calls: ask_tool_calls_json.as_deref(),
                     tool_call_id: None,
                     token_usage_json: None,
@@ -872,7 +904,7 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
                 let mut sessions_guard = sessions.write().await;
                 if let Some(runtime) = sessions_guard.get_mut(session_id) {
                     runtime.session.add_assistant_message_with_tools(
-                        block.assistant_response.clone(),
+                        String::new(),
                         Some(ask_tool_calls),
                         None,
                     );
@@ -1276,7 +1308,7 @@ pub use self::research::{
 };
 pub use self::research_goal::{ResearchGoalCommandRequest, ResearchGoalCommandResponse};
 
-/// Normalize composer `sandboxBackend` from the UI (`modal` | `daytona` | `docker` | `singularity`).
+/// Normalize composer `sandboxBackend` from the UI (`docker` | `singularity`).
 /// Note: `ssh` is no longer a sandbox backend - it's now a separate execution environment.
 fn normalize_sandbox_backend(raw: Option<&String>) -> String {
     let Some(r) = raw else {
@@ -1287,7 +1319,10 @@ fn normalize_sandbox_backend(raw: Option<&String>) -> String {
         return "docker".to_string();
     }
     match s.as_str() {
-        "modal" | "daytona" | "docker" | "singularity" | "auto" => s,
+        "docker" | "singularity" => s,
+        "auto" => "docker".to_string(),
+        // Cloud backends are not user-facing until their real runtime is implemented.
+        "modal" | "daytona" => "docker".to_string(),
         // Legacy: ssh was moved to be an execution environment, not a sandbox backend
         "ssh" => "docker".to_string(),
         _ => "docker".to_string(),
@@ -2979,12 +3014,17 @@ pub async fn send_message(
     } else {
         Some(prompt_parts.join("\n\n"))
     };
+    llm_config.prompt_cache_key = Some(session.id.clone());
 
+    let compaction_context = crate::domain::auto_compact::CompactionContext {
+        last_turn_input_tokens: last_turn_input_tokens_for_compaction(&session.messages),
+    };
     if let Some(removed_messages) =
         crate::domain::auto_compact::preview_removed_messages_for_compaction(
             &session.messages,
             &llm_config,
             request.use_tools,
+            compaction_context,
         )
     {
         let should_prepare =
@@ -3086,6 +3126,7 @@ pub async fn send_message(
             &mut session,
             &llm_config,
             request.use_tools,
+            compaction_context,
             &user_message_id,
         ),
     )
@@ -4532,11 +4573,17 @@ pub async fn send_message(
                 let mut sessions = sessions_clone.write().await;
                 if let Some(runtime) = sessions.get_mut(&session_id_clone) {
                     let repo = &*repo_clone;
+                    let compaction_context = crate::domain::auto_compact::CompactionContext {
+                        last_turn_input_tokens: last_turn_input_tokens_for_compaction(
+                            &runtime.session.messages,
+                        ),
+                    };
                     if let Some(removed_messages) =
                         crate::domain::auto_compact::preview_removed_messages_for_compaction(
                             &runtime.session.messages,
                             &llm_config_for_spawn,
                             !tools.is_empty(),
+                            compaction_context,
                         )
                     {
                         let should_prepare =
@@ -4634,6 +4681,7 @@ pub async fn send_message(
                             &mut runtime.session,
                             &llm_config_for_spawn,
                             !tools.is_empty(),
+                            compaction_context,
                             "",
                         ),
                     )
@@ -5616,5 +5664,53 @@ mod tests {
         assert_eq!(input["source"], "pubmed");
         assert_eq!(input["query"], "TP53");
         assert_eq!(input["max_results"], 2);
+    }
+
+    fn assistant_with_usage(provider: Option<&str>) -> Message {
+        Message::Assistant {
+            content: "answer".to_string(),
+            tool_calls: None,
+            token_usage: Some(MessageTokenUsage {
+                input: 1_000,
+                output: 100,
+                total: Some(1_100),
+                provider: provider.map(str::to_string),
+                cache_read: Some(5_000),
+                cache_creation: None,
+            }),
+            reasoning_content: None,
+            follow_up_suggestions: None,
+            turn_summary: None,
+        }
+    }
+
+    #[test]
+    fn last_turn_input_tokens_adds_anthropic_cache_read() {
+        let messages = vec![assistant_with_usage(Some("anthropic"))];
+
+        assert_eq!(
+            last_turn_input_tokens_for_compaction(&messages),
+            Some(6_000)
+        );
+    }
+
+    #[test]
+    fn last_turn_input_tokens_does_not_double_count_openai_cached_tokens() {
+        let messages = vec![assistant_with_usage(Some("openai"))];
+
+        assert_eq!(
+            last_turn_input_tokens_for_compaction(&messages),
+            Some(1_000)
+        );
+    }
+
+    #[test]
+    fn last_turn_input_tokens_keeps_input_for_missing_provider() {
+        let messages = vec![assistant_with_usage(None)];
+
+        assert_eq!(
+            last_turn_input_tokens_for_compaction(&messages),
+            Some(1_000)
+        );
     }
 }
