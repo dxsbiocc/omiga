@@ -126,22 +126,22 @@ mod tests {
     fn tool_loop_precompact_does_not_reacquire_sessions_lock() {
         let source = include_str!("send_pipeline.rs");
         let start = source
-            .find("Shrink history before the next model call")
-            .expect("tool-loop compaction block marker should exist");
+            .find("async fn compact_tool_loop_history")
+            .expect("compact_tool_loop_history function should exist");
         let end = source[start..]
-            .find("let updated_messages =")
+            .find("struct FollowupMessagesInput")
             .map(|offset| start + offset)
-            .expect("post-compaction updated_messages marker should exist");
+            .expect("FollowupMessagesInput struct should follow compact_tool_loop_history");
         let block = &source[start..end];
 
         assert!(
-            !block.contains("sessions_clone.read().await"),
-            "tool-loop compaction already holds sessions_clone.write(); \
-            reading the same RwLock inside this block deadlocks after 压缩前摘要"
+            !block.contains(".read().await"),
+            "compact_tool_loop_history already holds the sessions write lock; \
+            acquiring any read lock inside this function deadlocks after 压缩前摘要"
         );
         assert!(
             block.contains("should_prepare_for_auto_compact"),
-            "tool-loop compaction should throttle pre-compact summary/archive emission \
+            "compact_tool_loop_history should throttle pre-compact summary/archive emission \
             to avoid repeating 压缩前摘要 / 归档会话摘要 on every tool round"
         );
         assert!(
