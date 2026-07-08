@@ -1,4 +1,6 @@
-use super::*;
+use crate::domain::tools::{
+    normalize_legacy_retrieval_tool_arguments, normalize_legacy_retrieval_tool_name,
+};
 
 fn normalize_legacy_web_tool_name(tool_name: &str) -> String {
     normalize_legacy_retrieval_tool_name(tool_name)
@@ -21,7 +23,7 @@ pub(super) fn normalize_runtime_tool_call(tool_name: &str, arguments: &str) -> (
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::normalize_runtime_tool_call;
 
     #[test]
     fn runtime_normalizes_legacy_pubmed_mcp_to_unified_search() {

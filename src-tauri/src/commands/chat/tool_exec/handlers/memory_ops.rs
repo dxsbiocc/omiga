@@ -1,5 +1,5 @@
 use super::super::dispatch::ToolDispatchContext;
-use super::super::*;
+use crate::domain::permissions::canonical_permission_tool_name;
 
 pub(super) fn working_memory_query_text(
     tool_name: &str,
@@ -66,7 +66,7 @@ pub(super) async fn handle_memory_tool(ctx: &ToolDispatchContext<'_>) -> (String
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::working_memory_query_text;
 
     #[test]
     fn working_memory_query_prefers_recall_query_field() {

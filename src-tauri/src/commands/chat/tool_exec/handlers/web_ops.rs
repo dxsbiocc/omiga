@@ -133,7 +133,7 @@ pub(super) fn register_web_source_async(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{fetch_source_url_from_args, fetch_source_url_from_args_and_output};
 
     #[test]
     fn fetch_source_url_resolves_search_result_locator() {

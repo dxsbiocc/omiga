@@ -1,4 +1,4 @@
-use super::*;
+use crate::domain::session::{Message, MessageTokenUsage};
 
 pub(super) fn last_turn_input_tokens_for_compaction(messages: &[Message]) -> Option<u32> {
     messages.iter().rev().find_map(|message| {
@@ -39,7 +39,8 @@ fn provider_reports_cache_read_outside_input(provider: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::last_turn_input_tokens_for_compaction;
+    use crate::domain::session::{Message, MessageTokenUsage};
 
     fn assistant_with_usage(provider: Option<&str>) -> Message {
         Message::Assistant {

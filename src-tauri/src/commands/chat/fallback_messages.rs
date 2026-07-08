@@ -1,4 +1,5 @@
-use super::*;
+use crate::constants::tool_limits::truncate_utf8_prefix;
+use crate::infrastructure::streaming::FollowUpSuggestion;
 
 /// Max assistant↔tool iterations per user send (safety valve; raised to support
 /// longer evidence-first investigation and multi-step execution in the main agent).
@@ -150,7 +151,10 @@ pub(super) fn should_update_memory_after_turn(final_reply: &str, had_tool_errors
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        should_update_memory_after_turn, tool_failure_no_final_answer_message,
+        tool_no_final_answer_message, tool_round_limit_message,
+    };
 
     #[test]
     fn empty_final_after_tool_error_gets_visible_failure_message() {

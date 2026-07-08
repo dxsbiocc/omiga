@@ -1,4 +1,82 @@
-use super::*;
+use super::agent_runtime::{ActiveRoundCleanup, AgentLlmRuntime};
+use super::attachments::{
+    append_image_attachments_to_latest_user_message, load_request_image_attachments,
+    RequestImageAttachment,
+};
+use super::compaction_input::last_turn_input_tokens_for_compaction;
+use super::composer_route::{
+    append_orchestration_event, append_preflight_stage_event, append_preflight_stage_failed_event,
+    composer_execution_addendum, format_scheduler_plan, looks_like_resume_request,
+    normalize_execution_environment, normalize_sandbox_backend, resolve_session_project_root,
+    ChatOrchestrationEvent,
+};
+use super::fallback_messages::{
+    should_update_memory_after_turn, tool_no_final_answer_message, tool_round_limit_follow_ups,
+    tool_round_limit_message, MAX_TOOL_ROUNDS,
+};
+use super::llm_bridge::{
+    api_messages_to_llm, augment_llm_messages_with_runtime_constraints, completed_to_tool_calls,
+    get_llm_config, normalize_llm_tool_history_for_model, tool_calls_json_opt,
+};
+use super::orchestration::{
+    begin_autopilot_turn_if_needed, begin_ralph_turn_if_needed, begin_team_turn_if_needed,
+    complete_autopilot_turn_if_needed, complete_ralph_turn_if_needed, complete_team_turn_if_needed,
+    fail_autopilot_turn_if_needed, fail_ralph_turn_if_needed, fail_team_turn_if_needed,
+    ralph_runtime_env_label, spawn_chat_indexing, update_autopilot_phase_if_needed,
+    update_ralph_phase_if_needed, ModeLifecycleContext,
+};
+use super::provider::{
+    apply_named_provider_runtime, inject_schedule_summary_message, run_agent_schedule_inner,
+    RunAgentScheduleRequest,
+};
+use super::runtime_constraints::{
+    emit_buffered_assistant_text, emit_runtime_constraint_metadata,
+    handle_runtime_constraint_block_main, run_post_response_retry_text_only,
+    PostResponseRetryRequest, RuntimeConstraintBlockRequest,
+};
+use super::settings::{InitialTodoItem, MessageResponse, SendMessageRequest};
+use super::spawn_context::TurnSpawnContext;
+use super::tool_exec::{execute_tool_calls, ToolExecutionRequest};
+use super::tool_output::{persist_session_tool_state, tool_results_dir_for_session};
+use super::turn::{
+    emit_activity_operation, emit_post_turn_meta_then_complete, merge_turn_token_usage,
+    persist_and_emit_turn_token_usage, spawn_memory_sync, stream_llm_response_with_cancel,
+    MemorySyncRequest, PostTurnCompletionRequest, StreamLlmRequest,
+};
+use crate::api::{ContentBlock, Role};
+use crate::app_state::{IntegrationsConfigCacheSlot, OmigaAppState, INTEGRATIONS_CONFIG_CACHE_TTL};
+use crate::commands::CommandResult;
+use crate::constants::agent_prompt;
+use crate::domain::agents::coordinator;
+use crate::domain::agents::scheduler::{AgentScheduler, SchedulingRequest, SchedulingStrategy};
+use crate::domain::agents::subagent_tool_filter::env_allow_nested_agent;
+use crate::domain::agents::ChatInputTarget;
+use crate::domain::chat_state::{
+    AskUserWaiter, McpToolCache, PendingToolCall, PermissionDenyCache, RoundCancellationState,
+    SessionRuntimeState, MCP_TOOL_CACHE_TTL, PERMISSION_DENY_CACHE_TTL,
+};
+use crate::domain::integrations_config;
+use crate::domain::permissions::{
+    filter_tool_schemas_by_deny_rule_entries, load_merged_permission_deny_rule_entries,
+    validate_permission_deny_entries,
+};
+use crate::domain::persistence::NewMessageRecord;
+use crate::domain::runtime_constraints::{
+    RuntimeConstraintHarness, RuntimeConstraintState, ToolConstraintContext,
+};
+use crate::domain::session::{Session, SessionCodec};
+use crate::domain::skills;
+use crate::domain::tools::{
+    all_tool_schemas, sort_tool_schemas_for_model, ToolContext, ToolSchema,
+};
+use crate::errors::{ChatError, OmigaError};
+use crate::infrastructure::streaming::StreamOutputItem;
+use crate::llm::{create_client, LlmClient, LlmConfig, LlmContent, LlmMessage, LlmRole};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::{Mutex, RwLock};
 
 pub(super) async fn send_message_impl(
     app: AppHandle,
@@ -1003,9 +1081,7 @@ async fn prepare_send_scheduling(input: PrepareSendSchedulingInput<'_>) -> SendS
 
     // 如果是自动模式或 Team 关键词路由，检测任务复杂度并可能进行任务分解
     // Pre-fetch LLM config for the planner (needed before llm_config is built below).
-    let planner_llm_config = crate::commands::chat::get_llm_config(&app_state.chat)
-        .await
-        .ok();
+    let planner_llm_config = get_llm_config(&app_state.chat).await.ok();
 
     let scheduler_result = if use_scheduler && request.use_tools {
         let scheduler = AgentScheduler::new();
@@ -1223,7 +1299,7 @@ fn start_direct_schedule_if_requested(
             let schedule_round_id = uuid::Uuid::new_v4().to_string();
             let session_id_for_bg = session_id.to_string();
             let project_root_for_bg = project_root.to_string_lossy().to_string();
-            let request_for_bg = crate::commands::chat::RunAgentScheduleRequest {
+            let request_for_bg = RunAgentScheduleRequest {
                 user_request: routing_content.to_string(),
                 project_root: project_root_for_bg.clone(),
                 session_id: session_id_for_bg.clone(),
@@ -1246,12 +1322,8 @@ fn start_direct_schedule_if_requested(
                     &StreamOutputItem::Complete,
                 );
                 if let Some(state) = app_for_bg.try_state::<OmigaAppState>() {
-                    if let Err(e) = self::provider::run_agent_schedule_inner(
-                        app_for_bg.clone(),
-                        &state,
-                        request_for_bg,
-                    )
-                    .await
+                    if let Err(e) =
+                        run_agent_schedule_inner(app_for_bg.clone(), &state, request_for_bg).await
                     {
                         tracing::warn!(
                             target: "omiga::scheduler",
@@ -4320,7 +4392,7 @@ fn start_scheduled_orchestration_if_needed(input: ScheduledOrchestrationInput<'_
                         Ok(result) => {
                             // Inject summary message and fire agent-schedule-complete event
                             // so the frontend refreshes the conversation history.
-                            crate::commands::chat::inject_schedule_summary_message(
+                            inject_schedule_summary_message(
                                 &app_for_orch,
                                 &session_id_for_orch,
                                 &sched_req.user_request,

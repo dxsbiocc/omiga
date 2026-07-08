@@ -1,4 +1,15 @@
-use super::*;
+use crate::api::{ContentBlock, Role};
+use crate::domain::chat_state::ChatState;
+use crate::domain::runtime_constraints::{
+    ModelConstraintContext, RuntimeConstraintHarness, RuntimeConstraintState,
+};
+use crate::domain::session::ToolCall;
+use crate::domain::tools::{
+    normalize_legacy_retrieval_tool_arguments, normalize_legacy_retrieval_tool_name,
+};
+use crate::errors::{ChatError, OmigaError};
+use crate::llm::{load_config_from_env, LlmConfig, LlmContent, LlmMessage, LlmRole};
+use std::path::Path;
 
 /// Get or create LLM config from environment or state
 pub(super) async fn get_llm_config(chat_state: &ChatState) -> Result<LlmConfig, OmigaError> {
@@ -143,7 +154,7 @@ pub(super) fn normalize_llm_tool_history_for_model(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::normalize_llm_tool_history_for_model;
 
     #[test]
     fn legacy_mcp_tool_history_is_normalized_before_model_context() {

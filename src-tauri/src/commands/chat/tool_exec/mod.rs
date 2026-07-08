@@ -1,42 +1,23 @@
 //! Tool execution dispatcher: `execute_tool_calls` and `execute_one_tool`.
 
-use super::permissions::{
-    execute_ask_user_question_interactive, matches_ask_user_question_name,
-    wait_for_permission_tool_resolution, AskUserQuestionExecution, PermissionToolResolutionRequest,
-};
+use super::agent_runtime::{AgentLlmRuntime, MAX_SUBAGENT_EXECUTE_DEPTH};
+use super::permissions::{wait_for_permission_tool_resolution, PermissionToolResolutionRequest};
 use super::subagent::{
-    is_agent_tool_name, run_skill_forked, run_subagent_session, ForkedSkillRequest,
-    SubagentSessionRequest,
+    run_skill_forked, run_subagent_session, ForkedSkillRequest, SubagentSessionRequest,
 };
-use super::{
-    append_truncated_results_note, apply_empty_structured_tool_placeholder,
-    fold_tool_stream_item_for_model, process_tool_output_for_model, AgentLlmRuntime,
-    MAX_SUBAGENT_EXECUTE_DEPTH,
-};
+use super::tool_output::process_tool_output_for_model;
 use crate::app_state::OmigaAppState;
 use crate::constants::tool_limits::{
     truncate_utf8_prefix, PREVIEW_SIZE_BYTES, TOOL_DISPLAY_MAX_INPUT_CHARS,
 };
-use crate::domain::agents::subagent_tool_filter::{
-    should_block_subagent_builtin_call, SubagentFilterOptions,
-};
-use crate::domain::chat_state::{McpToolCache, MCP_TOOL_CACHE_TTL};
 use crate::domain::integrations_config;
-use crate::domain::permissions::{
-    canonical_permission_tool_name, load_merged_permission_deny_rule_entries, matching_deny_entry,
-};
 use crate::domain::session::{AgentTask, TodoItem};
 use crate::domain::skills;
-use crate::domain::tools::{
-    all_tool_schemas, normalize_legacy_retrieval_tool_arguments,
-    normalize_legacy_retrieval_tool_name, Tool, ToolContext, ToolSchema, WebSearchApiKeys,
-};
+use crate::domain::tools::{ToolContext, WebSearchApiKeys};
 use crate::infrastructure::streaming::StreamOutputItem;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::RwLock;
 
 mod concurrency;
 mod dispatch;

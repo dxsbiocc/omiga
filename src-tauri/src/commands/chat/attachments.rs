@@ -1,4 +1,7 @@
-use super::*;
+use crate::llm::{LlmContent, LlmMessage, LlmRole};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub(super) struct RequestImageAttachment {

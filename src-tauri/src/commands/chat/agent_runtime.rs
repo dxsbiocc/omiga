@@ -1,4 +1,8 @@
-use super::*;
+use crate::domain::chat_state::{PendingToolCall, RoundCancellationState};
+use crate::llm::LlmConfig;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
 
 /// Max tool rounds inside one `Agent` sub-session (nested Agent calls are blocked separately).
 pub(super) const MAX_SUBAGENT_TOOL_ROUNDS: usize = 50;

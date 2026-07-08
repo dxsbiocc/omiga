@@ -1,4 +1,23 @@
-use super::*;
+use super::llm_bridge::{completed_to_tool_calls, tool_calls_json_opt};
+use super::orchestration::spawn_chat_indexing;
+use super::permissions::{execute_ask_user_question_interactive, AskUserQuestionExecution};
+use super::tool_output::persist_session_tool_state;
+use super::turn::{
+    emit_post_turn_meta_then_complete, persist_and_emit_turn_token_usage, spawn_memory_sync,
+    stream_llm_response_with_cancel, MemorySyncRequest, PostTurnCompletionRequest,
+    StreamLlmRequest,
+};
+use crate::domain::chat_state::{AskUserWaiter, PendingToolCall, SessionRuntimeState};
+use crate::domain::persistence::NewMessageRecord;
+use crate::domain::session::ToolCall;
+use crate::errors::OmigaError;
+use crate::infrastructure::streaming::StreamOutputItem;
+use crate::llm::{LlmClient, LlmMessage};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
+use tokio::sync::{Mutex, RwLock};
 
 pub(super) fn emit_buffered_assistant_text(app: &AppHandle, message_id: &str, text: &str) {
     if text.is_empty() {

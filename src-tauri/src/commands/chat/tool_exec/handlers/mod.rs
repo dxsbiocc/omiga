@@ -1,5 +1,19 @@
+use super::super::permissions::{
+    execute_ask_user_question_interactive, matches_ask_user_question_name, AskUserQuestionExecution,
+};
+use super::super::subagent::is_agent_tool_name;
+use super::super::tool_output::{
+    append_truncated_results_note, apply_empty_structured_tool_placeholder,
+    fold_tool_stream_item_for_model, process_tool_output_for_model,
+};
 use super::dispatch::ToolDispatchContext;
-use super::*;
+use crate::app_state::OmigaAppState;
+use crate::constants::tool_limits::{
+    truncate_utf8_prefix, PREVIEW_SIZE_BYTES, TOOL_DISPLAY_MAX_INPUT_CHARS,
+};
+use crate::domain::tools::{Tool, ToolContext};
+use crate::infrastructure::streaming::StreamOutputItem;
+use tauri::{Emitter, Manager};
 
 mod exec_ops;
 mod facade_ops;

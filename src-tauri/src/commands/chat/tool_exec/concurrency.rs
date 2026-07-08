@@ -1,4 +1,10 @@
-use super::*;
+use crate::app_state::OmigaAppState;
+use crate::domain::chat_state::{McpToolCache, MCP_TOOL_CACHE_TTL};
+use crate::domain::permissions::canonical_permission_tool_name;
+use crate::domain::tools::{all_tool_schemas, ToolSchema};
+use std::collections::HashSet;
+use std::path::Path;
+use tauri::{AppHandle, Manager};
 
 fn concurrency_safe_tool_names_from_schemas<'a>(
     schemas: impl IntoIterator<Item = &'a ToolSchema>,
@@ -86,7 +92,10 @@ pub(super) async fn load_concurrency_safe_tool_names(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        concurrency_safe_tool_names_from_schemas, partition_tool_call_indices_by_concurrency,
+    };
+    use crate::domain::tools::ToolSchema;
 
     fn test_tool_call(name: &str) -> (String, String, String) {
         (format!("call-{name}"), name.to_string(), "{}".to_string())

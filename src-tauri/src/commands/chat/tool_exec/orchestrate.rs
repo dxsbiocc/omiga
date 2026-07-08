@@ -1,9 +1,26 @@
+use super::super::agent_runtime::AgentLlmRuntime;
 use super::concurrency::{
     load_concurrency_safe_tool_names, partition_tool_call_indices_by_concurrency,
 };
 use super::dispatch::execute_one_tool;
+use super::handlers;
 use super::normalize::normalize_runtime_tool_call;
-use super::*;
+use super::ToolExecutionRequest;
+use crate::constants::tool_limits::{truncate_utf8_prefix, TOOL_DISPLAY_MAX_INPUT_CHARS};
+use crate::domain::agents::subagent_tool_filter::{
+    should_block_subagent_builtin_call, SubagentFilterOptions,
+};
+use crate::domain::permissions::{
+    canonical_permission_tool_name, load_merged_permission_deny_rule_entries, matching_deny_entry,
+};
+use crate::domain::session::{AgentTask, TodoItem};
+use crate::domain::skills;
+use crate::domain::tools::WebSearchApiKeys;
+use crate::infrastructure::streaming::StreamOutputItem;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex as StdMutex};
+use tauri::{AppHandle, Emitter};
+use tokio::sync::RwLock;
 
 const PARALLEL_TOOL_TIMEOUT_SECS: u64 = 45;
 
@@ -505,7 +522,7 @@ pub(in crate::commands::chat) async fn execute_tool_calls(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::parallel_tool_timeout_message;
 
     #[test]
     fn parallel_tool_timeout_message_names_tool_and_budget() {

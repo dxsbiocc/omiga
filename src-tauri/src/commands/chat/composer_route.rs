@@ -1,4 +1,4 @@
-use super::*;
+use crate::domain::persistence::NewOrchestrationEventRecord;
 
 /// Resolve session `project_path` to an absolute-ish root for tools (glob, bash, file_read).
 pub(super) fn resolve_session_project_root(project_path: &str) -> std::path::PathBuf {
