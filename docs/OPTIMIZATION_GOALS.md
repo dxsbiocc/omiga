@@ -69,6 +69,16 @@
 - 缓办(UX-only):前端对 sandbox-escalation 请求仍可能展示"本会话允许"按钮,但后端不会兑现 session 授权自动放行提权(每次全新 request_id);后续前端识别 context.tool_name=sandbox-escalation 时只展示"仅本次"。
 - 手工验证步骤:让模型执行写非白名单目录的 bash 命令 → 出现 High 风险审批 UI(含命令与拒绝摘要)→ 批准:单次无沙箱重跑,结果前缀"已经用户批准";拒绝:模型收到原错误 +"用户拒绝无沙箱重跑",UI 显示最终拒绝状态。
 - 剩余候选(优先级顺序):Linux landlock 真实现、OTel exporter、网络代理式策略、Windows 沙箱、bash 静态安全分析。
+
+### G16 Linux Landlock 真沙箱(P2)✅ 已实现(2026-07-08,提交 ad29c82)
+- 替换原 116 行诚实降级骨架为可用 Landlock 后端;文件系统策略对齐 seatbelt(全盘只读 + cwd/TMPDIR/tmp/var-tmp 可写),网络 DenyAll 且内核 ABI≥V4 时拒 TCP bind/connect。
+- 工程结构:独立 crates/omiga-landlock(仅 landlock 0.4.5 + libc),macOS 可交叉 cargo check + 单测,绕开主 crate 的 gio-sys Linux 系统库依赖;主 crate 仅薄 cfg(linux) 胶水。
+- 安全设计(两轮 review 加固):
+  * 两段式应用——父进程 prepare_restrictions 建 ruleset+open path fd,fork 后 pre_exec 子进程只做裸 syscall(prctl no_new_privs + landlock_restrict_self + close),返回裸 errno,零分配。规避多线程 fork+malloc 死锁(首轮 review 抓到的 HIGH:直接在 pre_exec 调 apply_restrictions 含分配)。
+  * 诚实降级:prepare 失败让命令 ExecutionFailed 而非静默无沙箱;缺网络 ABI 仅文件系统沙箱化 + warn;FS ABI<V3 缺 Truncate 时 warn 强度弱于 seatbelt。
+  * permission denied 仅 Landlock 后端计入沙箱拒绝(LocalSandbox 门控),避免 DAC-EACCES 误触发提权;seatbelt 启发式不变。
+- 验收:cargo test --workspace --lib(1293+4 passed)、双 target 交叉 cargo check、macOS 0 警告。Linux 真机 enforcement 集成测试为手工后续项(checklist:cwd 写入成功/cwd 外写入 Permission denied 归类 SANDBOX_DENIED;OMIGA_SANDBOX_NETWORK=deny 下 ABI≥V4 TCP 失败;OMIGA_SANDBOX_DISABLE=1 直通)。
+- 剩余候选(优先级顺序):OTel exporter、网络代理式策略、Windows 沙箱、bash 静态安全分析。
 > 修复记录（2026-07-07）：`research plan/run` 从产品 CLI 隐藏时误删了内部执行路径，导致 goals 引擎 6 个测试失败。已恢复为 `cli::execute_research_request` 内部入口（CLI 门禁保持不变），goals 循环改走该入口。
 
 > G1–G7 已完成并通过 review（详见下方各节 + 状态）。以下为第二阶段：补足与 codex 的**功能性差距**（非纯性能）。
