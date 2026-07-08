@@ -79,6 +79,20 @@
   * permission denied 仅 Landlock 后端计入沙箱拒绝(LocalSandbox 门控),避免 DAC-EACCES 误触发提权;seatbelt 启发式不变。
 - 验收:cargo test --workspace --lib(1293+4 passed)、双 target 交叉 cargo check、macOS 0 警告。Linux 真机 enforcement 集成测试为手工后续项(checklist:cwd 写入成功/cwd 外写入 Permission denied 归类 SANDBOX_DENIED;OMIGA_SANDBOX_NETWORK=deny 下 ABI≥V4 TCP 失败;OMIGA_SANDBOX_DISABLE=1 直通)。
 - 剩余候选(优先级顺序):OTel exporter、网络代理式策略、Windows 沙箱、bash 静态安全分析。
+
+### G17 OTel OTLP exporter(P2)✅ 已实现(2026-07-08,提交 9be962a)
+- 行为:设置 `OTEL_EXPORTER_OTLP_ENDPOINT` 时,tracing 追加 OpenTelemetry layer,span 经 OTLP HTTP/protobuf 导出(batch 专用线程 + 阻塞 reqwest,刻意不引 tonic/gRPC);`OTEL_SERVICE_NAME` 默认 omiga。未配置时零 OTel 组件,init 走与原实现逐字一致的 fmt 路径。
+- turn 级 span:`run_turn_spawn` 以 `llm_turn` span(session/message/round id)instrument,G9 的 `llm_turn_metrics` 事件与工具日志归属其下——补全 G9 文档所述"turn 级 span"。
+- review 裁决记录:span 前缀会出现在所有模式的日志行中(违反任务书"日志逐字一致"红线)——**有意接受**,并发 turn 关联收益 > 格式稳定,不做启用态分叉。
+- review 修复:export 超时(2s)显式压到 shutdown flush(3s)之下,退出最后一批 span 可靠送出,shutdown 失败 warn+stderr;traces endpoint 已含 /v1/traces 时不再双拼(补测试)。
+- 验收:cargo test --workspace --lib(1299+4 passed)、0 警告。手工验证:本地 Jaeger(OTLP 4318)+ `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 bun run tauri dev`,发起 chat turn 后在 UI 查 `llm_turn` span。
+
+## 第三阶段封版(2026-07-08)
+
+G15(提权审批)/ G16(Landlock)/ G17(OTel exporter)三项完成。剩余候选**暂缓**,理由:
+- 网络代理式策略:工程量大(需代理进程 + 流量强制),现有 seatbelt 域名过滤 + landlock 全拒已覆盖主场景;
+- Windows 沙箱、bash 静态安全分析:价值取决于用户群与实际风险反馈。
+待办(真机验证,见各节 checklist):G15 审批 UI 交互(macOS 触发 seatbelt 拒绝)、G16 Linux 内核 enforcement、G17 Jaeger 看板。验证反馈决定是否重启候选项。
 > 修复记录（2026-07-07）：`research plan/run` 从产品 CLI 隐藏时误删了内部执行路径，导致 goals 引擎 6 个测试失败。已恢复为 `cli::execute_research_request` 内部入口（CLI 门禁保持不变），goals 循环改走该入口。
 
 > G1–G7 已完成并通过 review（详见下方各节 + 状态）。以下为第二阶段：补足与 codex 的**功能性差距**（非纯性能）。
