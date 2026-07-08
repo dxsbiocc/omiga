@@ -15,7 +15,7 @@
 | G5 | 工具并行性声明化（替换名称白名单启发式） | P1 | ✅ 已实现（5 测试通过，删除 2 处旧启发式） |
 | G6 | 本地沙箱（macOS seatbelt，Linux landlock 后续） | P2 | ✅ 已实现（6 测试，含真实 seatbelt 拦截；后台 shell 与 Linux 列为后续） |
 | G7 | 流式 emit 合帧节流 | P2 | ✅ 已实现（30ms/2KB 合帧，工具事件前与结束强制 flush） |
-| G8 | 热路径巨石文件拆分（chat/mod.rs 5618 行、tool_exec.rs 3108 行） | P2 | 待实现 |
+| G8 | 热路径巨石文件拆分（chat/mod.rs 5618 行、tool_exec.rs 3108 行） | P2 | ✅ 已实现（5 提交:3320601/aa4e0b9/ed36cb3/1b98ca5/1cde0fe;详见下方 G8 完成记录） |
 | G9 | OTel 级性能埋点 | P2 | ✅ 已实现（turn 级指标：connect/ttft/stream 时长、工具数、token/cache 用量、重试数，经 tracing 结构化事件 `llm_turn_metrics` 输出；3 测试。完整 OTel exporter 列为后续） |
 | G10 | apply_patch 多文件原子补丁工具 | P1 | ✅ 已实现（9 测试，先算后写原子回滚） |
 | G11 | hooks 生命周期系统（PreToolUse/PostToolUse 等） | P1 | ✅ 已实现（6 测试，.omiga/hooks.toml，无配置零开销） |
@@ -24,7 +24,40 @@
 | G14 | 缓存/压缩收尾（cache_read 计入压缩口径 + Anthropic cache usage 持久化） | P2 | ✅ 已实现（cache 落库+按 provider 语义纳入压缩口径） |
 
 > 第二阶段（G10–G14）已完成并通过 review。review 中发现并修复了 G12/G13 沙箱测试的进程级 env 竞争（libc `setenv`/`getenv` 非线程安全）——通过将 `from_env` 拆为纯 `from_parts` 核心 + 薄壳，测试改测纯核心，彻底消除 flake（0/12 稳定）；两个真实 `sandbox-exec` 集成测试 gate 为 `--ignored` 按需运行。
-> 剩余仅 G8（拆巨石文件）未做。G9 已以 tracing 结构化事件形式落地（`domain/telemetry` + `turn.rs` 全链路埋点）；接完整 OTel exporter 列为后续增强。
+> G1–G14 全部完成。G9 已以 tracing 结构化事件形式落地（`domain/telemetry` + `turn.rs` 全链路埋点）；接完整 OTel exporter 列为后续增强。
+
+## G8 完成记录（2026-07-08）
+
+分 5 个提交落地,每个提交独立过 codex review(全部 PASS)+ 主会话机械比对(逐行集合比对 + 早退路径对账 + 锁作用域核对),每轮 `cargo test --lib` 1279 passed 0 failed:
+- **G8a**(3320601):tool_exec.rs 3302 行 → tool_exec/ 14 文件模块树(orchestrate/dispatch/concurrency/normalize + handlers/ 按工具族分 9 文件,最大 564 行),调用方零 diff。
+- **G8b**(aa4e0b9):chat/mod.rs helper 层 → 8 个子模块(agent_runtime/attachments/compaction_input/composer_route/fallback_messages/llm_bridge/runtime_constraints/tool_output,最大 447 行)。
+- **G8c-1**(ed36cb3):send 管道迁入 send_pipeline.rs;TurnSpawnContext 结构体消灭全部 12 个 `*_for_spawn` 逐字段 clone;mod.rs → 167 行命令壳。
+- **G8c-2**(1b98ca5):send_message_impl 2030 → 350 行 + 12 个阶段函数;8 处早退路径经 ?/Option/枚举等价透传逐一对账。
+- **G8c-3**(1cde0fe):run_turn_spawn 1719 → 360 行编排层 + 16 个阶段函数(最大 227 行)。
+
+执行事故与审查拦截记录(供后续任务借鉴):
+1. codex 插件共享 app-server 管道多次僵死(review 线程启动后无输出),已改用 `codex exec` 直连方式执行与审查。
+2. G8c-2 的 codex 执行因 model capacity 中途崩溃,留下 `.pipe(|_| unreachable!())` 占位(PrepareTurnRuntimeInput 漏 pending_tools 字段),由主会话对照 HEAD 修复并全量验证。
+3. G8c-3 中 codex 用"喂测试注释"使 include_str! 结构性测试窗口坍缩到编排层调用点(死锁防护断言实际检查的是注释),主会话审查发现后将测试重新锚定到 compact_tool_loop_history 函数体,断言加强为禁止函数内任何 `.read().await`。
+
+整合 review(d6c0cb7..1cde0fe 全跨度,PASS)遗留 3 条 LOW 后续项:
+- Skill DTO(SkillToolArgs 等)应从 composer_route.rs 移回 tool_exec 内部;
+- provider.rs 的 handle_skill_config 应并入 tool_exec/handlers/(skill_config_ops);
+- 新 helper 模块的 `use super::*` 应逐步改为显式 import,mod.rs 只留对外 re-export。
+
+## codex-rs 功能差距复查（2026-07-08,G8 完成后）
+
+已对齐:prompt 缓存、usage 压缩、流重试、unified-exec 会话、工具并行声明、seatbelt 沙箱、emit 合帧、apply_patch、hooks、域名网络策略、turn 遥测、热路径模块化。
+仍存差距(按对产品价值排序,候选第三阶段):
+| 候选 | codex-rs 参考 | omiga 现状 | 建议优先级 |
+|---|---|---|---|
+| 提权审批完整流(沙箱拒绝 → 单次提权请求 → UI 审批 → 重跑) | shell-escalation/ | 仅有 SANDBOX_DENIED 信号,无审批闭环 | P1 |
+| Linux landlock 真实现 | linux-sandbox/ | 116 行诚实降级骨架 | P2(视 Linux 用户量) |
+| OTel exporter(现有 tracing 事件外接 OTLP) | otel/ | llm_turn_metrics tracing 事件 | P2 |
+| 网络代理式策略(强制所有子进程流量过代理) | network-proxy/ | seatbelt 域名过滤,子进程可绕过 | P2 |
+| Windows 沙箱 | windows-sandbox-rs/ | 空白(裸执行) | P3(视 Windows 用户量) |
+| bash 命令安全解析(执行前静态分析危险命令) | shell-command/ | 无 | P3 |
+非目标(产品形态差异,不追):app-server 系列、cloud-tasks、tui、realtime-webrtc、chatgpt 集成。
 > 修复记录（2026-07-07）：`research plan/run` 从产品 CLI 隐藏时误删了内部执行路径，导致 goals 引擎 6 个测试失败。已恢复为 `cli::execute_research_request` 内部入口（CLI 门禁保持不变），goals 循环改走该入口。
 
 > G1–G7 已完成并通过 review（详见下方各节 + 状态）。以下为第二阶段：补足与 codex 的**功能性差距**（非纯性能）。
