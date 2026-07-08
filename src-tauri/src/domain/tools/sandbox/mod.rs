@@ -1,9 +1,9 @@
 //! Local command sandboxing support.
 //!
 //! One-shot local bash execution is routed through a platform backend:
-//! macOS uses Seatbelt (`sandbox-exec`), Linux currently exposes a Landlock
-//! policy skeleton with an honest direct-execution fallback, and unsupported
-//! platforms deliberately fall through to the existing local execution path.
+//! macOS uses Seatbelt (`sandbox-exec`), Linux uses Landlock when the running
+//! kernel supports it, and unsupported platforms deliberately fall through to
+//! the existing local execution path.
 //!
 //! Sandbox denials are surfaced by the bash layer with the machine-readable
 //! `SANDBOX_DENIED:` prefix. Approval UI for a single unsandboxed retry is a
@@ -86,6 +86,21 @@ pub fn unavailable_reason() -> &'static str {
     }
 }
 
+pub fn backend_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        return "seatbelt";
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return "landlock";
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        "none"
+    }
+}
+
 pub fn default_writable_roots(cwd: &Path) -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -108,10 +123,14 @@ pub fn wrap_local_command(
     policy: &SandboxPolicy,
     writable_roots: &[PathBuf],
     command: &str,
-) -> Command {
+) -> Result<Command, String> {
     #[cfg(target_os = "macos")]
     {
-        return seatbelt::wrap_local_command(policy, writable_roots, command);
+        return Ok(seatbelt::wrap_local_command(
+            policy,
+            writable_roots,
+            command,
+        ));
     }
     #[cfg(target_os = "linux")]
     {
@@ -122,6 +141,6 @@ pub fn wrap_local_command(
         let _ = (policy, writable_roots);
         let mut cmd = Command::new("bash");
         cmd.arg("-l").arg("-c").arg(command);
-        cmd
+        Ok(cmd)
     }
 }

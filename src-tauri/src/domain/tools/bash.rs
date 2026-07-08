@@ -365,6 +365,48 @@ pub(crate) struct BashRawOutput {
     pub(crate) stderr: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalSandbox {
+    None,
+    #[cfg(any(target_os = "macos", test))]
+    Seatbelt,
+    #[cfg(any(target_os = "linux", test))]
+    Landlock,
+}
+
+impl LocalSandbox {
+    fn is_enabled(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn treats_permission_denied_as_sandbox_denial(self) -> bool {
+        #[cfg(any(target_os = "linux", test))]
+        {
+            matches!(self, Self::Landlock)
+        }
+        #[cfg(not(any(target_os = "linux", test)))]
+        {
+            let _ = self;
+            false
+        }
+    }
+}
+
+fn active_local_sandbox() -> LocalSandbox {
+    #[cfg(target_os = "macos")]
+    {
+        return LocalSandbox::Seatbelt;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return LocalSandbox::Landlock;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        LocalSandbox::None
+    }
+}
+
 /// Map local cwd under `project_root` to the active SSH session workspace.
 fn ssh_remote_cwd(project_root: &Path, local_cwd: &Path) -> String {
     let root = crate::domain::tools::env_store::ssh_remote_root_for_project(project_root);
@@ -1022,7 +1064,7 @@ async fn run_bash_command_inner(
     _stream: bool,
     sandbox_disabled: bool,
 ) -> Result<BashRawOutput, ToolError> {
-    let (mut cmd, sandboxed) = local_bash_command(command, cwd, sandbox_disabled);
+    let (mut cmd, sandbox) = local_bash_command(command, cwd, sandbox_disabled)?;
     cmd.current_dir(cwd);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -1088,7 +1130,8 @@ async fn run_bash_command_inner(
 
     let exit_code = status.code().unwrap_or(-1);
 
-    if sandboxed && exit_code != 0 && output_looks_like_sandbox_denial(&stderr) {
+    if sandbox.is_enabled() && exit_code != 0 && output_looks_like_sandbox_denial(&stderr, sandbox)
+    {
         let message = sandbox_denied_message(&stderr);
         return Err(ToolError::ExecutionFailed { message });
     }
@@ -1100,7 +1143,11 @@ async fn run_bash_command_inner(
     })
 }
 
-fn local_bash_command(command: &str, cwd: &Path, sandbox_disabled: bool) -> (Command, bool) {
+fn local_bash_command(
+    command: &str,
+    cwd: &Path,
+    sandbox_disabled: bool,
+) -> Result<(Command, LocalSandbox), ToolError> {
     // Read the process-global disable flag here, then delegate the decision to
     // the pure `build_local_bash_command`. Tests exercise the pure builder with
     // an explicit flag so they never call `setenv`, which is not thread-safe
@@ -1108,26 +1155,32 @@ fn local_bash_command(command: &str, cwd: &Path, sandbox_disabled: bool) -> (Com
     build_local_bash_command(command, cwd, sandbox_disabled || sandbox_disabled_by_env())
 }
 
-fn build_local_bash_command(command: &str, cwd: &Path, disabled: bool) -> (Command, bool) {
+fn build_local_bash_command(
+    command: &str,
+    cwd: &Path,
+    disabled: bool,
+) -> Result<(Command, LocalSandbox), ToolError> {
     if disabled {
-        return (raw_bash_command(command), false);
+        return Ok((raw_bash_command(command), LocalSandbox::None));
     }
 
     if super::sandbox::is_supported() {
         let policy = super::sandbox::SandboxPolicy::from_env();
         let writable_roots = super::sandbox::default_writable_roots(cwd);
+        let backend = super::sandbox::backend_name();
         tracing::debug!(
             network = ?policy.network,
-            "bash: using macOS seatbelt local sandbox"
+            "bash: using {backend} local sandbox"
         );
-        return (
-            super::sandbox::wrap_local_command(&policy, &writable_roots, command),
-            true,
-        );
+        let command = super::sandbox::wrap_local_command(&policy, &writable_roots, command)
+            .map_err(|message| ToolError::ExecutionFailed {
+                message: format!("Failed to prepare local sandbox: {message}"),
+            })?;
+        return Ok((command, active_local_sandbox()));
     }
 
     tracing::debug!("bash: {}", super::sandbox::unavailable_reason());
-    (raw_bash_command(command), false)
+    Ok((raw_bash_command(command), LocalSandbox::None))
 }
 
 fn sandbox_disabled_by_env() -> bool {
@@ -1146,13 +1199,15 @@ fn raw_bash_command(command: &str) -> Command {
     cmd
 }
 
-fn output_looks_like_sandbox_denial(stderr: &[String]) -> bool {
+fn output_looks_like_sandbox_denial(stderr: &[String], sandbox: LocalSandbox) -> bool {
     stderr.iter().any(|line| {
         let lower = line.to_ascii_lowercase();
         lower.contains("operation not permitted")
             || lower.contains("sandbox")
             || lower.contains("deny")
             || lower.contains("not permitted")
+            || (sandbox.treats_permission_denied_as_sandbox_denial()
+                && lower.contains("permission denied"))
     })
 }
 
@@ -1389,17 +1444,30 @@ mod tests {
         // Pure builder: not disabled -> sandbox wrapper when the platform
         // supports it. No `setenv`, so this is safe under parallel test runs.
         let dir = tempfile::tempdir().unwrap();
-        let (cmd, sandboxed) = build_local_bash_command("true", dir.path(), false);
+        let (cmd, sandbox) = build_local_bash_command("true", dir.path(), false).unwrap();
 
         if crate::domain::tools::sandbox::is_supported() {
-            assert!(sandboxed);
-            assert!(
-                format!("{:?}", cmd).contains("sandbox-exec"),
-                "expected sandbox-exec wrapper, got {:?}",
-                cmd
-            );
+            assert!(sandbox.is_enabled());
+            #[cfg(target_os = "macos")]
+            {
+                assert_eq!(sandbox, LocalSandbox::Seatbelt);
+                assert!(
+                    format!("{:?}", cmd).contains("sandbox-exec"),
+                    "expected sandbox-exec wrapper, got {:?}",
+                    cmd
+                );
+            }
+            #[cfg(target_os = "linux")]
+            {
+                assert_eq!(sandbox, LocalSandbox::Landlock);
+                assert!(
+                    format!("{:?}", cmd).contains("bash"),
+                    "expected bash command with Landlock pre_exec, got {:?}",
+                    cmd
+                );
+            }
         } else {
-            assert!(!sandboxed);
+            assert_eq!(sandbox, LocalSandbox::None);
         }
     }
 
@@ -1407,8 +1475,8 @@ mod tests {
     fn global_sandbox_disable_env_bypasses_local_wrapper() {
         // The disable flag short-circuits the wrapper regardless of platform.
         let dir = tempfile::tempdir().unwrap();
-        let (_cmd, sandboxed) = build_local_bash_command("true", dir.path(), true);
-        assert!(!sandboxed);
+        let (_cmd, sandbox) = build_local_bash_command("true", dir.path(), true).unwrap();
+        assert_eq!(sandbox, LocalSandbox::None);
     }
 
     #[test]
@@ -1425,6 +1493,35 @@ mod tests {
     fn sandbox_denied_message_has_machine_readable_prefix() {
         let message = sandbox_denied_message(&["Operation not permitted".to_string()]);
         assert!(message.starts_with(SANDBOX_DENIED_PREFIX));
+    }
+
+    #[test]
+    fn sandbox_denial_detection_includes_landlock_permission_denied() {
+        assert!(output_looks_like_sandbox_denial(
+            &["bash: /root/blocked: Permission denied".to_string(),],
+            LocalSandbox::Landlock
+        ));
+    }
+
+    #[test]
+    fn sandbox_denial_detection_excludes_plain_permission_denied_without_landlock() {
+        let stderr = ["bash: /root/blocked: Permission denied".to_string()];
+        assert!(!output_looks_like_sandbox_denial(
+            &stderr,
+            LocalSandbox::None
+        ));
+        assert!(!output_looks_like_sandbox_denial(
+            &stderr,
+            LocalSandbox::Seatbelt
+        ));
+    }
+
+    #[test]
+    fn sandbox_denial_detection_keeps_seatbelt_terms() {
+        assert!(output_looks_like_sandbox_denial(
+            &["Operation not permitted".to_string()],
+            LocalSandbox::Seatbelt
+        ));
     }
 
     #[cfg(target_os = "macos")]

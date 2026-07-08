@@ -1,24 +1,32 @@
-//! Linux Landlock sandbox skeleton.
-//!
-//! This module intentionally does not claim enforcement yet. Without wiring the
-//! `landlock` crate and Linux-specific spawn path, Linux local bash commands
-//! continue through the existing direct execution path. The policy-layer pieces
-//! are still present and tested so the future crate integration has a stable
-//! shape.
+//! Linux Landlock sandbox backend.
 
+#[cfg(target_os = "linux")]
+use super::NetworkMode;
 use super::SandboxPolicy;
 use std::collections::BTreeSet;
+#[cfg(target_os = "linux")]
+use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
 use tokio::process::Command;
 
 #[allow(dead_code)]
 pub fn is_supported() -> bool {
-    false
+    #[cfg(target_os = "linux")]
+    {
+        static SUPPORTED: OnceLock<bool> = OnceLock::new();
+        return *SUPPORTED.get_or_init(omiga_landlock::probe_supported);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 #[allow(dead_code)]
 pub fn unavailable_reason() -> &'static str {
-    "Linux Landlock sandbox is not yet wired; running commands without a local sandbox"
+    "Linux Landlock sandbox is unavailable because the running kernel does not support an enabled Landlock ABI"
 }
 
 #[allow(dead_code)]
@@ -35,13 +43,59 @@ pub fn default_writable_roots(cwd: &Path) -> Vec<PathBuf> {
 
 #[allow(dead_code)]
 pub fn wrap_local_command(
-    _policy: &SandboxPolicy,
-    _writable_roots: &[PathBuf],
+    policy: &SandboxPolicy,
+    writable_roots: &[PathBuf],
     command: &str,
-) -> Command {
+) -> Result<Command, String> {
     let mut cmd = Command::new("bash");
     cmd.arg("-l").arg("-c").arg(command);
-    cmd
+
+    #[cfg(target_os = "linux")]
+    {
+        let deny_network = matches!(policy.network.mode, NetworkMode::DenyAll);
+        if deny_network && !omiga_landlock::probe_network_supported() {
+            tracing::warn!(
+                "landlock: kernel lacks network ABI (>= V4); enforcing filesystem sandbox only, \
+                network deny is NOT active for this command"
+            );
+        }
+        let spec = omiga_landlock::RestrictionSpec {
+            writable_roots: writable_roots.to_vec(),
+            deny_network,
+        };
+        let prepared = match omiga_landlock::prepare_restrictions(&spec) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!("landlock: failed to prepare sandbox ruleset: {error}");
+                return Err(error.to_string());
+            }
+        };
+        let warnings = prepared.warnings();
+        if warnings.fs_write_partially_enforced {
+            tracing::warn!(
+                kernel_abi = warnings.kernel_abi.unwrap_or_default(),
+                missing_truncate = warnings.missing_truncate,
+                "landlock: kernel only partially supports requested filesystem write \
+                restrictions; sandbox strength is weaker than seatbelt"
+            );
+        }
+        let mut prepared = Some(prepared);
+        unsafe {
+            cmd.pre_exec(move || {
+                let Some(prepared) = prepared.take() else {
+                    return Err(io::Error::from_raw_os_error(nix::libc::EINVAL));
+                };
+                unsafe { prepared.apply_in_child() }.map_err(io::Error::from_raw_os_error)
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (policy, writable_roots);
+    }
+
+    Ok(cmd)
 }
 
 #[allow(dead_code)]
