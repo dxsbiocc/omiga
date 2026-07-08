@@ -1,5 +1,19 @@
 use super::super::dispatch::ToolDispatchContext;
 use super::super::*;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Default)]
+struct ListSkillsArgs {
+    query: Option<String>,
+}
+
+/// `skill_view` tool JSON — Hermes may use `name` instead of `skill`.
+#[derive(Debug, Deserialize)]
+struct SkillViewArgs {
+    #[serde(alias = "name")]
+    skill: String,
+    file_path: Option<String>,
+}
 
 pub(super) fn is_skill_tool(tool_name: &str) -> bool {
     tool_name.eq_ignore_ascii_case("list_skills")

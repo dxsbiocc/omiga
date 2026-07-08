@@ -1,5 +1,23 @@
 use super::super::dispatch::ToolDispatchContext;
 use super::super::*;
+use serde::Deserialize;
+
+/// Arguments for the `skill` tool (JSON) — aligned with `SkillTool` input (`skill` + `args`).
+#[derive(Debug, Deserialize)]
+struct SkillToolArgs {
+    skill: String,
+    #[serde(default, rename = "args", alias = "arguments")]
+    args: String,
+    /// Execution mode: "inline" (default) or "forked"
+    /// - inline: Execute skill in current session context
+    /// - forked: Execute skill in isolated sub-agent session
+    #[serde(default = "default_execution_mode")]
+    execution_mode: String,
+}
+
+fn default_execution_mode() -> String {
+    "inline".to_string()
+}
 
 pub(super) async fn handle_skill_invoke(ctx: &ToolDispatchContext<'_>) -> (String, String, bool) {
     let app = ctx.app.clone();

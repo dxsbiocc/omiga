@@ -11,7 +11,7 @@ use super::subagent::{
 use super::{
     append_truncated_results_note, apply_empty_structured_tool_placeholder,
     fold_tool_stream_item_for_model, handle_skill_config, process_tool_output_for_model,
-    AgentLlmRuntime, ListSkillsArgs, SkillToolArgs, SkillViewArgs, MAX_SUBAGENT_EXECUTE_DEPTH,
+    AgentLlmRuntime, MAX_SUBAGENT_EXECUTE_DEPTH,
 };
 use crate::app_state::OmigaAppState;
 use crate::constants::tool_limits::{

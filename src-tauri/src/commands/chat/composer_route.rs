@@ -1,35 +1,5 @@
 use super::*;
 
-/// Arguments for the `skill` tool (JSON) — aligned with `SkillTool` input (`skill` + `args`).
-#[derive(Debug, Deserialize)]
-pub(super) struct SkillToolArgs {
-    pub(super) skill: String,
-    #[serde(default, rename = "args", alias = "arguments")]
-    pub(super) args: String,
-    /// Execution mode: "inline" (default) or "forked"
-    /// - inline: Execute skill in current session context
-    /// - forked: Execute skill in isolated sub-agent session
-    #[serde(default = "default_execution_mode")]
-    pub(super) execution_mode: String,
-}
-
-fn default_execution_mode() -> String {
-    "inline".to_string()
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub(super) struct ListSkillsArgs {
-    pub(super) query: Option<String>,
-}
-
-/// `skill_view` tool JSON — Hermes may use `name` instead of `skill`.
-#[derive(Debug, Deserialize)]
-pub(super) struct SkillViewArgs {
-    #[serde(alias = "name")]
-    pub(super) skill: String,
-    pub(super) file_path: Option<String>,
-}
-
 /// Resolve session `project_path` to an absolute-ish root for tools (glob, bash, file_read).
 pub(super) fn resolve_session_project_root(project_path: &str) -> std::path::PathBuf {
     let p = project_path.trim();
