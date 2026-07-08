@@ -22,7 +22,7 @@ use tool_output::process_tool_output_for_model;
 pub(crate) use tool_output::tool_results_dir_for_session;
 mod agent_runtime;
 pub(crate) use agent_runtime::AgentLlmRuntime;
-use agent_runtime::{MAX_SUBAGENT_EXECUTE_DEPTH, MAX_SUBAGENT_TOOL_ROUNDS};
+use agent_runtime::MAX_SUBAGENT_TOOL_ROUNDS;
 mod composer_route;
 use composer_route::*;
 mod orchestration;
