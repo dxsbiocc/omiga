@@ -65,6 +65,10 @@ sysinfo = "0.30"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+tracing-opentelemetry = { version = "0.32", default-features = false }
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }

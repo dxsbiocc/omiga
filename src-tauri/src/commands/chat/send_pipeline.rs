@@ -77,6 +77,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{Mutex, RwLock};
+use tracing::Instrument;
 
 pub(super) async fn send_message_impl(
     app: AppHandle,
@@ -360,6 +361,12 @@ pub(super) async fn send_message_impl(
     });
 
     let round_cancel_spawn = round_cancel.clone();
+    let turn_span = tracing::info_span!(
+        "llm_turn",
+        session_id = %session_id_clone,
+        message_id = %message_id_clone,
+        round_id = %round_id_clone
+    );
     let turn_spawn_task = TurnSpawnTask {
         app_clone,
         message_id_clone,
@@ -393,7 +400,7 @@ pub(super) async fn send_message_impl(
         preflight_skip_turn_summary,
         keyword_skill_route,
     };
-    tokio::spawn(run_turn_spawn(turn_spawn_task));
+    tokio::spawn(run_turn_spawn(turn_spawn_task).instrument(turn_span));
 
     // 如果是 Plan mode，生成初始 todo items
     let initial_todos = if is_plan_mode {

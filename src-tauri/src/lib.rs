@@ -30,10 +30,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            // Initialize tracing/logging
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-                .init();
+            if let Some(otel_guard) = crate::infrastructure::otel::init_tracing() {
+                app.manage(otel_guard);
+            }
 
             tracing::info!("Omiga starting up...");
 
