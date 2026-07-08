@@ -58,6 +58,17 @@
 | Windows 沙箱 | windows-sandbox-rs/ | 空白(裸执行) | P3(视 Windows 用户量) |
 | bash 命令安全解析(执行前静态分析危险命令) | shell-command/ | 无 | P3 |
 非目标(产品形态差异,不追):app-server 系列、cloud-tasks、tui、realtime-webrtc、chatgpt 集成。
+
+## 第三阶段进展
+
+### G15 提权审批完整流(P1)✅ 已实现(2026-07-08,提交 b9fe0e4)
+- 流程:前台 bash/exec 被 seatbelt 拒绝(SANDBOX_DENIED)→ 复用现有 permission-request 审批通路(前端零改动)→ 批准后注入 dangerously_disable_sandbox 单次重跑 / 拒绝则回告模型防重试。
+- 防护门:仅前台 bash/exec;已禁沙箱不提权;每 tool_use_id 一次(1024 容量防泄漏);OMIGA_SANDBOX_ESCALATION=off 总开关。
+- 设计决策:不采用 codex-rs execve wrapper + socket 架构(CLI 场景产物,对 Tauri 应用过重)。
+- 三轮 review 各拦一层真缺陷:① 检测前缀被双层 "Tool execution failed: " 包装导致生产路径不可达(测试只喂裸前缀假绿)→ 改剥壳检测;② 批准与会话取消竞态 → 重跑前复查 cancel_flag/round_cancel;③ 拒绝/取消路径未向 live stream 补发最终 ToolResult(UI 停留在待审批)→ 镜像 dispatch.rs 补发模式。
+- 缓办(UX-only):前端对 sandbox-escalation 请求仍可能展示"本会话允许"按钮,但后端不会兑现 session 授权自动放行提权(每次全新 request_id);后续前端识别 context.tool_name=sandbox-escalation 时只展示"仅本次"。
+- 手工验证步骤:让模型执行写非白名单目录的 bash 命令 → 出现 High 风险审批 UI(含命令与拒绝摘要)→ 批准:单次无沙箱重跑,结果前缀"已经用户批准";拒绝:模型收到原错误 +"用户拒绝无沙箱重跑",UI 显示最终拒绝状态。
+- 剩余候选(优先级顺序):Linux landlock 真实现、OTel exporter、网络代理式策略、Windows 沙箱、bash 静态安全分析。
 > 修复记录（2026-07-07）：`research plan/run` 从产品 CLI 隐藏时误删了内部执行路径，导致 goals 引擎 6 个测试失败。已恢复为 `cli::execute_research_request` 内部入口（CLI 门禁保持不变），goals 循环改走该入口。
 
 > G1–G7 已完成并通过 review（详见下方各节 + 状态）。以下为第二阶段：补足与 codex 的**功能性差距**（非纯性能）。
