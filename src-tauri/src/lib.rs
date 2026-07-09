@@ -386,6 +386,8 @@ pub fn run() {
             commands::execution_envs::delete_ssh_config,
             commands::execution_envs::get_execution_envs_config_path,
             commands::execution_envs::is_rsync_available,
+            commands::execution_envs::get_sandbox_escalation_enabled,
+            commands::execution_envs::set_sandbox_escalation_enabled,
 
             commands::memory::memory_get_status,
             commands::memory::memory_build_index,

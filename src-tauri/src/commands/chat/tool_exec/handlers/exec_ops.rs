@@ -59,7 +59,7 @@ async fn handle_sandbox_escalation_if_needed(
     if !sandbox_escalation_preconditions_met(
         ctx.tool_name,
         &args_value,
-        sandbox_escalation_enabled_from_env(),
+        sandbox_escalation_enabled_from_sources(),
         false,
     ) {
         return (tool_use_id, output, is_error);
@@ -225,14 +225,24 @@ fn is_sandbox_escalatable_tool(tool_name: &str) -> bool {
     matches!(tool_name.to_ascii_lowercase().as_str(), "bash" | "exec")
 }
 
-fn sandbox_escalation_enabled_from_env() -> bool {
-    sandbox_escalation_enabled_from_env_value(
-        std::env::var("OMIGA_SANDBOX_ESCALATION").ok().as_deref(),
-    )
+fn sandbox_escalation_enabled_from_sources() -> bool {
+    let env = std::env::var("OMIGA_SANDBOX_ESCALATION").ok();
+    let env = env.as_deref();
+    let persisted = if sandbox_escalation_env_forces_off(env) {
+        true
+    } else {
+        crate::commands::execution_envs::sandbox_escalation_enabled_setting_or_default()
+    };
+
+    sandbox_escalation_enabled(env, persisted)
 }
 
-fn sandbox_escalation_enabled_from_env_value(value: Option<&str>) -> bool {
-    !matches!(value.map(str::trim), Some(raw) if raw.eq_ignore_ascii_case("off"))
+fn sandbox_escalation_enabled(env: Option<&str>, persisted: bool) -> bool {
+    !sandbox_escalation_env_forces_off(env) && persisted
+}
+
+fn sandbox_escalation_env_forces_off(env: Option<&str>) -> bool {
+    matches!(env.map(str::trim), Some(raw) if raw.eq_ignore_ascii_case("off"))
 }
 
 fn claim_sandbox_escalation_attempt(tool_use_id: &str) -> bool {
@@ -461,12 +471,24 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_escalation_env_gate_uses_pure_value_parser() {
-        assert!(sandbox_escalation_enabled_from_env_value(None));
-        assert!(sandbox_escalation_enabled_from_env_value(Some("")));
-        assert!(sandbox_escalation_enabled_from_env_value(Some("on")));
-        assert!(!sandbox_escalation_enabled_from_env_value(Some("off")));
-        assert!(!sandbox_escalation_enabled_from_env_value(Some(" OFF ")));
+    fn sandbox_escalation_env_off_overrides_persisted_setting() {
+        assert!(!sandbox_escalation_enabled(Some("off"), true));
+        assert!(!sandbox_escalation_enabled(Some(" OFF "), true));
+        assert!(!sandbox_escalation_enabled(Some("off"), false));
+    }
+
+    #[test]
+    fn sandbox_escalation_uses_persisted_setting_when_env_absent() {
+        assert!(sandbox_escalation_enabled(None, true));
+        assert!(!sandbox_escalation_enabled(None, false));
+    }
+
+    #[test]
+    fn sandbox_escalation_non_off_env_uses_persisted_setting() {
+        assert!(sandbox_escalation_enabled(Some(""), true));
+        assert!(!sandbox_escalation_enabled(Some(""), false));
+        assert!(sandbox_escalation_enabled(Some("on"), true));
+        assert!(!sandbox_escalation_enabled(Some("on"), false));
     }
 
     #[test]

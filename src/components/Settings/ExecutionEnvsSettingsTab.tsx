@@ -73,6 +73,7 @@ export function ExecutionEnvsSettingsTab({
 
   // SSH state
   const [sshConfigs, setSshConfigs] = useState<SshConfigsMap>({});
+  const [sandboxEscalationEnabled, setSandboxEscalationEnabled] = useState(true);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
   const [editingSshName, setEditingSshName] = useState<string | null>(null);
   const [sshForm, setSshForm] = useState<SshConfig & { name: string }>({
@@ -114,6 +115,40 @@ export function ExecutionEnvsSettingsTab({
       setSshConfigs(ssh || {});
     } catch (error) {
       console.error("Failed to load execution env configs:", error);
+    }
+
+    try {
+      const enabled = await invoke<boolean>("get_sandbox_escalation_enabled");
+      setSandboxEscalationEnabled(enabled);
+    } catch (error) {
+      console.error("Failed to load sandbox escalation setting:", error);
+      setSandboxEscalationEnabled(true);
+    }
+  };
+
+  const handleSandboxEscalationToggle = async (enabled: boolean) => {
+    const previous = sandboxEscalationEnabled;
+    setSandboxEscalationEnabled(enabled);
+    setIsLoading(true);
+    setMessage(null);
+
+    try {
+      await invoke("set_sandbox_escalation_enabled", { enabled });
+      setMessage({
+        type: "success",
+        text: enabled
+          ? "沙箱提权审批已开启"
+          : "沙箱提权审批已关闭",
+      });
+    } catch (error) {
+      console.error("Failed to save sandbox escalation setting:", error);
+      setSandboxEscalationEnabled(previous);
+      setMessage({
+        type: "error",
+        text: `Failed to save sandbox escalation setting: ${error}`,
+      });
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -205,9 +240,39 @@ export function ExecutionEnvsSettingsTab({
         Execution Environments
       </Typography>
       <Typography variant="caption" color="text.secondary" sx={{ mb: 2, display: "block" }}>
-        Configure SSH remote execution. Stored in <code>omiga.yaml</code> and <code>~/.ssh/config</code>.
+        Configure sandbox approval and SSH remote execution. User settings are stored in{" "}
+        <code>omiga.yaml</code>; SSH profiles are also read from <code>~/.ssh/config</code>.
       </Typography>
       <BrowserOperatorSettingsCard compact={embedded} />
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 2,
+          mb: 2,
+          p: 1.5,
+          border: 1,
+          borderColor: "divider",
+          borderRadius: 1,
+          bgcolor: "background.paper",
+        }}
+      >
+        <Box>
+          <Typography variant="body2" fontWeight={600}>
+            沙箱拒绝时请求提权审批
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            关闭后，本地沙箱拒绝的命令会直接失败，不再弹出单次无沙箱重跑审批。
+          </Typography>
+        </Box>
+        <Switch
+          checked={sandboxEscalationEnabled}
+          onChange={(e) => void handleSandboxEscalationToggle(e.target.checked)}
+          disabled={isLoading}
+          inputProps={{ "aria-label": "沙箱拒绝时请求提权审批" }}
+        />
+      </Box>
       <Box>
           <Alert
             severity={
