@@ -1,3 +1,4 @@
+use crate::domain::env_hygiene;
 use crate::domain::environments::{
     environment_summary, EnvironmentProfileSummary, EnvironmentSpecWithSource,
 };
@@ -530,12 +531,16 @@ fn probe_system_command(
 }
 
 fn run_local_probe(ctx: &ToolContext, script: &str) -> Result<(String, String), String> {
-    let command = prepend_venv_activation(&ctx.local_venv_type, &ctx.local_venv_name, script);
-    let output = Command::new("/bin/sh")
-        .arg("-lc")
-        .arg(command)
-        .output()
-        .map_err(|err| err.to_string())?;
+    let command_script =
+        prepend_venv_activation(&ctx.local_venv_type, &ctx.local_venv_name, script);
+    let keep_exemptions =
+        env_hygiene::keep_exemptions_from(std::env::var("OMIGA_ENV_KEEP").ok().as_deref());
+    let mut command = Command::new("/bin/sh");
+    command.arg("-lc").arg(command_script);
+    for name in env_hygiene::filter_env_vars(std::env::vars(), &keep_exemptions).1 {
+        command.env_remove(name);
+    }
+    let output = command.output().map_err(|err| err.to_string())?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr)
             .chars()
@@ -630,9 +635,40 @@ mod tests {
         EnvironmentDiagnostics, EnvironmentMetadata, EnvironmentRequirements,
         EnvironmentRuntimeProfile, EnvironmentSource, EnvironmentSpec,
     };
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::thread;
     use tempfile::tempdir;
+
+    static RUN_LOCAL_PROBE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ScopedEnv {
+        key: &'static str,
+        old: Option<OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn sample_spec(
         profile_id: &str,
@@ -772,6 +808,21 @@ mod tests {
         let cached = cached_record_at_path(&path, &environment_summary(profile).canonical_id)
             .expect("should have cached record");
         assert_eq!(cached.status, "missing");
+    }
+
+    #[test]
+    fn run_local_probe_filters_sensitive_env_vars() {
+        let _guard = RUN_LOCAL_PROBE_ENV_LOCK.lock().expect("environment lock");
+        let _secret = ScopedEnv::set("FAKE_SECRET_TOKEN", "super-secret");
+        let _keep = ScopedEnv::remove("OMIGA_ENV_KEEP");
+        let tmp = tempdir().expect("temp dir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let script = r#"printf "micromamba\t${FAKE_SECRET_TOKEN:-absent}\n""#;
+
+        let (manager, path) = run_local_probe(&ctx, script).expect("probe succeeds");
+
+        assert_eq!(manager, "micromamba");
+        assert_eq!(path, "absent");
     }
 
     #[test]

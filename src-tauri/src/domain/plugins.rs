@@ -3470,7 +3470,7 @@ pub(crate) fn conda_environment_check_shell_script(
     env_vars: &BTreeMap<String, String>,
     inner_command: &str,
 ) -> String {
-    let exports = shell_export_lines(env_vars);
+    let exports = crate::domain::env_hygiene::shell_export_lines(env_vars);
     format!(
         r#"{bootstrap}
 set -e
@@ -3589,23 +3589,6 @@ fn is_allowed_plugin_environment_check_command(
         })
         .unwrap_or(false);
     runtime_command_matches || conda_environment_declares_executable(conda_file, &basename)
-}
-
-fn shell_export_lines(env: &BTreeMap<String, String>) -> String {
-    env.iter()
-        .filter(|(key, _)| is_safe_shell_identifier(key))
-        .map(|(key, value)| format!("export {key}={}", sh_quote(value)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn is_safe_shell_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn shell_join(tokens: &[String]) -> String {
@@ -7043,6 +7026,27 @@ mod tests {
             &["demoalign".to_string(), "run".to_string()],
             &conda
         ));
+    }
+
+    #[test]
+    fn conda_environment_check_shell_script_filters_sensitive_env_vars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _keep_guard = ScopedEnv::remove("OMIGA_ENV_KEEP");
+        let env_vars = BTreeMap::from([
+            ("MY_API_KEY".to_string(), "x".to_string()),
+            ("NORMAL_VAR".to_string(), "y".to_string()),
+        ]);
+
+        let command = conda_environment_check_shell_script(
+            &tmp.path().join(".omiga/operator-envs/conda"),
+            &tmp.path().join("conda.yaml"),
+            "hash",
+            &env_vars,
+            "demoalign",
+        );
+
+        assert!(command.contains("export NORMAL_VAR='y'"));
+        assert!(!command.contains("MY_API_KEY"));
     }
 
     #[test]

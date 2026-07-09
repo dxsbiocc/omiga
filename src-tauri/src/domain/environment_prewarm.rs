@@ -1,3 +1,4 @@
+use crate::domain::env_hygiene;
 use crate::domain::environment_availability;
 use crate::domain::environment_availability::EnvironmentAvailabilityRecord;
 use crate::domain::environments::EnvironmentProfileSummary;
@@ -97,18 +98,21 @@ impl PrewarmRunner for LocalShellRunner {
         };
         std::fs::create_dir_all(&scratch).map_err(|err| err.to_string())?;
 
+        let keep_exemptions =
+            env_hygiene::keep_exemptions_from(std::env::var("OMIGA_ENV_KEEP").ok().as_deref());
+        let mut command = TokioCommand::new("/bin/sh");
+        command
+            .arg("-lc")
+            .arg(script)
+            .current_dir(&scratch)
+            // Ensure timeout-aborted prewarm jobs do not keep child processes alive.
+            .kill_on_drop(true);
+        for name in env_hygiene::filter_env_vars(std::env::vars(), &keep_exemptions).1 {
+            command.env_remove(name);
+        }
+
         let output = {
-            let output = timeout(
-                PREWARM_TIMEOUT,
-                TokioCommand::new("/bin/sh")
-                    .arg("-lc")
-                    .arg(script)
-                    .current_dir(&scratch)
-                    // Ensure timeout-aborted prewarm jobs do not keep child processes alive.
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await;
+            let output = timeout(PREWARM_TIMEOUT, command.output()).await;
             let _ = std::fs::remove_dir_all(&scratch);
             output
         }
@@ -404,8 +408,39 @@ mod tests {
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, HashSet};
+    use std::ffi::{OsStr, OsString};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    static PREWARM_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ScopedEnv {
+        key: &'static str,
+        old: Option<OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn hash_hex(value: &[u8]) -> String {
         let mut hasher = Sha256::new();
@@ -903,5 +938,23 @@ mod tests {
         assert!(!baseline_marker.exists());
         assert_eq!(outcome.stdout.lines().last().unwrap_or_default(), "ok");
         assert!(!scratch.join("marker.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn local_shell_runner_removes_sensitive_env_from_subprocess() {
+        let _guard = PREWARM_ENV_LOCK.lock().expect("environment lock");
+        let _secret = ScopedEnv::set("FAKE_SECRET_TOKEN", "super-secret");
+        let _keep = ScopedEnv::remove("OMIGA_ENV_KEEP");
+
+        let runner = LocalShellRunner;
+        let outcome = runner
+            .run("printf 'token=%s\\n' \"${FAKE_SECRET_TOKEN:-absent}\"")
+            .await
+            .expect("run succeeded");
+
+        assert_eq!(
+            outcome.stdout.lines().next().unwrap_or_default(),
+            "token=absent"
+        );
     }
 }

@@ -14,6 +14,7 @@ pub mod computer_use;
 pub mod connectors;
 pub mod context_snapshot;
 pub mod cron_scheduler;
+pub mod env_hygiene;
 pub mod environment_availability;
 pub mod environment_prewarm;
 pub mod environments;

@@ -7644,7 +7644,7 @@ fn conda_environment_shell_script(
     inner_command: &str,
 ) -> String {
     let env_yaml = format!("{run_dir}/env/conda-environment.yaml");
-    let exports = shell_export_lines(&selection.env_vars);
+    let exports = crate::domain::env_hygiene::shell_export_lines(&selection.env_vars);
     format!(
         r#"{bootstrap}
 set -e
@@ -7732,23 +7732,6 @@ esac"#,
         inner = sh_quote(inner_command),
         bootstrap = MICROMAMBA_BOOTSTRAP_SHELL,
     )
-}
-
-fn shell_export_lines(env: &BTreeMap<String, String>) -> String {
-    env.iter()
-        .filter(|(key, _)| is_safe_shell_identifier(key))
-        .map(|(key, value)| format!("export {key}={}", sh_quote(value)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn is_safe_shell_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn operator_runtime_env_ref(spec: &OperatorSpec) -> Option<&str> {
@@ -10236,7 +10219,30 @@ fn parse_duration_secs(raw: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use tempfile::TempDir;
+
+    struct ScopedEnvKeep {
+        old: Option<OsString>,
+    }
+
+    impl ScopedEnvKeep {
+        fn unset() -> Self {
+            let old = std::env::var_os("OMIGA_ENV_KEEP");
+            std::env::remove_var("OMIGA_ENV_KEEP");
+            Self { old }
+        }
+    }
+
+    impl Drop for ScopedEnvKeep {
+        fn drop(&mut self) {
+            if let Some(old) = self.old.take() {
+                std::env::set_var("OMIGA_ENV_KEEP", old);
+            } else {
+                std::env::remove_var("OMIGA_ENV_KEEP");
+            }
+        }
+    }
 
     #[test]
     fn parses_sacct_diagnostics_for_common_outcomes() {
@@ -12417,6 +12423,25 @@ diagnostics:
                 .expect("missing fallback exists");
         assert!(find_pos < bootstrap_pos);
         assert!(bootstrap_pos < missing_pos);
+    }
+
+    #[test]
+    fn conda_environment_shell_script_filters_sensitive_env_vars() {
+        let selection = OperatorCondaEnvironmentSelection {
+            env_prefix: "/tmp/oprun_conda_envs/alignment".to_string(),
+            env_yaml_b64: "Y29uZGEtZW52".to_string(),
+            env_hash: "abcd1234".to_string(),
+            env_vars: BTreeMap::from([
+                ("MY_API_KEY".to_string(), "x".to_string()),
+                ("NORMAL_VAR".to_string(), "y".to_string()),
+            ]),
+        };
+        let _keep_guard = ScopedEnvKeep::unset();
+
+        let command = conda_environment_shell_script(&selection, "/tmp/oprun_conda", "demoalign");
+
+        assert!(command.contains("export NORMAL_VAR='y'"));
+        assert!(!command.contains("MY_API_KEY"));
     }
 
     fn fake_tool_dir(base: &Path, commands: &[(&str, &str)]) -> PathBuf {
