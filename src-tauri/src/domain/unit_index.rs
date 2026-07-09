@@ -4,6 +4,8 @@
 //! discovery from execution: callers narrow Operator/Operation/Template/Skill
 //! candidates here, then use the corresponding generic execution tool.
 
+use crate::domain::environment_availability::{load_cache, EnvironmentAvailabilityCache};
+use crate::domain::environments::{discover_environment_profiles, EnvironmentSpecWithSource};
 use crate::domain::operators::OperatorCandidateSummary;
 use crate::domain::skills::{SkillEntry, SkillSource};
 use crate::domain::templates::{TemplateCandidateSummary, TemplateSpecWithSource};
@@ -85,6 +87,8 @@ pub struct UnitIndexEntry {
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment_availability: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -114,12 +118,26 @@ pub struct UnitDescription {
 }
 
 pub fn build_unit_index(skills: &[SkillEntry]) -> Vec<UnitIndexEntry> {
+    let cache = load_cache();
+    let profiles = discover_environment_profiles();
+    build_unit_index_with_environment(skills, &profiles, &cache)
+}
+
+pub fn build_unit_index_with_environment(
+    skills: &[SkillEntry],
+    profiles: &[EnvironmentSpecWithSource],
+    cache: &EnvironmentAvailabilityCache,
+) -> Vec<UnitIndexEntry> {
     let mut units = Vec::new();
-    units.extend(operator_units_from_summaries(
+    units.extend(operator_units_from_summaries_with_environment(
         crate::domain::operators::list_operator_summaries(),
+        profiles,
+        cache,
     ));
-    units.extend(template_units_from_summaries(
+    units.extend(template_units_from_summaries_with_environment(
         crate::domain::templates::list_template_summaries(),
+        profiles,
+        cache,
     ));
     units.extend(skill_units_from_entries(skills));
     sort_units(&mut units);
@@ -628,12 +646,49 @@ pub fn describe_unit_by_entry(
     }
 }
 
+fn environment_availability_from_profiles(
+    env_ref: Option<&str>,
+    source_plugin: &str,
+    env_profiles: &[EnvironmentSpecWithSource],
+    cache: &EnvironmentAvailabilityCache,
+) -> Option<String> {
+    let env_ref = env_ref.map(str::trim).filter(|value| !value.is_empty())?;
+    let resolution = crate::domain::environments::resolve_environment_ref_from_profiles_with_cache(
+        env_ref,
+        source_plugin,
+        env_profiles,
+        Some(cache),
+    );
+    resolution.canonical_id.and_then(|canonical_id| {
+        cache
+            .records
+            .get(&canonical_id)
+            .map(|record| record.status.clone())
+    })
+}
+
 pub fn operator_units_from_summaries(
     summaries: Vec<OperatorCandidateSummary>,
+) -> Vec<UnitIndexEntry> {
+    let cache = load_cache();
+    let profiles = discover_environment_profiles();
+    operator_units_from_summaries_with_environment(summaries, &profiles, &cache)
+}
+
+pub fn operator_units_from_summaries_with_environment(
+    summaries: Vec<OperatorCandidateSummary>,
+    profiles: &[EnvironmentSpecWithSource],
+    cache: &EnvironmentAvailabilityCache,
 ) -> Vec<UnitIndexEntry> {
     summaries
         .into_iter()
         .flat_map(|summary| {
+            let operator_environment_availability = environment_availability_from_profiles(
+                summary.environment_ref.as_deref(),
+                &summary.source_plugin,
+                profiles,
+                &cache,
+            );
             let mut tags = summary.tags.clone();
             push_unique(&mut tags, "operator");
             push_unique(&mut tags, "program");
@@ -678,6 +733,7 @@ pub fn operator_units_from_summaries(
                 name: summary.name.clone(),
                 version: Some(summary.version.clone()),
                 description: summary.description.clone(),
+                environment_availability: operator_environment_availability.clone(),
             };
             let operation_units = summary
                 .operations
@@ -755,6 +811,7 @@ pub fn operator_units_from_summaries(
                             .description
                             .clone()
                             .or_else(|| summary.description.clone()),
+                        environment_availability: operator_environment_availability.clone(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -768,6 +825,16 @@ pub fn operator_units_from_summaries(
 pub fn template_units_from_summaries(
     summaries: Vec<TemplateCandidateSummary>,
 ) -> Vec<UnitIndexEntry> {
+    let cache = load_cache();
+    let profiles = discover_environment_profiles();
+    template_units_from_summaries_with_environment(summaries, &profiles, &cache)
+}
+
+pub fn template_units_from_summaries_with_environment(
+    summaries: Vec<TemplateCandidateSummary>,
+    profiles: &[EnvironmentSpecWithSource],
+    cache: &EnvironmentAvailabilityCache,
+) -> Vec<UnitIndexEntry> {
     summaries
         .into_iter()
         .map(|summary| {
@@ -775,6 +842,7 @@ pub fn template_units_from_summaries(
             extend_unique(&mut tags, summary.classification.tags.clone());
             push_unique(&mut tags, "template");
             let mut aliases = summary.aliases.clone();
+            let source_plugin = summary.source_plugin.clone();
             aliases.extend(
                 summary
                     .migration_target
@@ -784,14 +852,10 @@ pub fn template_units_from_summaries(
             );
             dedup_strings(&mut aliases);
             UnitIndexEntry {
-                canonical_id: canonical_unit_id(
-                    &summary.source_plugin,
-                    UnitKind::Template,
-                    &summary.id,
-                ),
+                canonical_id: canonical_unit_id(&source_plugin, UnitKind::Template, &summary.id),
                 id: summary.id,
                 kind: UnitKind::Template,
-                provider_plugin: summary.source_plugin,
+                provider_plugin: source_plugin.clone(),
                 aliases,
                 classification: UnitClassification {
                     category: summary.classification.category,
@@ -808,6 +872,12 @@ pub fn template_units_from_summaries(
                 name: summary.name,
                 version: Some(summary.version),
                 description: summary.description,
+                environment_availability: environment_availability_from_profiles(
+                    summary.runtime.env_ref.as_deref(),
+                    &source_plugin,
+                    profiles,
+                    &cache,
+                ),
             }
         })
         .collect()
@@ -873,6 +943,7 @@ pub fn skill_units_from_entries(skills: &[SkillEntry]) -> Vec<UnitIndexEntry> {
                 name: Some(skill.name.clone()),
                 version: None,
                 description: Some(skill.description.clone()),
+                environment_availability: None,
             }
         })
         .collect()
@@ -1152,6 +1223,7 @@ mod tests {
             name: Some(id.to_string()),
             version: Some("0.1.0".to_string()),
             description: Some(format!("{id} description")),
+            environment_availability: None,
         }
     }
 
@@ -1417,6 +1489,7 @@ execution:
             runtime: None,
             resources: Default::default(),
             smoke_tests: Vec::new(),
+            environment_ref: None,
             enabled_aliases: vec!["sequence_program".to_string()],
             exposed: true,
             unavailable_reason: None,
@@ -1525,6 +1598,7 @@ execution:
             name: summary.name.clone(),
             version: Some(summary.version.clone()),
             description: summary.description.clone(),
+            environment_availability: None,
         };
 
         let description = describe_operator_unit(unit).expect("operator description");

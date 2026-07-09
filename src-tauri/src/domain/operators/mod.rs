@@ -496,6 +496,8 @@ pub struct OperatorCandidateSummary {
     pub resources: BTreeMap<String, OperatorResourceSpec>,
     #[serde(default)]
     pub smoke_tests: Vec<OperatorSmokeTestSpec>,
+    #[serde(default)]
+    pub environment_ref: Option<String>,
     pub enabled_aliases: Vec<String>,
     pub exposed: bool,
     pub unavailable_reason: Option<String>,
@@ -2359,6 +2361,15 @@ fn operator_candidate_summary(
 ) -> OperatorCandidateSummary {
     let exposed = !enabled_aliases.is_empty();
     let operations = operator_operation_summaries(&candidate, exposed);
+    let environment_ref = candidate.runtime.as_ref().and_then(|runtime| {
+        runtime
+            .get("envRef")
+            .or_else(|| runtime.get("env_ref"))
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    });
     OperatorCandidateSummary {
         id: candidate.metadata.id,
         version: candidate.metadata.version,
@@ -2378,6 +2389,7 @@ fn operator_candidate_summary(
         runtime: candidate.runtime,
         resources: candidate.resources,
         smoke_tests: candidate.smoke_tests,
+        environment_ref,
         exposed,
         enabled_aliases,
         unavailable_reason: None,

@@ -2,6 +2,7 @@
 
 use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
+use crate::domain::environment_availability;
 use crate::domain::plugin_runtime::retrieval::lifecycle::PluginLifecycleRouteStatus;
 use crate::domain::plugin_runtime::retrieval::validation::{
     validate_retrieval_plugin_root, PluginRetrievalValidationReport,
@@ -59,6 +60,43 @@ async fn invalidate_plugin_dependent_caches(app_state: &OmigaAppState) {
             .close_project_connections(&root)
             .await;
     }
+}
+
+fn spawn_environment_availability_refresh(plugin_id: Option<String>) {
+    tauri::async_runtime::spawn(async move {
+        let result = if let Some(plugin_id) = plugin_id.clone() {
+            let target = if plugin_id.trim().is_empty() {
+                None
+            } else {
+                Some(plugin_id)
+            };
+            let records = crate::domain::environment_availability::probe_and_cache_enabled_profiles(
+                target.as_deref(),
+            );
+            if target.is_some() && records.is_empty() {
+                tracing::warn!(
+                    plugin_id = %target.unwrap_or_default(),
+                    "refresh_environment_availability did not find enabled environment profiles"
+                );
+            }
+            records
+        } else {
+            crate::domain::environment_availability::probe_and_cache_enabled_profiles(None)
+        };
+
+        if let Some(plugin_id) = plugin_id {
+            tracing::debug!(
+                plugin_id = %plugin_id,
+                refreshed_records = result.len(),
+                "refreshed environment availability after plugin lifecycle change"
+            );
+        } else {
+            tracing::debug!(
+                refreshed_records = result.len(),
+                "refreshed all environment availability after plugin install"
+            );
+        }
+    });
 }
 
 fn plugin_error(error: String) -> AppError {
@@ -155,7 +193,9 @@ pub async fn install_omiga_plugin(
     let _root = resolve_optional_project_root(project_root);
     let result = plugins::install_plugin(Path::new(&marketplace_path), &plugin_name)
         .map_err(plugin_error)?;
+    let plugin_id = result.plugin_id.clone();
     invalidate_plugin_dependent_caches(&app_state).await;
+    spawn_environment_availability_refresh(Some(plugin_id));
     Ok(result)
 }
 
@@ -200,6 +240,7 @@ pub async fn uninstall_omiga_plugin(
     clear_global_plugin_process_pool().await;
     plugins::uninstall_plugin(&plugin_id).map_err(plugin_error)?;
     invalidate_plugin_dependent_caches(&app_state).await;
+    spawn_environment_availability_refresh(Some(plugin_id));
     Ok(())
 }
 
@@ -214,6 +255,7 @@ pub async fn set_omiga_plugin_enabled(
     clear_global_plugin_process_pool().await;
     plugins::set_plugin_enabled(&plugin_id, enabled).map_err(plugin_error)?;
     invalidate_plugin_dependent_caches(&app_state).await;
+    spawn_environment_availability_refresh(Some(plugin_id));
     Ok(())
 }
 
@@ -259,7 +301,30 @@ pub async fn set_omiga_environment_enabled(
     let _root = resolve_optional_project_root(project_root);
     plugins::set_environment_enabled(&plugin_id, &environment_id, enabled).map_err(plugin_error)?;
     invalidate_plugin_dependent_caches(&app_state).await;
+    spawn_environment_availability_refresh(Some(plugin_id));
     Ok(())
+}
+
+#[tauri::command]
+pub fn list_environment_availability(
+) -> Vec<crate::domain::environment_availability::EnvironmentAvailabilityRecord> {
+    let cache = environment_availability::load_cache();
+    let mut records = cache.records.into_values().collect::<Vec<_>>();
+    records.sort_by(|left, right| left.canonical_id.cmp(&right.canonical_id));
+    records
+}
+
+#[tauri::command]
+pub fn refresh_environment_availability(
+    plugin_id: Option<String>,
+) -> Vec<crate::domain::environment_availability::EnvironmentAvailabilityRecord> {
+    let plugin_id = plugin_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let mut records =
+        environment_availability::probe_and_cache_enabled_profiles(plugin_id.as_deref());
+    records.sort_by(|left, right| left.canonical_id.cmp(&right.canonical_id));
+    records
 }
 
 #[tauri::command]

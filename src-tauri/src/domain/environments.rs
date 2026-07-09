@@ -343,13 +343,30 @@ pub fn resolve_environment_ref(
             }
         }
     }
-    resolve_environment_ref_from_profiles(raw_ref, source_plugin, &profiles)
+    let availability = crate::domain::environment_availability::load_cache();
+    resolve_environment_ref_from_profiles_with_cache(
+        raw_ref,
+        source_plugin,
+        &profiles,
+        Some(&availability),
+    )
 }
 
 pub fn resolve_environment_ref_from_profiles(
     raw_ref: &str,
     source_plugin: &str,
     profiles: &[EnvironmentSpecWithSource],
+) -> EnvironmentResolution {
+    resolve_environment_ref_from_profiles_with_cache(raw_ref, source_plugin, profiles, None)
+}
+
+pub fn resolve_environment_ref_from_profiles_with_cache(
+    raw_ref: &str,
+    source_plugin: &str,
+    profiles: &[EnvironmentSpecWithSource],
+    availability_cache: Option<
+        &crate::domain::environment_availability::EnvironmentAvailabilityCache,
+    >,
 ) -> EnvironmentResolution {
     let needle = raw_ref.trim().to_ascii_lowercase();
     let matches = profiles
@@ -377,16 +394,37 @@ pub fn resolve_environment_ref_from_profiles(
     match selected {
         Some(Ok(profile)) => {
             let canonical_id = canonical_environment_id(&profile);
+            let fallback_diagnostics = || {
+                if profile.spec.diagnostics.check_command.is_empty() {
+                    "environment profile resolved; availability check was not executed".to_string()
+                } else {
+                    format!(
+                        "environment profile resolved; suggested check command: {}",
+                        profile.spec.diagnostics.check_command.join(" ")
+                    )
+                }
+            };
             let mut diagnostics = Vec::new();
-            if profile.spec.diagnostics.check_command.is_empty() {
-                diagnostics.push(
-                    "environment profile resolved; availability check was not executed".to_string(),
-                );
+            let mut verification_status = "notRun".to_string();
+            if let Some(cache) = availability_cache {
+                if let Some(record) = cache.records.get(&canonical_id) {
+                    diagnostics.push(format!(
+                        "cached availability: {} (checked {})",
+                        record.status,
+                        crate::domain::environment_availability::EnvironmentAvailabilityRecord::checked_at_iso8601_ms(
+                            record.checked_at_ms
+                        )
+                    ));
+                    verification_status = match record.status.as_str() {
+                        "available" => "cachedAvailable".to_string(),
+                        "missing" => "cachedMissing".to_string(),
+                        _ => "notRun".to_string(),
+                    };
+                } else {
+                    diagnostics.push(fallback_diagnostics());
+                }
             } else {
-                diagnostics.push(format!(
-                    "environment profile resolved; suggested check command: {}",
-                    profile.spec.diagnostics.check_command.join(" ")
-                ));
+                diagnostics.push(fallback_diagnostics());
             }
             EnvironmentResolution {
                 env_ref: Some(raw_ref.to_string()),
@@ -395,7 +433,7 @@ pub fn resolve_environment_ref_from_profiles(
                 profile: Some(environment_summary(profile)),
                 candidates: Vec::new(),
                 diagnostics,
-                verification_status: "notRun".to_string(),
+                verification_status,
             }
         }
         Some(Err(ambiguous)) => EnvironmentResolution {
@@ -612,6 +650,9 @@ fn ensure_relative_path(value: &Path, field: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::environment_availability::{
+        EnvironmentAvailabilityCache, EnvironmentAvailabilityRecord,
+    };
     use crate::domain::plugins::LoadedPlugin;
     use std::collections::HashMap;
 
@@ -726,6 +767,71 @@ diagnostics:
         assert_eq!(
             resolved.profile.as_ref().unwrap().requirements.r_packages,
             vec!["limma".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_environment_ref_uses_cached_profile_availability() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let left = tmp.path().join("left");
+        write_plugin(&left, "left");
+        write_environment(&left, "r-bioc", "Rscript");
+        let profiles =
+            discover_environment_profiles_from_plugins(&[loaded_plugin("left@local", &left)]);
+        let cache = EnvironmentAvailabilityCache {
+            records: BTreeMap::from([(
+                "left@local/environment/r-bioc".to_string(),
+                EnvironmentAvailabilityRecord {
+                    canonical_id: "left@local/environment/r-bioc".to_string(),
+                    runtime_type: "system".to_string(),
+                    status: "available".to_string(),
+                    manager: None,
+                    executable_path: None,
+                    error: None,
+                    message: "cached".to_string(),
+                    install_hint: None,
+                    checked_at_ms: 1_700_000_000_000,
+                    scope: "local".to_string(),
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let resolved = resolve_environment_ref_from_profiles_with_cache(
+            "r-bioc",
+            "left@local",
+            &profiles,
+            Some(&cache),
+        );
+        assert_eq!(resolved.status, "resolved");
+        assert_eq!(resolved.verification_status, "cachedAvailable");
+        assert_eq!(
+            resolved.diagnostics[0],
+            "cached availability: available (checked 2023-11-14T22:13:20+00:00)"
+        );
+    }
+
+    #[test]
+    fn resolve_environment_ref_with_missing_cache_keeps_not_run_diagnostics() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let left = tmp.path().join("left");
+        write_plugin(&left, "left");
+        write_environment(&left, "r-bioc", "Rscript");
+        let profiles =
+            discover_environment_profiles_from_plugins(&[loaded_plugin("left@local", &left)]);
+        let cache = EnvironmentAvailabilityCache::default();
+
+        let resolved = resolve_environment_ref_from_profiles_with_cache(
+            "r-bioc",
+            "left@local",
+            &profiles,
+            Some(&cache),
+        );
+        assert_eq!(resolved.status, "resolved");
+        assert_eq!(resolved.verification_status, "notRun");
+        assert_eq!(
+            resolved.diagnostics[0],
+            "environment profile resolved; suggested check command: Rscript --version"
         );
     }
 

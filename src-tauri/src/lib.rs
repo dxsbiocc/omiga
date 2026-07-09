@@ -319,6 +319,8 @@ pub fn run() {
             commands::plugins::check_omiga_remote_plugin_marketplaces,
             commands::plugins::uninstall_omiga_plugin,
             commands::plugins::set_omiga_plugin_enabled,
+            commands::plugins::list_environment_availability,
+            commands::plugins::refresh_environment_availability,
             commands::plugins::set_omiga_template_enabled,
             commands::plugins::set_omiga_retrieval_resource_enabled,
             commands::plugins::set_omiga_environment_enabled,
