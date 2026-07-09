@@ -58,13 +58,6 @@ const PROVIDER_OPTIONS: {
     docsUrl: "https://platform.openai.com/api-keys",
   },
   {
-    value: "google",
-    label: "Google (Gemini)",
-    placeholder: "AIzaSy...",
-    defaultModel: "gemini-1.5-pro",
-    docsUrl: "https://aistudio.google.com/app/apikey",
-  },
-  {
     value: "alibaba",
     label: "Alibaba (通义千问)",
     placeholder: "sk-...",

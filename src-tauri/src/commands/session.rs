@@ -673,7 +673,7 @@ impl From<SessionConfig> for SessionConfigResponse {
             sandbox_backend: cfg.sandbox_backend,
             local_venv_type: cfg.local_venv_type,
             local_venv_name: cfg.local_venv_name,
-            use_worktree: cfg.use_worktree,
+            use_worktree: false,
             runtime_constraints: cfg.runtime_constraints,
         }
     }
@@ -702,7 +702,7 @@ pub async fn save_session_config_command(
         sandbox_backend: config.sandbox_backend,
         local_venv_type: config.local_venv_type,
         local_venv_name: config.local_venv_name,
-        use_worktree: config.use_worktree,
+        use_worktree: false,
         runtime_constraints: config.runtime_constraints.or(existing.runtime_constraints),
     };
     save_session_config(&session_id, &cfg)

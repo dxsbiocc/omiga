@@ -224,7 +224,6 @@ pub fn get_setup_status() -> SetupStatus {
                 s.is_empty()
                     || s == "${DEEPSEEK_API_KEY}"
                     || s == "${OPENAI_API_KEY}"
-                    || s == "${GOOGLE_API_KEY}"
                     || s == "${LLM_API_KEY}"
             };
             let any = providers.values().any(|p| {
@@ -243,7 +242,6 @@ pub fn get_setup_status() -> SetupStatus {
          project root, then set your API key:\n\
          • DeepSeek:  export DEEPSEEK_API_KEY=\"sk-...\"\n\
          • OpenAI:    export OPENAI_API_KEY=\"sk-...\"\n\
-         • Google:    export GOOGLE_API_KEY=\"AIza...\"\n\
          Restart the app after saving."
             .to_string()
     } else if !has_enabled_provider {
@@ -251,7 +249,6 @@ pub fn get_setup_status() -> SetupStatus {
          Set the environment variable for your chosen provider and restart:\n\
          • DeepSeek:  export DEEPSEEK_API_KEY=\"sk-...\"\n\
          • OpenAI:    export OPENAI_API_KEY=\"sk-...\"\n\
-         • Google:    export GOOGLE_API_KEY=\"AIza...\"\n\
          Or enter your key directly in Settings → Providers."
             .to_string()
     } else {

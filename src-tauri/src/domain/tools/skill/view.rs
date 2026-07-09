@@ -42,4 +42,5 @@ Parameters:
             "required": ["skill"]
         }),
     )
+    .concurrency_safe()
 }

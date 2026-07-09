@@ -8,6 +8,7 @@ use crate::commands::fs::{
     DirectoryEntry, DirectoryListResponse, FileReadResponse, FileWriteResponse,
 };
 use crate::errors::{AppError, FsError};
+use crate::execution::ssh::ensure_ssh_control_socket;
 use crate::llm::config::SshExecConfig;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::path::{Component, Path, PathBuf};
@@ -127,8 +128,17 @@ fn resolve_profile(name: &str) -> Result<SshExecConfig, AppError> {
     Ok(cfg)
 }
 
-fn ssh_base_args(cfg: &SshExecConfig) -> Vec<String> {
+fn ssh_base_args(cfg: &SshExecConfig, control_socket: &Path) -> Vec<String> {
     let mut args = vec![
+        // Reuse a multiplexed master connection (shared with the execution
+        // layer via the same ControlPath) so browsing the remote tree does not
+        // reconnect + re-authenticate + re-run a login shell on every listing.
+        "-o".to_string(),
+        format!("ControlPath={}", control_socket.display()),
+        "-o".to_string(),
+        "ControlMaster=auto".to_string(),
+        "-o".to_string(),
+        "ControlPersist=300".to_string(),
         "-o".to_string(),
         "BatchMode=yes".to_string(),
         "-o".to_string(),
@@ -159,9 +169,14 @@ async fn ssh_run_remote(
     })?;
     let user = cfg.user.as_ref().unwrap();
     let target = format!("{}@{}", user, host);
-    let mut args = ssh_base_args(cfg);
+    let control_socket = ensure_ssh_control_socket(user, &host, cfg.port).await;
+    let mut args = ssh_base_args(cfg, &control_socket);
     args.push(target);
-    args.push(format!("bash -lc {}", sh_quote(remote_bash_script)));
+    // File-browser commands (find/echo/cat/printf/mkdir/base64) are all standard
+    // utilities on the default PATH, so a non-login shell is enough. Avoiding
+    // `-l` skips sourcing /etc/profile.d/* (module/lmod/conda init), which on
+    // HPC clusters can add many seconds per invocation.
+    args.push(format!("bash -c {}", sh_quote(remote_bash_script)));
 
     let fut = async {
         let out = Command::new("ssh")
@@ -427,12 +442,12 @@ async fn ssh_write_file_bytes_impl(
     let host = cfg.effective_hostname().unwrap();
     let user = cfg.user.as_ref().unwrap();
     let target = format!("{}@{}", user, host);
-    let mut args = ssh_base_args(&cfg);
+    let control_socket = ensure_ssh_control_socket(user, &host, cfg.port).await;
+    let mut args = ssh_base_args(&cfg, &control_socket);
     args.push(target);
-    args.push(format!(
-        "bash -lc {}",
-        sh_quote(&format!("cat > {}", file_q))
-    ));
+    // `cat` is a standard utility; a non-login shell avoids the per-call login
+    // profile cost (see ssh_run_remote).
+    args.push(format!("bash -c {}", sh_quote(&format!("cat > {}", file_q))));
 
     let fut = async {
         let mut child = Command::new("ssh")

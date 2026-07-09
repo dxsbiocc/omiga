@@ -7,7 +7,6 @@ use super::{
 };
 use crate::app_state::OmigaAppState;
 use crate::domain::persistence::{NewMessageRecord, NewOrchestrationEventRecord};
-use crate::domain::skills;
 use crate::errors::OmigaError;
 use crate::infrastructure::streaming::StreamOutputItem;
 use crate::llm::{LlmConfig, LlmMessage, LlmProvider};
@@ -35,6 +34,20 @@ pub struct SaveProviderConfigRequest {
     reasoning_effort: Option<String>,
 }
 
+fn provider_is_user_exposed(provider: LlmProvider) -> bool {
+    !matches!(provider, LlmProvider::Google)
+}
+
+fn ensure_user_exposed_provider(provider: LlmProvider) -> Result<(), OmigaError> {
+    if provider_is_user_exposed(provider) {
+        Ok(())
+    } else {
+        Err(OmigaError::Config(
+            "Provider is not available in this build.".to_string(),
+        ))
+    }
+}
+
 #[tauri::command]
 pub async fn list_provider_configs(
     state: State<'_, OmigaAppState>,
@@ -58,6 +71,13 @@ pub async fn list_provider_configs(
 
     let entries: Vec<ProviderConfigEntry> = providers
         .iter()
+        .filter(|(_, config)| {
+            config
+                .provider_type
+                .parse::<LlmProvider>()
+                .map(provider_is_user_exposed)
+                .unwrap_or(true)
+        })
         .map(|(name, config)| {
             let api_key_preview = config
                 .api_key
@@ -134,6 +154,7 @@ pub async fn switch_provider(
         .provider_type
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
+    ensure_user_exposed_provider(provider_enum)?;
 
     // Get API key with env var expansion
     let api_key = provider_config
@@ -228,6 +249,7 @@ pub async fn save_provider_config(
         .provider_type
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
+    ensure_user_exposed_provider(provider_enum)?;
 
     // Load existing config or create new one
     let mut config_file = crate::llm::config::load_config_file().unwrap_or_default();
@@ -441,6 +463,7 @@ pub(crate) async fn apply_named_provider_runtime(
         .provider_type
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
+    ensure_user_exposed_provider(provider_enum)?;
 
     let api_key = provider_config
         .api_key
@@ -557,6 +580,11 @@ pub async fn set_default_provider_config(
             name
         )));
     }
+    let provider_enum = entry
+        .provider_type
+        .parse::<LlmProvider>()
+        .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
+    ensure_user_exposed_provider(provider_enum)?;
 
     config_file.default_provider = Some(name.to_string());
 
@@ -1423,105 +1451,6 @@ pub(crate) async fn inject_schedule_summary_message(
     // Notify again after post-turn metadata is persisted so the rendered chips
     // and recap update even if late stream events were missed.
     emit_agent_schedule_complete(app, session_id, &msg_id_to_use);
-}
-
-/// Handle the `skill_config` tool: get / set / list skill configuration variables.
-pub(super) async fn handle_skill_config(
-    project_root: &std::path::Path,
-    arguments: &str,
-    skill_cache: &std::sync::Arc<std::sync::Mutex<skills::SkillCacheMap>>,
-) -> Result<serde_json::Value, String> {
-    use crate::domain::tools::skill_config::{ConfigAction, SkillConfigArgs};
-
-    let args: SkillConfigArgs =
-        serde_json::from_str(arguments).map_err(|e| format!("skill_config: invalid JSON: {e}"))?;
-
-    match args.action {
-        ConfigAction::List => {
-            let all_skills = skills::load_skills_cached(project_root, skill_cache).await;
-            let mut entries = Vec::new();
-            for skill in &all_skills {
-                if skill.config_vars.is_empty() {
-                    continue;
-                }
-                let resolved =
-                    skills::skill_config::resolve_config_vars(&skill.config_vars, project_root);
-                entries.push(serde_json::json!({
-                    "skill": skill.name,
-                    "config_vars": resolved,
-                }));
-            }
-            Ok(serde_json::json!({ "success": true, "skills": entries, "count": entries.len() }))
-        }
-        ConfigAction::Get => {
-            let skill_name = args
-                .skill
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "skill_config: `skill` is required for action `get`".to_string())?;
-            let all_skills = skills::load_skills_cached(project_root, skill_cache).await;
-            let entry = skills::find_skill_entry(&all_skills, skill_name)
-                .ok_or_else(|| format!("skill_config: unknown skill `{skill_name}`"))?;
-            if entry.config_vars.is_empty() {
-                return Ok(serde_json::json!({
-                    "success": true,
-                    "skill": entry.name,
-                    "config_vars": [],
-                    "message": "This skill declares no config variables."
-                }));
-            }
-            let resolved =
-                skills::skill_config::resolve_config_vars(&entry.config_vars, project_root);
-            Ok(serde_json::json!({
-                "success": true,
-                "skill": entry.name,
-                "config_vars": resolved,
-                "config_file": skills::project_config_path(project_root),
-            }))
-        }
-        ConfigAction::Set => {
-            let skill_name = args
-                .skill
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "skill_config: `skill` is required for action `set`".to_string())?;
-            let key = args
-                .key
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "skill_config: `key` is required for action `set`".to_string())?;
-            let value = args
-                .value
-                .as_deref()
-                .ok_or_else(|| "skill_config: `value` is required for action `set`".to_string())?;
-
-            // Validate the key is declared by the skill.
-            let all_skills = skills::load_skills_cached(project_root, skill_cache).await;
-            let entry = skills::find_skill_entry(&all_skills, skill_name)
-                .ok_or_else(|| format!("skill_config: unknown skill `{skill_name}`"))?;
-            if !entry.config_vars.is_empty() && !entry.config_vars.iter().any(|v| v.key == key) {
-                return Err(format!(
-                    "skill_config: key `{key}` is not declared by skill `{skill_name}`. \
-                     Declared keys: {}",
-                    entry
-                        .config_vars
-                        .iter()
-                        .map(|v| v.key.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-
-            skills::set_config_var(project_root, key, value).await?;
-            Ok(serde_json::json!({
-                "success": true,
-                "skill": skill_name,
-                "key": key,
-                "value": value,
-                "config_file": skills::project_config_path(project_root),
-            }))
-        }
-    }
 }
 
 /// Helper to expand environment variables

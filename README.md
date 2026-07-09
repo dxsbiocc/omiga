@@ -47,7 +47,7 @@ Omiga is designed for real development work: long-running coding sessions, codeb
 - **Provider-based LLM runtime** — DeepSeek, OpenAI, OpenAI-compatible/custom endpoints, and configurable models through `omiga.yaml` or the Settings UI.
 - **Auditable tool execution** — file read/write, search, fetch, shell, task, notebook, memory, MCP, and workflow tools with visible execution state. Sensitive tool executions are recorded to a local audit log (`~/.omiga/audit/`).
 - **Multi-agent workflows** — scheduling, team/autopilot-style orchestration, background agents, research flows, and task status panels. Skills support forked sub-agent execution and per-skill tool allowlists.
-- **Repository-aware context** — file tree, path mentions, code previews, Monaco editor integration, PDF/image/HTML rendering, and workspace metadata. Git worktree isolation (`EnterWorktree` / `ExitWorktree`) for branch-scoped sessions.
+- **Repository-aware context** — file tree, path mentions, code previews, Monaco editor integration, PDF/image/HTML rendering, and focused workspace metadata.
 - **Search and retrieval** — configurable search priority with Tavily, Exa, Firecrawl, Parallel, Google, Bing, and DuckDuckGo fallbacks; literature and social-source search surfaces are available in the Search settings area.
 - **Persistent memory** — working memory, long-term memory, project wiki, implicit preferences, source registry, and permanent user profile support with keyword-based PageIndex retrieval.
 - **Operator system** — install plugin-provided operators as agent tools; create user-defined script operators directly from the Settings UI without writing YAML by hand.
@@ -66,7 +66,6 @@ Version `2.0.0` builds on the v1.0.0 workbench foundation with quality, memory, 
 - **Permission dialog improvements** — dangerous operations now display a plain-language description (`"AI wants to run: rm -rf …"`) above the raw command block.
 - **Sequential tool timeout** — non-skill/bash tools are capped at 120 s; `skill`, `bash`, and `agent` tools are exempt to support long-running sessions.
 - **Monitor and PushNotification tools** — `Monitor` watches background task output for a pattern; `PushNotification` sends a native desktop notification.
-- **Git worktree tools** — `EnterWorktree`/`ExitWorktree` create and prune isolated branch workspaces.
 - **Session export** — export any session as a Markdown file via the session header menu.
 - **Test coverage** — 844 Rust tests, 307 frontend unit tests.
 

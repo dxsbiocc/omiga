@@ -15,7 +15,7 @@
 
 use super::{ToolContext, ToolError};
 use crate::execution::{create_environment, BaseEnvironment, EnvironmentConfig, EnvironmentType};
-use crate::llm::config::{load_config_file, merged_ssh_configs};
+use crate::llm::config::merged_ssh_configs;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -299,9 +299,6 @@ fn build_sandbox_config(
     ctx: &ToolContext,
     timeout_ms: u64,
 ) -> Result<EnvironmentConfig, ToolError> {
-    let cfg_file = load_config_file().map_err(|e| ToolError::ExecutionFailed {
-        message: format!("配置读取失败: {}", e),
-    })?;
     let cwd = "/workspace".to_string();
     let backend = ctx.sandbox_backend.trim();
 
@@ -318,38 +315,12 @@ fn build_sandbox_config(
                 ..Default::default()
             })
         }
-        "modal" => {
-            let image = cfg_file
-                .execution_envs
-                .as_ref()
-                .and_then(|e| e.modal.as_ref())
-                .and_then(|m| m.default_image.clone())
-                .unwrap_or_else(|| "ubuntu:22.04".to_string());
-            Ok(EnvironmentConfig {
-                r#type: EnvironmentType::Modal,
-                image: Some(image),
-                cwd,
-                timeout: timeout_ms.max(5_000),
-                task_id: "omiga-modal-session".to_string(),
-                ..Default::default()
-            })
-        }
-        "daytona" => {
-            let image = cfg_file
-                .execution_envs
-                .as_ref()
-                .and_then(|e| e.daytona.as_ref())
-                .and_then(|d| d.default_image.clone())
-                .unwrap_or_else(|| "ubuntu:22.04".to_string());
-            Ok(EnvironmentConfig {
-                r#type: EnvironmentType::Daytona,
-                image: Some(image),
-                cwd,
-                timeout: timeout_ms.max(5_000),
-                task_id: "omiga-daytona-session".to_string(),
-                ..Default::default()
-            })
-        }
+        "modal" | "daytona" => Err(ToolError::ExecutionFailed {
+            message: format!(
+                "沙箱后端 '{}' 暂未开放；请选择 docker 或 singularity。",
+                backend
+            ),
+        }),
         "singularity" => {
             let image = std::env::var("OMIGA_SINGULARITY_IMAGE")
                 .unwrap_or_else(|_| "docker://ubuntu:22.04".to_string());
@@ -364,10 +335,7 @@ fn build_sandbox_config(
             })
         }
         _ => Err(ToolError::ExecutionFailed {
-            message: format!(
-                "未知沙箱后端: '{}' (支持: docker, modal, daytona, singularity)",
-                backend
-            ),
+            message: format!("未知沙箱后端: '{}' (支持: docker, singularity)", backend),
         }),
     }
 }

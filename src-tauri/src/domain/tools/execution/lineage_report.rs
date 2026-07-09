@@ -131,6 +131,7 @@ pub fn schema() -> ToolSchema {
             }
         }),
     )
+    .concurrency_safe()
 }
 
 fn root_summary(

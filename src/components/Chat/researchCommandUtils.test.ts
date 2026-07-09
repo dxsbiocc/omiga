@@ -37,4 +37,18 @@ describe("finalizeResearchCommandMessages", () => {
       { id: "assistant-final", role: "assistant", content: "help output" },
     ]);
   });
+
+  it("reuses a persisted command row during retry instead of duplicating it", () => {
+    const result = finalizeResearchCommandMessages(
+      [{ id: "persisted-user", role: "user", content: "/research run topic" }],
+      "persisted-user",
+      { id: "persisted-user", role: "user", content: "/research run topic" },
+      { id: "assistant-retry", role: "assistant", content: "updated result" },
+    );
+
+    expect(result).toEqual([
+      { id: "persisted-user", role: "user", content: "/research run topic" },
+      { id: "assistant-retry", role: "assistant", content: "updated result" },
+    ]);
+  });
 });

@@ -31,7 +31,23 @@ impl IntakeAnalyzer {
             &lowered,
             &["可视化", "visual", "plot", "chart", "figure", "图"],
         );
-        let report = contains_any(&lowered, &["报告", "report", "总结", "汇报"]);
+        let report = contains_any(
+            &lowered,
+            &[
+                "报告",
+                "report",
+                "总结",
+                "汇报",
+                "综述",
+                "review",
+                "交付物",
+                "输出",
+                "deliverable",
+                "论文清单",
+                "证据矩阵",
+                "结论",
+            ],
+        );
         let code = contains_any(&lowered, &["代码", "实现", "code", "implement"]);
         let debug = contains_any(&lowered, &["调试", "debug", "修复", "error", "fix"]);
         let biology = contains_any(&lowered, &["生物", "rna", "single cell", "单细胞", "seq"]);
@@ -82,7 +98,8 @@ impl IntakeAnalyzer {
         };
 
         let mut assumptions = vec![
-            "Intake uses deterministic heuristics in the MVP runtime.".to_string(),
+            "Intake uses deterministic heuristics before any external evidence collection."
+                .to_string(),
             "High-risk actions remain subject to explicit permission checks.".to_string(),
         ];
         if retrieval {
@@ -99,7 +116,7 @@ impl IntakeAnalyzer {
             ambiguities.push("未明确最终交付物，系统将默认输出结构化结论。".to_string());
         }
         if retrieval && !contains_any(&lowered, &["时间范围", "最新", "recent", "latest"]) {
-            ambiguities.push("未指定检索时间范围，MVP 将优先使用通用方法综述视角。".to_string());
+            ambiguities.push("未指定检索时间范围，将优先使用通用方法综述视角。".to_string());
         }
         if contains_any(&lowered, &["帮我看下", "看一下", "看看"]) && capability_hits <= 1
         {
@@ -118,4 +135,25 @@ impl IntakeAnalyzer {
 
 fn contains_any(text: &str, keywords: &[&str]) -> bool {
     keywords.iter().any(|keyword| text.contains(keyword))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IntakeAnalyzer;
+
+    #[test]
+    fn explicit_deliverables_are_not_treated_as_missing() {
+        let intake = IntakeAnalyzer::new().analyze(
+            "请围绕以下科研问题做一份可追溯的文献综述：\n\n研究问题：THRSP在肝癌中的功能研究\n研究对象/领域：肝癌多组学\n时间范围或关键词：THRSP、脂质代谢\n\n交付物：关键论文表、证据矩阵、共识/争议、结论边界和下一步阅读建议。",
+        );
+
+        assert!(
+            !intake
+                .ambiguities
+                .iter()
+                .any(|item| item.contains("未明确最终交付物")),
+            "explicit 交付物 should satisfy the final deliverable requirement: {:?}",
+            intake.ambiguities,
+        );
+    }
 }

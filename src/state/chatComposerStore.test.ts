@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import {
   executionWorkspaceScopeKey,
+  normalizeSessionConfig,
   shouldResetWorkspaceForExecutionScopeChange,
   useChatComposerStore,
 } from "./chatComposerStore";
@@ -52,6 +53,33 @@ describe("chatComposerStore permissionMode", () => {
       "permission_set_session_stance",
       expect.anything(),
     );
+  });
+
+  it("keeps legacy worktree session config disabled", () => {
+    const normalized = normalizeSessionConfig({
+      use_worktree: true,
+      sandbox_backend: "docker",
+    });
+
+    expect(normalized.use_worktree).toBe(false);
+
+    useChatComposerStore.getState().initForSession("session-no-worktree", {
+      composer_agent_type: "auto",
+      permission_mode: "ask",
+      execution_environment: "local",
+      sandbox_backend: "docker",
+      local_venv_type: "none",
+      local_venv_name: "",
+      use_worktree: true,
+    });
+    invokeMock.mockClear();
+
+    useChatComposerStore.getState().setEnvironment("ssh");
+
+    expect(invokeMock).toHaveBeenCalledWith("save_session_config_command", {
+      sessionId: "session-no-worktree",
+      config: expect.objectContaining({ use_worktree: false }),
+    });
   });
 });
 

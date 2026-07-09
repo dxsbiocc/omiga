@@ -190,6 +190,15 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const locale = useLocaleStore((s) => s.locale);
   const setLocale = useLocaleStore((s) => s.setLocale);
   const t = (key: SessionListStringKey) => tSessionList(locale, key);
+  const sidebarText = theme.palette.text.secondary;
+  const sidebarTextStrong =
+    theme.palette.mode === "dark"
+      ? theme.palette.text.primary
+      : theme.palette.text.secondary;
+  const sidebarAccentText =
+    theme.palette.mode === "dark"
+      ? theme.palette.primary.light
+      : theme.palette.primary.dark;
 
   // ── Selective subscriptions ───────────────────────────────────────────────
   // Subscribe to storeMessages.length (a primitive) instead of the full array.
@@ -824,10 +833,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     () => ({
       fontSize: 14,
       fontWeight: 500,
-      color: theme.palette.text.primary,
+      color: sidebarText,
       lineHeight: 1.3,
     }),
-    [theme.palette.text.primary],
+    [sidebarText],
   );
 
   const navRowSx = useMemo(
@@ -839,12 +848,12 @@ export function SessionList({ onSelectSession }: SessionListProps) {
       py: 1,
       borderRadius: 1,
       cursor: "pointer",
-      color: theme.palette.text.primary,
+      color: sidebarText,
       "&:hover": {
         bgcolor: "action.hover",
       },
     }),
-    [theme.palette.text.primary],
+    [sidebarText],
   );
 
   const renderSessionRow = (
@@ -852,6 +861,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     opts?: { nested?: boolean },
   ) => {
     const relativeTime = formatSidebarRelativeTime(session.updatedAt, locale);
+    const selected = currentSession?.id === session.id;
     return (
       <Box
         key={session.id}
@@ -868,27 +878,24 @@ export function SessionList({ onSelectSession }: SessionListProps) {
           overflow: "hidden",
           minHeight: 32,
           bgcolor:
-            currentSession?.id === session.id
+            selected
               ? alpha(
-                  theme.palette.text.primary,
-                  theme.palette.mode === "dark" ? 0.12 : 0.055,
+                  theme.palette.primary.main,
+                  theme.palette.mode === "dark" ? 0.2 : 0.08,
                 )
               : "transparent",
           border: "1px solid",
           borderColor:
-            currentSession?.id === session.id
-              ? alpha(
-                  theme.palette.divider,
-                  theme.palette.mode === "dark" ? 0.8 : 0.9,
-                )
+            selected
+              ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.36 : 0.22)
               : "transparent",
           transition: "background-color 120ms ease, border-color 120ms ease",
           "&:hover": {
             bgcolor:
-              currentSession?.id === session.id
+              selected
                 ? alpha(
-                    theme.palette.text.primary,
-                    theme.palette.mode === "dark" ? 0.16 : 0.075,
+                    theme.palette.primary.main,
+                    theme.palette.mode === "dark" ? 0.26 : 0.12,
                   )
                 : "action.hover",
           },
@@ -942,7 +949,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
           )}
           <Typography
             variant="body2"
-            fontWeight={500}
+              fontWeight={selected ? 600 : 500}
             noWrap
             sx={{
               flex: 1,
@@ -955,7 +962,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                     fontStyle: "italic",
                     fontWeight: 400,
                   }
-                : { color: "text.primary" }),
+                : { color: selected ? sidebarAccentText : sidebarText }),
             }}
           >
             {isPlaceholder ? UNUSED_SESSION_LABEL : session.name}
@@ -1153,7 +1160,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                       py: 0.58,
                       borderRadius: 1.25,
                       cursor: "pointer",
-                      color: "text.primary",
+                      color: project.isCurrent ? sidebarAccentText : "text.secondary",
                       minHeight: 32,
                       bgcolor: "transparent",
                       outline: "none",
@@ -1185,8 +1192,8 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                       sx={{
                         flex: 1,
                         minWidth: 0,
-                        color: "text.primary",
-                        fontWeight: project.isCurrent ? 650 : 560,
+                        color: project.isCurrent ? sidebarAccentText : "text.secondary",
+                        fontWeight: project.isCurrent ? 620 : 540,
                         lineHeight: 1.25,
                       }}
                     >
@@ -1493,7 +1500,12 @@ export function SessionList({ onSelectSession }: SessionListProps) {
       >
         <OmigaLogo size={24} animated={false} />
         <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Typography variant="body2" fontWeight={600} color="text.primary" noWrap>
+          <Typography
+            variant="body2"
+            fontWeight={600}
+            color={sidebarTextStrong}
+            noWrap
+          >
             {t("localWorkspace")}
           </Typography>
           <Typography variant="caption" color="text.secondary" display="block" noWrap>

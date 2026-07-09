@@ -30,6 +30,7 @@ impl AnthropicClient {
             system: config.system_prompt.clone(),
             version: "2023-06-01".to_string(),
             timeout: config.timeout_secs,
+            prompt_cache: config.prompt_cache,
         };
 
         Self {

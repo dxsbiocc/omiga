@@ -224,4 +224,5 @@ pub fn schema() -> ToolSchema {
             "required": ["query"]
         }),
     )
+    .concurrency_safe()
 }

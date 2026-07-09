@@ -441,4 +441,5 @@ pub fn schema() -> ToolSchema {
             "required": ["pattern"]
         }),
     )
+    .concurrency_safe()
 }

@@ -51,8 +51,8 @@ export function buildPendingExecutionFeedback(
 
   if (workflowCommand === "research") {
     return {
-      connectLabel: "Research 编排中",
-      assistantHint: "正在调用分层 Research System 命令…",
+      connectLabel: "科研分析中",
+      assistantHint: "正在围绕科研问题生成分析、证据边界和下一步建议…",
     };
   }
 

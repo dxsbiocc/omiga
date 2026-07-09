@@ -515,6 +515,56 @@ impl OpenAiCompatibleClient {
             })
             .collect()
     }
+
+    fn build_request_body(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolSchema>,
+    ) -> serde_json::Value {
+        let openai_messages = self.convert_messages(messages);
+        let openai_tools = if tools.is_empty() {
+            None
+        } else {
+            Some(self.convert_tools(tools))
+        };
+
+        let mut body = serde_json::json!({
+            "model": self.config.model,
+            "messages": openai_messages,
+            "stream": true,
+            "max_tokens": self.config.max_tokens,
+        });
+
+        if let Some(temp) = self.config.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
+
+        if let Some(tools) = openai_tools {
+            body["tools"] = serde_json::json!(tools);
+            body["tool_choice"] = serde_json::json!("auto");
+        }
+
+        if let Some(prompt_cache_key) = &self.config.prompt_cache_key {
+            body["prompt_cache_key"] = serde_json::json!(prompt_cache_key);
+        }
+
+        // OpenAI: include usage in the last stream chunks. Moonshot/Kimi rejects unknown fields with errors.
+        if !matches!(self.config.provider, LlmProvider::Moonshot) {
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
+        }
+
+        // Add extra query params if any
+        if let Some(extra_query) = &self.config.extra_query {
+            for (key, value) in extra_query {
+                body[key] = serde_json::json!(value);
+            }
+        }
+
+        maybe_attach_kimi_thinking_body(&mut body, &self.config);
+        maybe_attach_deepseek_thinking_body(&mut body, &self.config);
+
+        body
+    }
 }
 
 fn assistant_tool_use_ids(msg: &LlmMessage) -> Vec<String> {
@@ -581,44 +631,7 @@ impl LlmClient for OpenAiCompatibleClient {
     {
         let url = self.config.api_url();
         let headers = self.build_headers();
-
-        let openai_messages = self.convert_messages(messages);
-        let openai_tools = if tools.is_empty() {
-            None
-        } else {
-            Some(self.convert_tools(tools))
-        };
-
-        let mut body = serde_json::json!({
-            "model": self.config.model,
-            "messages": openai_messages,
-            "stream": true,
-            "max_tokens": self.config.max_tokens,
-        });
-
-        if let Some(temp) = self.config.temperature {
-            body["temperature"] = serde_json::json!(temp);
-        }
-
-        if let Some(tools) = openai_tools {
-            body["tools"] = serde_json::json!(tools);
-            body["tool_choice"] = serde_json::json!("auto");
-        }
-
-        // OpenAI: include usage in the last stream chunks. Moonshot/Kimi rejects unknown fields with errors.
-        if !matches!(self.config.provider, LlmProvider::Moonshot) {
-            body["stream_options"] = serde_json::json!({ "include_usage": true });
-        }
-
-        // Add extra query params if any
-        if let Some(extra_query) = &self.config.extra_query {
-            for (key, value) in extra_query {
-                body[key] = serde_json::json!(value);
-            }
-        }
-
-        maybe_attach_kimi_thinking_body(&mut body, &self.config);
-        maybe_attach_deepseek_thinking_body(&mut body, &self.config);
+        let body = self.build_request_body(messages, tools);
         let diagnostics = request_diagnostics(&body);
         if diagnostics.body_bytes >= LARGE_REQUEST_WARN_BYTES {
             tracing::warn!(
@@ -713,7 +726,10 @@ fn parse_sse_events(text: &str) -> Vec<Result<LlmStreamChunk, ApiError>> {
                     tu.total_tokens = u
                         .total_tokens
                         .unwrap_or(tu.prompt_tokens.saturating_add(tu.completion_tokens));
-                    if tu.prompt_tokens > 0 || tu.completion_tokens > 0 {
+                    tu.cache_read_input_tokens = u
+                        .prompt_tokens_details
+                        .and_then(|details| details.cached_tokens);
+                    if tu.has_any_tokens() {
                         results.push(Ok(LlmStreamChunk::Usage(tu)));
                     }
                 }
@@ -814,6 +830,13 @@ struct OpenAiUsageChunk {
     prompt_tokens: Option<u32>,
     completion_tokens: Option<u32>,
     total_tokens: Option<u32>,
+    #[serde(default, alias = "input_tokens_details")]
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiPromptTokensDetails {
+    cached_tokens: Option<u32>,
 }
 
 #[allow(dead_code)]
@@ -895,6 +918,61 @@ mod tests {
             .content
             .iter()
             .any(|content| matches!(content, LlmContent::ToolUse { .. }))
+    }
+
+    fn client_with_prompt_cache_key(key: Option<&str>) -> OpenAiCompatibleClient {
+        let mut config = LlmConfig::new(LlmProvider::OpenAi, "test-key");
+        config.prompt_cache_key = key.map(str::to_string);
+        OpenAiCompatibleClient::new(config)
+    }
+
+    #[test]
+    fn openai_request_body_includes_prompt_cache_key_when_configured() {
+        let client = client_with_prompt_cache_key(Some("session-123"));
+        let body = client.build_request_body(vec![LlmMessage::user("hello")], Vec::new());
+
+        assert_eq!(body["prompt_cache_key"], json!("session-123"));
+    }
+
+    #[test]
+    fn openai_request_body_omits_prompt_cache_key_when_unset() {
+        let client = client_with_prompt_cache_key(None);
+        let body = client.build_request_body(vec![LlmMessage::user("hello")], Vec::new());
+
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn openai_sse_usage_parses_cached_prompt_tokens() {
+        let event = json!({
+            "id": "chatcmpl_1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "gpt-test",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "prompt_tokens_details": {
+                    "cached_tokens": 64
+                }
+            }
+        });
+        let chunks = parse_sse_events(&format!("data: {event}\n\n"));
+        let usage = chunks
+            .into_iter()
+            .find_map(|chunk| match chunk.unwrap() {
+                LlmStreamChunk::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.total_tokens, 120);
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.cache_read_input_tokens, Some(64));
     }
 
     #[test]

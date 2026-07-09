@@ -323,7 +323,7 @@ interface SendMessageRequest {
   executionEnvironment?: "local" | "ssh" | "sandbox";
   /** Selected SSH server name; used when executionEnvironment === "ssh" */
   sshServer?: string | null;
-  /** `modal` | `daytona` | `docker` | `singularity` — composer sandbox backend */
+  /** `docker` | `singularity` — composer sandbox backend */
   sandboxBackend?: string;
   /** `"none"` | `"conda"` | `"venv"` | `"pyenv"` — local virtual env type */
   localVenvType?: string;

@@ -30,7 +30,7 @@ pub(super) fn ensure_registry_source_can_query(
         RetrievalSourceStatus::Planned => {
             return Err(ToolError::InvalidArguments {
                 message: format!(
-                    "{} source `{}` is planned but not implemented yet.",
+                    "{} source `{}` is not available in this build.",
                     source.category, source.id
                 ),
             });

@@ -168,7 +168,7 @@ pub fn schema() -> ToolSchema {
                     "description": "Alias for `name` (Claude Code parity)."
                 },
                 "input": {
-                    "description": "Optional structured input for the workflow (recorded in the output; full execution is not implemented)."
+                    "description": "Optional structured input for the workflow preview metadata."
                 }
             },
             "required": ["name"]

@@ -291,18 +291,71 @@ pub struct AutoCompactResult {
     pub removed_head_blocks: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompactionContext {
+    pub last_turn_input_tokens: Option<u32>,
+}
+
+/// Estimate tokens added after the last provider request measured by real usage.
+///
+/// The persisted `input` usage on an assistant row describes the prompt sent before that
+/// assistant response existed. For the next request, the extra context is therefore the
+/// assistant output itself plus every message appended after it (tool results, follow-up
+/// user text, etc.). We estimate only that suffix and add it to the real provider count.
+pub fn estimate_tokens_added_after_last_usage(messages: &[Message]) -> Option<u32> {
+    let last_usage_index = messages.iter().rposition(|message| {
+        matches!(
+            message,
+            Message::Assistant {
+                token_usage: Some(_),
+                ..
+            }
+        )
+    })?;
+    Some(estimate_tokens_api_messages(
+        &SessionCodec::to_api_messages(&messages[last_usage_index..]),
+    ))
+}
+
+fn estimate_tokens_before_compaction(messages: &[Message], context: CompactionContext) -> u32 {
+    if let Some(actual_input) = context.last_turn_input_tokens {
+        if let Some(incremental_estimate) = estimate_tokens_added_after_last_usage(messages) {
+            let before = actual_input.saturating_add(incremental_estimate);
+            tracing::debug!(
+                target: "omiga::auto_compact",
+                actual_input_tokens = actual_input,
+                estimated_increment_tokens = incremental_estimate,
+                estimated_tokens_before = before,
+                "auto-compact using provider usage baseline"
+            );
+            return before;
+        }
+        tracing::debug!(
+            target: "omiga::auto_compact",
+            actual_input_tokens = actual_input,
+            "auto-compact usage baseline was provided without a matching assistant usage marker; falling back to message estimate"
+        );
+    } else {
+        tracing::debug!(
+            target: "omiga::auto_compact",
+            "auto-compact using fallback message estimate because no previous turn usage is available"
+        );
+    }
+    estimate_tokens_api_messages(&SessionCodec::to_api_messages(messages))
+}
+
 /// Trim oldest logical messages until the estimated history fits `messages_budget_tokens`.
 /// May prepend a short system user notice when content was removed.
 pub fn compact_session_messages(
     messages: &mut Vec<Message>,
     cfg: &LlmConfig,
     tools_enabled: bool,
+    context: CompactionContext,
 ) -> Option<AutoCompactResult> {
     if !is_auto_compact_enabled() {
         return None;
     }
-    let api_before = SessionCodec::to_api_messages(messages);
-    let before = estimate_tokens_api_messages(&api_before);
+    let before = estimate_tokens_before_compaction(messages, context);
     let trigger_budget = messages_budget_tokens(cfg, tools_enabled);
     if before <= trigger_budget {
         return None;
@@ -366,11 +419,12 @@ pub fn preview_removed_messages_for_compaction(
     messages: &[Message],
     cfg: &LlmConfig,
     tools_enabled: bool,
+    context: CompactionContext,
 ) -> Option<Vec<Message>> {
     if !is_auto_compact_enabled() {
         return None;
     }
-    let before = estimate_tokens_api_messages(&SessionCodec::to_api_messages(messages));
+    let before = estimate_tokens_before_compaction(messages, context);
     let trigger_budget = messages_budget_tokens(cfg, tools_enabled);
     if before <= trigger_budget {
         return None;
@@ -433,9 +487,11 @@ pub async fn compact_session_and_persist(
     session: &mut crate::domain::session::Session,
     cfg: &LlmConfig,
     tools_enabled: bool,
+    context: CompactionContext,
     fallback_user_message_id: &str,
 ) -> Result<Option<AutoCompactPersisted>, sqlx::Error> {
-    let Some(result) = compact_session_messages(&mut session.messages, cfg, tools_enabled) else {
+    let Some(result) = compact_session_messages(&mut session.messages, cfg, tools_enabled, context)
+    else {
         return Ok(None);
     };
     session.updated_at = chrono::Utc::now();
@@ -510,7 +566,7 @@ mod tests {
             },
         ];
 
-        let result = compact_session_messages(&mut msgs, &c, false)
+        let result = compact_session_messages(&mut msgs, &c, false, CompactionContext::default())
             .expect("large transcript should compact");
 
         assert!(result.estimated_tokens_before > messages_budget_tokens(&c, false));
@@ -575,12 +631,101 @@ mod tests {
             },
         ];
 
-        let removed = preview_removed_messages_for_compaction(&msgs, &c, false).unwrap();
+        let removed =
+            preview_removed_messages_for_compaction(&msgs, &c, false, CompactionContext::default())
+                .unwrap();
 
         assert_eq!(removed.len(), 1);
         match &removed[0] {
             Message::User { content } => assert!(content.contains("old context")),
             _ => panic!("expected removed user message"),
         }
+    }
+
+    fn usage_aware_test_config() -> LlmConfig {
+        let mut c = LlmConfig::new(LlmProvider::OpenAi, "k");
+        c.context_window_tokens = Some(25_000);
+        c.max_tokens = 100;
+        c.system_prompt = None;
+        c
+    }
+
+    fn usage_aware_cjk_messages() -> Vec<Message> {
+        vec![
+            Message::User {
+                content: "背景".repeat(2_000),
+            },
+            Message::Assistant {
+                content: "回应".repeat(1_000),
+                tool_calls: None,
+                token_usage: Some(crate::domain::session::MessageTokenUsage {
+                    input: 8_000,
+                    output: 1_000,
+                    total: Some(9_000),
+                    provider: Some("openai".into()),
+                    cache_read: None,
+                    cache_creation: None,
+                }),
+                reasoning_content: None,
+                follow_up_suggestions: None,
+                turn_summary: None,
+            },
+            Message::User {
+                content: "继续".repeat(500),
+            },
+        ]
+    }
+
+    #[test]
+    fn usage_baseline_triggers_when_cjk_estimate_is_below_budget() {
+        let c = usage_aware_test_config();
+        let mut msgs = usage_aware_cjk_messages();
+        let fallback_estimate = estimate_tokens_api_messages(&SessionCodec::to_api_messages(&msgs));
+        assert!(fallback_estimate < messages_budget_tokens(&c, false));
+
+        let result = compact_session_messages(
+            &mut msgs,
+            &c,
+            false,
+            CompactionContext {
+                last_turn_input_tokens: Some(8_000),
+            },
+        )
+        .expect("real provider usage should trigger compaction");
+
+        assert!(result.estimated_tokens_before > messages_budget_tokens(&c, false));
+        assert!(result.removed_head_blocks >= 1);
+    }
+
+    #[test]
+    fn missing_usage_context_keeps_fallback_estimate_behavior() {
+        let c = usage_aware_test_config();
+        let mut msgs = usage_aware_cjk_messages();
+        let fallback_estimate = estimate_tokens_api_messages(&SessionCodec::to_api_messages(&msgs));
+        assert!(fallback_estimate < messages_budget_tokens(&c, false));
+
+        let result = compact_session_messages(&mut msgs, &c, false, CompactionContext::default());
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn usage_baseline_adds_assistant_output_and_later_messages() {
+        let msgs = usage_aware_cjk_messages();
+        let suffix_estimate =
+            estimate_tokens_api_messages(&SessionCodec::to_api_messages(&msgs[1..]));
+
+        let before = estimate_tokens_before_compaction(
+            &msgs,
+            CompactionContext {
+                last_turn_input_tokens: Some(8_000),
+            },
+        );
+
+        assert_eq!(before, 8_000 + suffix_estimate);
+        assert_eq!(
+            estimate_tokens_added_after_last_usage(&msgs),
+            Some(suffix_estimate)
+        );
     }
 }

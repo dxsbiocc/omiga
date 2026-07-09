@@ -1,0 +1,13 @@
+[package]
+name = "omiga-landlock"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.5"
+libc = "0.2"

@@ -698,13 +698,13 @@ export default function App() {
                 width: TITLE_BAR_CONTROL_SIZE,
                 height: TITLE_BAR_CONTROL_SIZE,
                 borderRadius: 1.5,
-                color: leftPanelCollapsed ? "text.secondary" : "text.primary",
+                color: leftPanelCollapsed ? "text.secondary" : "primary.main",
                 bgcolor: "transparent",
                 touchAction: "manipulation",
                 transition: "background-color 80ms ease, color 80ms ease",
                 "&:hover": {
-                  color: "text.primary",
-                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                  color: "primary.main",
+                  bgcolor: (theme) => alpha(theme.palette.primary.main, 0.08),
                 },
               }}
             >
@@ -740,8 +740,8 @@ export default function App() {
                 touchAction: "manipulation",
                 transition: "background-color 80ms ease, color 80ms ease",
                 "&:hover": {
-                  color: "text.primary",
-                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                  color: "primary.main",
+                  bgcolor: (theme) => alpha(theme.palette.primary.main, 0.08),
                 },
                 "&.Mui-disabled": {
                   color: (theme) => alpha(theme.palette.text.primary, 0.22),
@@ -770,8 +770,8 @@ export default function App() {
                 touchAction: "manipulation",
                 transition: "background-color 80ms ease, color 80ms ease",
                 "&:hover": {
-                  color: "text.primary",
-                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                  color: "primary.main",
+                  bgcolor: (theme) => alpha(theme.palette.primary.main, 0.08),
                 },
                 "&.Mui-disabled": {
                   color: (theme) => alpha(theme.palette.text.primary, 0.22),
@@ -799,8 +799,8 @@ export default function App() {
                 touchAction: "manipulation",
                 transition: "background-color 80ms ease, color 80ms ease",
                 "&:hover": {
-                  color: "text.primary",
-                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                  color: "primary.main",
+                  bgcolor: (theme) => alpha(theme.palette.primary.main, 0.08),
                 },
               }}
             >
@@ -830,7 +830,7 @@ export default function App() {
               noWrap
               sx={{
                 minWidth: 0,
-                color: "text.primary",
+                color: "text.secondary",
                 fontSize: 16,
                 fontWeight: 650,
                 letterSpacing: "-0.015em",
@@ -869,15 +869,15 @@ export default function App() {
                 width: TITLE_BAR_CONTROL_SIZE,
                 height: TITLE_BAR_CONTROL_SIZE,
                 borderRadius: 1.5,
-                color: terminalPanelOpen ? "text.primary" : "text.secondary",
+                color: terminalPanelOpen ? "primary.main" : "text.secondary",
                 bgcolor: terminalPanelOpen
-                  ? (theme) => alpha(theme.palette.text.primary, 0.08)
+                  ? (theme) => alpha(theme.palette.primary.main, 0.1)
                   : "transparent",
                 touchAction: "manipulation",
                 transition: "background-color 80ms ease, color 80ms ease",
                 "&:hover": {
-                  color: "text.primary",
-                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                  color: "primary.main",
+                  bgcolor: (theme) => alpha(theme.palette.primary.main, 0.08),
                 },
               }}
             >
@@ -897,13 +897,13 @@ export default function App() {
                 width: TITLE_BAR_CONTROL_SIZE,
                 height: TITLE_BAR_CONTROL_SIZE,
                 borderRadius: 1.5,
-                color: rightPanelCollapsed ? "text.secondary" : "text.primary",
+                color: rightPanelCollapsed ? "text.secondary" : "primary.main",
                 bgcolor: "transparent",
                 touchAction: "manipulation",
                 transition: "background-color 80ms ease, color 80ms ease",
                 "&:hover": {
-                  color: "text.primary",
-                  bgcolor: (theme) => alpha(theme.palette.text.primary, 0.06),
+                  color: "primary.main",
+                  bgcolor: (theme) => alpha(theme.palette.primary.main, 0.08),
                 },
               }}
             >

@@ -96,6 +96,53 @@ pub struct SshEnvironment {
     ssh_project_root: Option<PathBuf>,
 }
 
+/// Build (and ensure the directory for) the ControlMaster socket path for an
+/// SSH connection identified by user/host/port.
+///
+/// Shared by the execution layer and the SSH file browser
+/// (`commands/ssh_fs.rs`) so both reuse the *same* multiplexed connection:
+/// once either side establishes a master, the other's commands connect
+/// through the existing socket instead of paying a fresh TCP + auth + login
+/// handshake.
+///
+/// The socket filename is a fixed-length digest of the *raw* (user, host,
+/// port) triple. This is deliberate: a lossy sanitization (stripping unsafe
+/// chars) could map two genuinely different hosts — e.g. `a.b` and `ab`, or an
+/// IPv6 literal and a hostname — onto the same path, causing ControlMaster to
+/// reuse a connection to the *wrong* remote. The digest is also fixed-length,
+/// so a long username + FQDN can never overflow the ~104-byte Unix domain
+/// socket limit. The parent directory is created 0700 so no other local user
+/// can observe or hijack the control socket.
+pub(crate) async fn ensure_ssh_control_socket(user: &str, host: &str, port: u16) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    // Connection identity is the digest of the RAW triple, so two hosts that
+    // would sanitize alike still get distinct sockets. NUL-separated so distinct
+    // triples cannot alias by field-boundary shifting.
+    let digest = Sha256::digest(format!("{user}\0{host}\0{port}").as_bytes());
+    let socket_name = format!("c-{}.sock", hex::encode(&digest[..16]));
+    // Grouping dir only (not identity): keep the sanitized remote user for
+    // readability. Colliding sanitized users merely share this 0700 dir; the
+    // digest filename keeps their sockets distinct.
+    let safe_user = user
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>();
+    // macOS temp dirs under /var/folders/... are ~95 chars before SSH adds its
+    // own suffix, blowing past the 104-byte Unix domain socket limit. Use /tmp
+    // on Unix.
+    #[cfg(unix)]
+    let control_dir = PathBuf::from(format!("/tmp/omiga-ssh-{}", safe_user));
+    #[cfg(not(unix))]
+    let control_dir = std::env::temp_dir().join("hermes-ssh");
+    tokio::fs::create_dir_all(&control_dir).await.ok();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o700));
+    }
+    control_dir.join(socket_name)
+}
+
 impl SshEnvironment {
     /// 创建新的 SSH 执行环境
     pub async fn new(
@@ -117,30 +164,8 @@ impl SshEnvironment {
         let cwd_file = format!("/tmp/hermes-cwd-{}.txt", session_id);
         let cwd_marker = format!("__HERMES_CWD_{}__", session_id);
 
-        // 创建控制 socket 目录
-        // 对 user/host 中的非安全字符进行过滤，防止路径遍历攻击
-        let safe_user = user
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-            .collect::<String>();
-        let safe_host = host
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '.' || *c == '_')
-            .collect::<String>();
-        // macOS temp dirs under /var/folders/... are ~95 chars before SSH adds its own suffix,
-        // blowing past the 104-byte Unix domain socket limit. Use /tmp on Unix.
-        #[cfg(unix)]
-        let control_dir = PathBuf::from(format!("/tmp/omiga-ssh-{}", safe_user));
-        #[cfg(not(unix))]
-        let control_dir = std::env::temp_dir().join("hermes-ssh");
-        tokio::fs::create_dir_all(&control_dir).await.ok();
-        // 仅当前用户可读写，防止其他用户观察 socket 路径或复用控制连接
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&control_dir, std::fs::Permissions::from_mode(0o700));
-        }
-        let control_socket = control_dir.join(format!("{}@{}:{}.sock", safe_user, safe_host, port));
+        // 创建控制 socket 目录（与 SSH 文件浏览共享同一路径以复用连接）
+        let control_socket = ensure_ssh_control_socket(&user, &host, port).await;
 
         let mut me = Self {
             cwd,

@@ -315,4 +315,5 @@ pub fn schema() -> ToolSchema {
             "required": ["path"]
         }),
     )
+    .concurrency_safe()
 }

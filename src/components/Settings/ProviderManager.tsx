@@ -91,20 +91,6 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
     docsUrl: "https://portal.azure.com/",
     defaultContextWindowTokens: 131_072,
   },
-  google: {
-    name: "Google (Gemini)",
-    defaultModel: "gemini-1.5-pro",
-    models: [
-      "gemini-2.5-pro",
-      "gemini-2.5-flash",
-      "gemini-2.0-flash",
-      "gemini-1.5-pro",
-      "gemini-1.5-flash",
-    ],
-    placeholder: "AIzaSy...",
-    docsUrl: "https://aistudio.google.com/app/apikey",
-    defaultContextWindowTokens: 128_000,
-  },
   minimax: {
     name: "MiniMax",
     defaultModel: "abab6.5-chat",
@@ -824,7 +810,6 @@ export function ProviderManager({
                 <MenuItem value="anthropic">Anthropic (Claude)</MenuItem>
                 <MenuItem value="openai">OpenAI (GPT)</MenuItem>
                 <MenuItem value="azure">Azure OpenAI</MenuItem>
-                <MenuItem value="google">Google (Gemini)</MenuItem>
                 <MenuItem value="custom">Custom (OpenAI-compatible)</MenuItem>
               </Select>
             </FormControl>
