@@ -121,7 +121,6 @@ describe("ToolFoldHeader", () => {
 
     expect(html).toContain("Reasoning · Ran 2 commands");
     expect(html).toContain("2 并行");
-    expect(html).toContain("2 并行运行中");
   });
 
   it("does not fan hover effects out to every icon in the fold header", () => {

@@ -37,8 +37,6 @@ import {
   Collapse,
   Select,
   FormControl,
-  FormControlLabel,
-  Checkbox,
   Paper,
   Chip,
   Popover,
@@ -51,7 +49,7 @@ import {
 } from "@mui/material";
 import { lighten, type Theme } from "@mui/material/styles";
 import {
-  Add,
+  AddPhotoAlternate,
   ExpandMore,
   Mic,
   Square,
@@ -88,6 +86,8 @@ import {
   Gauge,
   Atom,
   Settings,
+  Bot,
+  ShieldCheck,
 } from "lucide-react";
 import {
   useUiStore,
@@ -594,6 +594,8 @@ export interface ChatComposerProps {
   onCloseBackgroundTranscript?: () => void;
   /** Blocked `ask_user_question` — wizard above permission bar, same band as permission prompt. */
   askUserQuestion?: ChatComposerAskUserQuestion | null;
+  /** Send the current composer contents (same as Enter in the chat view). */
+  onSend?: () => void;
 }
 
 export const ChatComposer = memo(function ChatComposer({
@@ -624,6 +626,7 @@ export const ChatComposer = memo(function ChatComposer({
   onOpenBackgroundTranscript,
   onCloseBackgroundTranscript,
   askUserQuestion = null,
+  onSend,
 }: ChatComposerProps) {
   const [input, setInput] = useState(initialInput ?? "");
   const [selectedSlashCommandId, setSelectedSlashCommandId] =
@@ -790,7 +793,7 @@ export const ChatComposer = memo(function ChatComposer({
     lineHeight: 1.25,
   } as const;
   /** Divider 下工具栏：与 IconButton 一致，避免 32 / 36 混用 */
-  const COMPOSER_TOOLBAR_CONTROL_PX = 36;
+  const COMPOSER_TOOLBAR_CONTROL_PX = 30;
   /** 首行 Agent / 附件 Chip 统一高度 */
   const COMPOSER_INLINE_CHIP_PX = 28;
   /** 与 `--composer-fs` / `--composer-lh` 一致，用于首行与 Chip 垂直对齐 */
@@ -802,6 +805,59 @@ export const ChatComposer = memo(function ChatComposer({
   /** Hairline border / shadow tint — theme-aware */
   const edge = (a: number) =>
     alpha(isDark ? theme.palette.common.white : theme.palette.common.black, a);
+  const composerPillSx = (pillAccent: string) =>
+    ({
+      textTransform: "none",
+      color: mut,
+      ...composerLabelText,
+      borderRadius: 999,
+      px: 1.25,
+      py: 0,
+      minHeight: "var(--composer-footer-h)",
+      height: "var(--composer-footer-h)",
+      maxWidth: { xs: 148, sm: 220 },
+      border: `1px solid ${edge(0.14)}`,
+      bgcolor: alpha(paper, isDark ? 0.32 : 0.58),
+      boxShadow: `inset 0 1px 0 ${edge(0.05)}`,
+      gap: 0.5,
+      transition:
+        "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
+      "@media (prefers-reduced-motion: reduce)": {
+        transition: "none",
+      },
+      "&:hover": {
+        bgcolor: alpha(pillAccent, isDark ? 0.16 : 0.1),
+        borderColor: alpha(pillAccent, 0.32),
+        boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
+      },
+      "& .MuiButton-startIcon": { marginRight: 0.25, marginLeft: -0.25 },
+      "& .MuiButton-endIcon": { marginLeft: 0, marginRight: -0.25 },
+    }) as const;
+  const composerActionButtonSx = {
+    width: "var(--composer-toolbar-h)",
+    height: "var(--composer-toolbar-h)",
+    borderRadius: "50%",
+    flexShrink: 0,
+    border: `1px solid ${edge(0.14)}`,
+    bgcolor: alpha(paper, isDark ? 0.28 : 0.72),
+    color: mut,
+    boxShadow: `0 1px 2px ${edge(0.05)}`,
+    transition:
+      "background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, transform 0.2s ease",
+    "@media (prefers-reduced-motion: reduce)": {
+      transition: "none",
+    },
+    "&:hover": {
+      bgcolor: alpha(accent, 0.14),
+      color: accent,
+      borderColor: alpha(accent, 0.28),
+      transform: "translateY(-1px)",
+    },
+    "&:focus-visible": {
+      outline: `2px solid ${alpha(accent, 0.45)}`,
+      outlineOffset: 2,
+    },
+  } as const;
   const semanticChipSurface = (tone: string) => ({
     bgcolor: alpha(tone, isDark ? 0.2 : 0.11),
     borderColor: alpha(tone, isDark ? 0.62 : 0.45),
@@ -850,8 +906,6 @@ export const ChatComposer = memo(function ChatComposer({
     addComposerSelectedPluginId,
     removeComposerSelectedPluginId,
     popComposerSelectedPluginId,
-    useWorktree,
-    setUseWorktree,
     environment,
     setEnvironment,
     sshServer,
@@ -885,14 +939,11 @@ export const ChatComposer = memo(function ChatComposer({
   );
 
   const permissionAccent = permissionModeAccent(theme, permissionMode);
-  const browserUseAccent = browserUseModeAccent(theme, browserUseMode);
 
   const [plusAnchor, setPlusAnchor] = useState<null | HTMLElement>(null);
   const [permissionAnchor, setPermissionAnchor] = useState<null | HTMLElement>(
     null,
   );
-  const [browserUseAnchor, setBrowserUseAnchor] =
-    useState<null | HTMLElement>(null);
   const [pendingBrowserUseMode, setPendingBrowserUseMode] =
     useState<BrowserUseMode | null>(null);
   const [browserInstallDialogOpen, setBrowserInstallDialogOpen] =
@@ -927,7 +978,6 @@ export const ChatComposer = memo(function ChatComposer({
 
   const handleBrowserUseModeSelect = useCallback(
     async (mode: BrowserUseMode) => {
-      setBrowserUseAnchor(null);
       setBrowserInstallError(null);
 
       if (mode === "off") {
@@ -2071,12 +2121,20 @@ export const ChatComposer = memo(function ChatComposer({
       ? "请先选择工作目录后再发送消息…"
       : followUpTaskId
         ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
-        : "输入 / 选择工作流命令或 Agent；输入 $ 选择 Skill；输入 # 选择插件；输入 @ 选择文件…";
+        : "让 Omiga 帮你做点什么…";
 
   /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
     (!allowInputWhileStreaming && (isConnecting || isStreaming)) ||
     askUserBlocksInput;
+
+  const canSend =
+    !inputDisabled &&
+    !needsWorkspacePath &&
+    (input.trim().length > 0 ||
+      composerAttachedPaths.length > 0 ||
+      selectedSlashCommandId !== null ||
+      selectedSkillCommandName !== null);
 
   const showSlashPopover =
     (slashParse.active || skillParse.active) &&
@@ -2563,18 +2621,17 @@ export const ChatComposer = memo(function ChatComposer({
           sx={{
             borderRadius: hasFloatingComposerPrompt
               ? COMPOSER_INPUT_JOINED_BORDER_RADIUS
-              : 3,
+              : "20px",
             overflow: "hidden",
             position: "relative",
             zIndex: COMPOSER_INPUT_JOINED_Z_INDEX,
             bgcolor: composerBg,
-            backdropFilter: "blur(12px)",
-            WebkitBackdropFilter: "blur(12px)",
-            border: `1px solid ${edge(0.12)}`,
+            backdropFilter: "blur(18px) saturate(1.05)",
+            WebkitBackdropFilter: "blur(18px) saturate(1.05)",
+            border: `1px solid ${edge(0.14)}`,
             boxShadow: `
-              0 1px 2px ${edge(0.06)},
-              0 8px 24px ${alpha(accent, 0.08)},
-              inset 0 1px 0 ${edge(0.08)}
+              inset 0 1px 0 ${edge(0.06)},
+              0 8px 24px ${alpha(accent, 0.08)}
             `,
             transition:
               "box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease",
@@ -2591,32 +2648,7 @@ export const ChatComposer = memo(function ChatComposer({
             },
           }}
         >
-          <Box
-          ref={composerInputAnchorRef}
-          onMouseDown={(event) => {
-            if (event.target !== event.currentTarget || inputDisabled) return;
-            event.preventDefault();
-            focusEditableEnd();
-          }}
-          sx={{
-            position: "relative",
-            display: "block",
-            minHeight: 56,
-            maxHeight: 280,
-            overflowY: "auto",
-            boxSizing: "content-box",
-            cursor: inputDisabled ? "not-allowed" : "text",
-            px: 1.75,
-            py: 1.15,
-            /* 与输入首行一致，用于 Agent Chip 与光标垂直对齐 */
-            "--composer-fs": `${COMPOSER_FS_PX}px`,
-            "--composer-lh": COMPOSER_LH,
-            "--composer-chip-h": `${COMPOSER_INLINE_CHIP_PX}px`,
-            fontSize: "var(--composer-fs)",
-            lineHeight: "var(--composer-lh)",
-          }}
-          >
-            {hasInlineComposerChips ? (
+          {hasInlineComposerChips ? (
               <Box
                 className="composer-reference-tray"
                 data-placement={COMPOSER_CONTEXT_TRAY_PLACEMENT}
@@ -2631,8 +2663,9 @@ export const ChatComposer = memo(function ChatComposer({
                   overflowX: "hidden",
                   overflowY: "auto",
                   overscrollBehavior: "contain",
-                  pb: 0.75,
-                  mb: 0.75,
+                  px: 1.75,
+                  pt: 1.15,
+                  pb: 0.5,
                   borderBottom: `1px solid ${edge(0.08)}`,
                   cursor: "default",
                   pointerEvents: "auto",
@@ -2758,6 +2791,101 @@ export const ChatComposer = memo(function ChatComposer({
                 ))}
               </Box>
             ) : null}
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={0.75}
+            sx={{
+              px: 1.25,
+              py: 1.1,
+              "--composer-fs": `${COMPOSER_FS_PX}px`,
+              "--composer-lh": COMPOSER_LH,
+              "--composer-chip-h": `${COMPOSER_INLINE_CHIP_PX}px`,
+              "--composer-toolbar-h": `${COMPOSER_TOOLBAR_CONTROL_PX}px`,
+              fontSize: "var(--composer-fs)",
+              lineHeight: "var(--composer-lh)",
+            }}
+          >
+            <Tooltip title="附件与更多">
+              <IconButton
+                size="small"
+                aria-label="附件与更多"
+                aria-haspopup="menu"
+                aria-expanded={Boolean(plusAnchor)}
+                onClick={(e) => setPlusAnchor(e.currentTarget)}
+                sx={{
+                  ...composerActionButtonSx,
+                  alignSelf: "center",
+                  flexShrink: 0,
+                }}
+              >
+                <AddPhotoAlternate fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Menu
+              anchorEl={plusAnchor}
+              open={Boolean(plusAnchor)}
+              onClose={() => setPlusAnchor(null)}
+              slotProps={{ paper: { sx: { minWidth: 240, borderRadius: 2 } } }}
+            >
+              <MenuItem disabled>
+                <ListItemText
+                  primary="附件"
+                  secondary="图片与文件上传将陆续开放"
+                />
+              </MenuItem>
+              <Divider />
+              <Box sx={{ px: 2, py: 0.75 }}>
+                <Typography
+                  variant="caption"
+                  sx={{ ...composerLabelText, color: mut }}
+                >
+                  浏览器控制
+                </Typography>
+              </Box>
+              {(Object.keys(BROWSER_USE_META) as BrowserUseMode[]).map((key) => (
+                <MenuItem
+                  key={key}
+                  selected={browserUseMode === key}
+                  onClick={() => {
+                    void handleBrowserUseModeSelect(key);
+                    setPlusAnchor(null);
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 36, color: browserUseModeAccent(theme, key) }}>
+                    <Globe2 size={18} strokeWidth={2} />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={BROWSER_USE_META[key].label}
+                    secondary={BROWSER_USE_META[key].hint}
+                    primaryTypographyProps={{
+                      sx: { ...composerLabelText, fontSize: 13 },
+                    }}
+                    secondaryTypographyProps={{ sx: { fontSize: 11 } }}
+                  />
+                </MenuItem>
+              ))}
+            </Menu>
+            <Box
+              ref={composerInputAnchorRef}
+              onMouseDown={(event) => {
+                if (event.target !== event.currentTarget || inputDisabled) return;
+                event.preventDefault();
+                focusEditableEnd();
+              }}
+              sx={{
+                position: "relative",
+                flex: 1,
+                minWidth: 0,
+                minHeight: "var(--composer-toolbar-h)",
+                maxHeight: 240,
+                overflowY: "auto",
+                boxSizing: "border-box",
+                cursor: inputDisabled ? "not-allowed" : "text",
+                display: "flex",
+                alignItems: "center",
+              }}
+            >
           <Box
             component="span"
             ref={mergedEditableRef}
@@ -2849,7 +2977,8 @@ export const ChatComposer = memo(function ChatComposer({
             onKeyDown={handleComposerKeyDown}
             sx={{
               display: "block",
-              verticalAlign: "top",
+              width: "100%",
+              verticalAlign: "middle",
               minWidth:
                 input === ""
                   ? "100%"
@@ -3392,81 +3521,209 @@ export const ChatComposer = memo(function ChatComposer({
             </List>
           </Popover>
         </Box>
+            <Stack
+              direction="row"
+              alignItems="center"
+              spacing={0.5}
+              sx={{ flexShrink: 0, alignSelf: "center" }}
+            >
+              <Tooltip title={canSend ? "发送 (Enter)" : "输入内容后发送"}>
+                <span>
+                  <IconButton
+                    size="small"
+                    aria-label="发送"
+                    disabled={!canSend || !onSend}
+                    onClick={() => onSend?.()}
+                    sx={{
+                      ...composerActionButtonSx,
+                      ...(canSend && onSend
+                        ? {
+                            color: ink,
+                            bgcolor: alpha(paper, isDark ? 0.42 : 0.92),
+                          }
+                        : {
+                            opacity: 0.45,
+                            cursor: "not-allowed",
+                            "&:hover": {
+                              transform: "none",
+                              bgcolor: alpha(paper, isDark ? 0.28 : 0.72),
+                              color: mut,
+                              borderColor: edge(0.14),
+                            },
+                          }),
+                    }}
+                  >
+                    <ArrowUpward fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Tooltip title="语音输入即将推出">
+                <span>
+                  <IconButton
+                    size="small"
+                    disabled
+                    aria-label="语音输入"
+                    sx={{
+                      ...composerActionButtonSx,
+                      opacity: 0.45,
+                      borderStyle: "dashed",
+                      "&:hover": { transform: "none" },
+                    }}
+                  >
+                    <Mic fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Tooltip title={agentTurnActive ? "Agent 运行中" : "就绪"}>
+                <Box
+                  aria-label={agentTurnActive ? "Agent 运行中" : "就绪"}
+                  sx={{
+                    position: "relative",
+                    width: "var(--composer-toolbar-h)",
+                    height: "var(--composer-toolbar-h)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  <CircularProgress
+                    variant={agentTurnActive ? "indeterminate" : "determinate"}
+                    {...(agentTurnActive ? {} : { value: 100 })}
+                    size={26}
+                    thickness={2.8}
+                    sx={{
+                      color: agentTurnActive
+                        ? accent
+                        : alpha(theme.palette.success.main, 0.42),
+                      position: "absolute",
+                    }}
+                  />
+                  <Box
+                    sx={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: "50%",
+                      bgcolor: agentTurnActive
+                        ? accent
+                        : theme.palette.success.main,
+                      boxShadow: agentTurnActive
+                        ? `0 0 8px ${alpha(accent, 0.55)}`
+                        : `0 0 6px ${alpha(theme.palette.success.main, 0.45)}`,
+                    }}
+                  />
+                </Box>
+              </Tooltip>
+              {agentTurnActive && onCancel ? (
+                <Tooltip title="取消任务">
+                  <IconButton
+                    size="small"
+                    onClick={onCancel}
+                    aria-label="取消任务"
+                    sx={{
+                      ...composerActionButtonSx,
+                      color: theme.palette.error.contrastText,
+                      bgcolor: errorMain,
+                      borderColor: alpha(errorMain, 0.65),
+                      boxShadow: `0 0 0 1px ${alpha(errorMain, 0.35)}, 0 2px 8px ${alpha(errorMain, 0.35)}`,
+                      "&:hover": {
+                        bgcolor: errorDark,
+                        borderColor: alpha(errorMain, 0.8),
+                        transform: "translateY(-1px)",
+                      },
+                    }}
+                  >
+                    <Square fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              ) : null}
+            </Stack>
+          </Stack>
         <Divider sx={{ borderColor: edge(0.08) }} />
         <Stack
           direction="row"
           alignItems="center"
-          spacing={0.5}
+          spacing={0.75}
           sx={{
-            px: 1,
-            py: 0.5,
+            px: 1.25,
+            py: 0.75,
             flexWrap: "wrap",
-            gap: 0.5,
-            "--composer-toolbar-h": `${COMPOSER_TOOLBAR_CONTROL_PX}px`,
-            background: isDark
-              ? `linear-gradient(165deg, ${alpha(paper, 0.48)} 0%, ${alpha(def, 0.94)} 48%, ${alpha(def, 0.72)} 100%)`
-              : `linear-gradient(165deg, ${alpha(paper, 0.72)} 0%, ${alpha(def, 0.97)} 48%, ${alpha(paper, 0.65)} 100%)`,
-            borderTop: `1px solid ${edge(0.12)}`,
-            boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
+            gap: 0.75,
+            "--composer-footer-h": `${COMPOSER_TOOLBAR_CONTROL_PX}px`,
+            bgcolor: alpha(def, isDark ? 0.42 : 0.35),
+            borderTop: `1px solid ${edge(0.1)}`,
           }}
         >
-          <Tooltip title="更多功能即将推出">
-            <IconButton
-              size="small"
-              aria-label="更多"
-              aria-haspopup="menu"
-              aria-expanded={Boolean(plusAnchor)}
-              onClick={(e) => setPlusAnchor(e.currentTarget)}
-              sx={{
-                color: mut,
-                width: "var(--composer-toolbar-h)",
-                height: "var(--composer-toolbar-h)",
-                borderRadius: 2,
-                bgcolor: alpha(paper, isDark ? 0.25 : 0.72),
-                border: `1px solid ${edge(0.12)}`,
-                boxShadow: `0 1px 2px ${edge(0.05)}`,
-                transition:
-                  "background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
-                "@media (prefers-reduced-motion: reduce)": {
-                  transition: "none",
-                },
-                "&:hover": {
-                  bgcolor: alpha(accent, 0.3),
-                  color: accent,
-                  borderColor: alpha(accent, 0.26),
-                  boxShadow: `0 2px 10px ${alpha(accent, 0.12)}`,
-                  transform: "translateY(-1px)",
-                },
-                "&:hover .MuiSvgIcon-root": {
-                  color: accent,
-                },
-                "& .MuiSvgIcon-root": {
-                  color: mut,
-                },
-                "&:focus-visible": {
-                  outline: `2px solid ${alpha(accent, 0.45)}`,
-                  outlineOffset: 2,
-                },
-              }}
-            >
-              <Add fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Menu
-            anchorEl={plusAnchor}
-            open={Boolean(plusAnchor)}
-            onClose={() => setPlusAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 220, borderRadius: 2 } } }}
-          >
-            <MenuItem disabled>
-              <ListItemText
-                primary="敬请期待"
-                secondary="附件等功能将陆续开放"
-              />
-            </MenuItem>
-          </Menu>
+          <ProviderSwitcher
+            onOpenSettings={() => {
+              setSettingsTabIndex(0);
+              setSettingsOpen(true);
+              setRightPanelMode("settings");
+            }}
+            triggerSx={{
+              ...composerPillSx(accent),
+              minHeight: "var(--composer-footer-h)",
+              height: "var(--composer-footer-h)",
+              maxWidth: { xs: 168, sm: 240 },
+              px: 1.25,
+              py: 0,
+              color: ink,
+              borderRadius: 999,
+              "& .MuiButton-startIcon": { marginRight: 0.5 },
+            }}
+            startIcon={<Bot size={16} strokeWidth={2} />}
+          />
 
-          <Box sx={{ flex: 1, minWidth: 8 }} />
+          <Button
+            size="small"
+            variant="text"
+            color="inherit"
+            onClick={(e) => setEnvAnchor(e.currentTarget)}
+            startIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: accent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                {environment === "local" ? (
+                  <Cloud size={16} strokeWidth={2} color={accent} />
+                ) : environment === "ssh" ? (
+                  <Terminal size={16} strokeWidth={2} color={accent} />
+                ) : (
+                  createElement(SANDBOX_BACKEND_ICON[sandboxBackend], {
+                    size: 16,
+                    strokeWidth: 2,
+                    color: accent,
+                  })
+                )}
+              </Box>
+            }
+            endIcon={
+              <ChevronDown size={16} strokeWidth={2} color={mut} />
+            }
+            sx={composerPillSx(accent)}
+          >
+            <Typography
+              component="span"
+              noWrap
+              sx={{ ...composerLabelText, color: "inherit" }}
+            >
+              {environment === "local"
+                ? localVenvType !== "none" && localVenvName
+                  ? localVenvName
+                  : "本地"
+                : environment === "ssh"
+                  ? sshServer
+                    ? sshServer
+                    : "SSH"
+                  : SANDBOX_LABEL[sandboxBackend]}
+            </Typography>
+          </Button>
 
           <Button
             size="small"
@@ -3474,64 +3731,12 @@ export const ChatComposer = memo(function ChatComposer({
             color="inherit"
             onClick={(e) => setPermissionAnchor(e.currentTarget)}
             startIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: permissionAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                {createElement(PERMISSION_ICON[permissionMode], {
-                  size: 18,
-                  strokeWidth: 2,
-                  color: permissionAccent,
-                })}
-              </Box>
+              <ShieldCheck size={16} strokeWidth={2} color={permissionAccent} />
             }
             endIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: permissionAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <ChevronDown
-                  size={18}
-                  strokeWidth={2}
-                  color={permissionAccent}
-                />
-              </Box>
+              <ChevronDown size={16} strokeWidth={2} color={mut} />
             }
-            sx={{
-              textTransform: "none",
-              color: permissionAccent,
-              ...composerLabelText,
-              borderRadius: 2.5,
-              px: 1,
-              minHeight: "var(--composer-toolbar-h)",
-              height: "var(--composer-toolbar-h)",
-              maxWidth: 200,
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              boxShadow: "none",
-              transition:
-                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease",
-              "@media (prefers-reduced-motion: reduce)": {
-                transition: "none",
-              },
-              "&:hover": {
-                bgcolor: alpha(permissionAccent, 0.12),
-                borderColor: alpha(permissionAccent, 0.28),
-                boxShadow: "none",
-              },
-            }}
+            sx={composerPillSx(permissionAccent)}
           >
             <Typography
               variant="body2"
@@ -3618,565 +3823,45 @@ export const ChatComposer = memo(function ChatComposer({
             })}
           </Menu>
 
-          <Button
-            size="small"
-            variant="text"
-            color="inherit"
-            onClick={(e) => setBrowserUseAnchor(e.currentTarget)}
-            startIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: browserUseAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <Globe2
-                  size={18}
-                  strokeWidth={2}
-                  color={browserUseAccent}
-                />
-              </Box>
-            }
-            endIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: browserUseAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <ChevronDown
-                  size={18}
-                  strokeWidth={2}
-                  color={browserUseAccent}
-                />
-              </Box>
-            }
-            sx={{
-              textTransform: "none",
-              color: browserUseAccent,
-              ...composerLabelText,
-              borderRadius: 2.5,
-              px: 1,
-              minHeight: "var(--composer-toolbar-h)",
-              height: "var(--composer-toolbar-h)",
-              maxWidth: 200,
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              boxShadow: "none",
-              transition:
-                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease",
-              "@media (prefers-reduced-motion: reduce)": {
-                transition: "none",
-              },
-              "&:hover": {
-                bgcolor: alpha(browserUseAccent, 0.12),
-                borderColor: alpha(browserUseAccent, 0.28),
-                boxShadow: "none",
-              },
-            }}
-          >
-            <Typography
-              variant="body2"
-              noWrap
-              component="span"
-              sx={{ ...composerLabelText, color: "inherit" }}
-            >
-              {BROWSER_USE_META[browserUseMode].label}
-            </Typography>
-          </Button>
-          <Menu
-            anchorEl={browserUseAnchor}
-            open={Boolean(browserUseAnchor)}
-            onClose={() => setBrowserUseAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 280, borderRadius: 2 } } }}
-          >
-            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
-              <Tooltip
-                title="显式控制 Browser Operator 的启用范围"
-                placement="top"
-                enterDelay={200}
-              >
-                <Typography
-                  variant="subtitle2"
-                  component="span"
-                  sx={{
-                    display: "inline-block",
-                    cursor: "default",
-                    ...composerLabelText,
-                    color: ink,
-                  }}
-                >
-                  浏览器
-                </Typography>
-              </Tooltip>
-            </Box>
-            {(Object.keys(BROWSER_USE_META) as BrowserUseMode[]).map((key) => {
-              const rowAccent = browserUseModeAccent(theme, key);
-              return (
-                <Tooltip
-                  key={key}
-                  title={BROWSER_USE_META[key].hint}
-                  placement="left"
-                  enterDelay={200}
-                >
-                  <MenuItem
-                    selected={browserUseMode === key}
-                    onClick={() => void handleBrowserUseModeSelect(key)}
-                    sx={{
-                      "&.Mui-selected": {
-                        bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
-                        "&:hover": {
-                          bgcolor: alpha(rowAccent, isDark ? 0.26 : 0.16),
-                        },
-                      },
-                    }}
-                  >
-                    <ListItemIcon
-                      sx={{
-                        minWidth: 40,
-                        lineHeight: 0,
-                        color: rowAccent,
-                        "& svg": { display: "block" },
-                      }}
-                    >
-                      <Globe2
-                        size={20}
-                        strokeWidth={2}
-                        color={rowAccent}
-                      />
-                    </ListItemIcon>
-                    <ListItemText
-                      primary={BROWSER_USE_META[key].label}
-                      secondary={BROWSER_USE_META[key].hint}
-                      primaryTypographyProps={{
-                        sx: { ...composerLabelText, color: rowAccent },
-                      }}
-                      secondaryTypographyProps={{
-                        sx: {
-                          mt: 0.25,
-                          color: alpha(ink, 0.72),
-                          fontSize: 12,
-                          lineHeight: 1.4,
-                        },
-                      }}
-                    />
-                  </MenuItem>
-                </Tooltip>
-              );
-            })}
-          </Menu>
-          <Dialog
-            open={browserInstallDialogOpen}
-            onClose={closeBrowserInstallDialog}
-            maxWidth="sm"
-            fullWidth
-          >
-            <DialogTitle>需要安装 Browser Operator 后端</DialogTitle>
-            <DialogContent>
-              <Stack spacing={2} sx={{ pt: 0.5 }}>
-                <Typography variant="body2" color="text.secondary">
-                  Omiga 已内置 browser_* 工具封装，但不会在你未启用浏览器控制时自动安装
-                  browser-use 或下载 Playwright 浏览器。选择{" "}
-                  {pendingBrowserUseMode
-                    ? BROWSER_USE_META[pendingBrowserUseMode].label
-                    : "浏览器模式"}{" "}
-                  前，需要先完成一次本机 setup，而不是普通启用开关。
-                </Typography>
-                <Alert severity="warning" sx={{ borderRadius: 2 }}>
-                  点击下方按钮即表示你显式确认执行安装：会写入用户目录，且“安装并下载浏览器”可能联网下载
-                  browser-use / Playwright browsers。
-                </Alert>
-                <Alert severity="info" sx={{ borderRadius: 2 }}>
-                  后端会安装到用户目录，不会写入项目依赖。默认位置：
-                  {browserBackendStatus?.managedHome ||
-                    "~/.omiga/browser-operator"}
-                </Alert>
-                <Typography variant="caption" color="text.secondary">
-                  “只安装后端”会跳过 Playwright 浏览器下载，适合已配置
-                  Chrome/CDP 的场景；“安装并下载浏览器”适合首次完整启用。
-                </Typography>
-                {browserBackendStatus?.configuredPython ? (
-                  <Typography variant="caption" color="text.secondary">
-                    已配置外部 Python：{browserBackendStatus.configuredPython}
-                  </Typography>
-                ) : null}
-                {browserBackendStatus?.playwrightBrowsersPath ? (
-                  <Typography variant="caption" color="text.secondary">
-                    Playwright 浏览器缓存：
-                    {browserBackendStatus.playwrightBrowsersPath}
-                  </Typography>
-                ) : null}
-                {browserInstallError ? (
-                  <Alert severity="error" sx={{ borderRadius: 2 }}>
-                    {browserInstallError}
-                  </Alert>
-                ) : null}
-              </Stack>
-            </DialogContent>
-            <DialogActions sx={{ px: 3, pb: 2, gap: 1, flexWrap: "wrap" }}>
-              <Button
-                onClick={closeBrowserInstallDialog}
-                disabled={browserInstallBusy}
-              >
-                取消
-              </Button>
-              <Button
-                onClick={() =>
-                  void handleBrowserBackendInstall("packages-only")
-                }
-                disabled={browserInstallBusy || browserInstallBlocked}
-                startIcon={
-                  browserInstallIntent === "packages-only" ? (
-                    <CircularProgress size={16} />
-                  ) : undefined
-                }
-              >
-                只安装后端
-              </Button>
-              <Button
-                variant="contained"
-                onClick={() => void handleBrowserBackendInstall("full")}
-                disabled={browserInstallBusy || browserInstallBlocked}
-                startIcon={
-                  browserInstallIntent === "full" ? (
-                    <CircularProgress size={16} color="inherit" />
-                  ) : undefined
-                }
-              >
-                安装并下载浏览器
-              </Button>
-            </DialogActions>
-          </Dialog>
-
-          <Stack
-            direction="row"
-            alignItems="center"
-            spacing={0.75}
-            sx={{ flexShrink: 0 }}
-          >
-            <ProviderSwitcher
-              onOpenSettings={() => {
-                setSettingsTabIndex(0);
-                setSettingsOpen(true);
-                setRightPanelMode("settings");
-              }}
-              triggerSx={{
-                minHeight: "var(--composer-toolbar-h)",
-                height: "var(--composer-toolbar-h)",
-                maxWidth: { xs: 200, sm: 260 },
-                px: 1,
-                py: 0,
-                borderRadius: 2.5,
-                borderColor: edge(0.14),
-                color: ink,
-                ...composerLabelText,
-                bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
-                boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
-                transition:
-                  "border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease",
-                "@media (prefers-reduced-motion: reduce)": {
-                  transition: "none",
-                },
-                "&:hover": {
-                  borderColor: alpha(accent, 0.42),
-                  bgcolor: isDark ? alpha(paper, 0.4) : alpha(accent, 0.3),
-                  boxShadow: `0 2px 12px ${alpha(accent, 0.14)}, 0 0 0 1px ${alpha(accent, 0.16)}`,
-                  transform: "translateY(-1px)",
-                },
-                "& .MuiChip-root": {
-                  maxWidth: 100,
-                },
-              }}
-            />
-            {agentTurnActive && onCancel ? (
-              <Tooltip title="取消任务">
-                <IconButton
-                  size="small"
-                  onClick={onCancel}
-                  aria-label="取消任务"
-                  sx={{
-                    width: "var(--composer-toolbar-h)",
-                    height: "var(--composer-toolbar-h)",
-                    borderRadius: 2,
-                    color: theme.palette.error.contrastText,
-                    bgcolor: errorMain,
-                    boxShadow: `0 2px 8px ${alpha(errorMain, 0.35)}`,
-                    transition:
-                      "background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
-                    "@media (prefers-reduced-motion: reduce)": {
-                      transition: "none",
-                    },
-                    "& .MuiSvgIcon-root": {
-                      color: theme.palette.error.contrastText,
-                    },
-                    "&:hover": {
-                      bgcolor: errorDark,
-                      boxShadow: `0 4px 14px ${alpha(errorMain, 0.45)}`,
-                      transform: "translateY(-1px)",
-                    },
-                    "&:focus-visible": {
-                      outline: `2px solid ${alpha(errorMain, 0.65)}`,
-                      outlineOffset: 2,
-                    },
-                  }}
-                >
-                  <Square fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            ) : (
-              <Tooltip title="语音输入即将推出">
-                <span>
-                  <IconButton
-                    size="small"
-                    disabled
-                    sx={{
-                      color: theme.palette.action.disabled,
-                      width: "var(--composer-toolbar-h)",
-                      height: "var(--composer-toolbar-h)",
-                      borderRadius: 2,
-                      border: `1px dashed ${edge(0.18)}`,
-                      bgcolor: alpha(paper, isDark ? 0.2 : 0.4),
-                      "& .MuiSvgIcon-root": {
-                        color: theme.palette.action.disabled,
-                      },
-                    }}
-                  >
-                    <Mic fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-            )}
-          </Stack>
-        </Stack>
-        </Paper>
-      </Box>
-
-      {/* Bottom: left = path + branch · right = worktree + remote/local */}
-      <Stack
-        direction="row"
-        alignItems="center"
-        justifyContent="space-between"
-        flexWrap="wrap"
-        rowGap={0.75}
-        columnGap={1.5}
-        sx={{
-          px: 1.25,
-          py: 0.65,
-          "--composer-footer-h": `${COMPOSER_TOOLBAR_CONTROL_PX}px`,
-          borderRadius: 2.5,
-          bgcolor: alpha(paper, isDark ? 0.35 : 0.72),
-          backdropFilter: "blur(10px)",
-          WebkitBackdropFilter: "blur(10px)",
-          border: `1px solid ${edge(0.12)}`,
-          boxShadow: `
-            0 1px 2px ${edge(0.05)},
-            0 6px 20px ${alpha(accent, 0.06)},
-            inset 0 1px 0 ${edge(0.06)}
-          `,
-          transition: "box-shadow 0.22s ease, border-color 0.22s ease",
-          "@media (prefers-reduced-motion: reduce)": {
-            transition: "none",
-          },
-        }}
-      >
-        <Stack
-          direction="row"
-          alignItems="center"
-          spacing={1}
-          flexWrap="wrap"
-          sx={{ flex: 1, minWidth: 0, justifyContent: "flex-start" }}
-        >
-          {/* 执行环境选择器 */}
-          <Button
-            size="small"
-            variant="text"
-            color="inherit"
-            onClick={(e) => setEnvAnchor(e.currentTarget)}
-            startIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: accent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                {environment === "local" ? (
-                  <Laptop size={16} strokeWidth={2} color={accent} />
-                ) : environment === "ssh" ? (
-                  <Terminal size={16} strokeWidth={2} color={accent} />
-                ) : (
-                  createElement(SANDBOX_BACKEND_ICON[sandboxBackend], {
-                    size: 16,
-                    strokeWidth: 2,
-                    color: accent,
-                  })
-                )}
-              </Box>
-            }
-            endIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: accent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <ChevronDown size={16} strokeWidth={2} color={accent} />
-              </Box>
-            }
-            sx={{
-              textTransform: "none",
-              color: accent,
-              ...composerLabelText,
-              borderRadius: 2.5,
-              px: 1,
-              py: 0,
-              minHeight: "var(--composer-footer-h)",
-              height: "var(--composer-footer-h)",
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              boxShadow: "none",
-              gap: 0.5,
-              transition:
-                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
-              "@media (prefers-reduced-motion: reduce)": {
-                transition: "none",
-              },
-              "&:hover": {
-                bgcolor: alpha(accent, 0.12),
-                borderColor: alpha(accent, 0.28),
-                boxShadow: "none",
-              },
-              "& .MuiButton-startIcon": { marginRight: 0 },
-              "& .MuiButton-endIcon": { marginLeft: 0 },
-            }}
-          >
-            <Typography
-              component="span"
-              noWrap
-              sx={{ ...composerLabelText, color: "inherit" }}
-            >
-              {environment === "local"
-                ? localVenvType !== "none" && localVenvName
-                  ? `本地·${localVenvName}`
-                  : "本地"
-                : environment === "ssh"
-                  ? sshServer
-                    ? `SSH·${sshServer}`
-                    : "SSH"
-                  : `沙箱·${SANDBOX_LABEL[sandboxBackend]}`}
-            </Typography>
-          </Button>
+          <Box sx={{ flex: 1, minWidth: 8 }} />
 
           <Button
             size="small"
             variant="text"
             color="inherit"
-            startIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: needsWorkspacePath ? warningMain : accent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <LucideFolderOpen
-                  size={18}
-                  strokeWidth={2}
-                  color={needsWorkspacePath ? warningMain : accent}
-                />
-              </Box>
-            }
             onClick={onPickWorkspace}
+            startIcon={
+              <LucideFolderOpen
+                size={15}
+                strokeWidth={2}
+                color={needsWorkspacePath ? warningMain : accent}
+              />
+            }
             sx={{
-              textTransform: "none",
+              ...composerPillSx(needsWorkspacePath ? warningMain : accent),
               color: needsWorkspacePath ? warningMain : ink,
-              ...composerLabelText,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "flex-start",
-              maxWidth: { xs: "100%", sm: 240 },
-              borderRadius: 2.5,
-              px: 1,
-              py: 0,
-              minHeight: "var(--composer-footer-h)",
-              height: "var(--composer-footer-h)",
-              "& .MuiButton-startIcon": {
-                marginRight: 1,
-                marginLeft: 0,
-                display: "inline-flex",
-                alignItems: "center",
-                alignSelf: "center",
-              },
-              bgcolor: needsWorkspacePath
-                ? alpha(warningMain, 0.1)
-                : "transparent",
-              border: needsWorkspacePath
-                ? `1px solid ${alpha(warningMain, 0.35)}`
-                : "1px solid transparent",
-              boxShadow: "none",
-              transition:
-                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
-              "@media (prefers-reduced-motion: reduce)": {
-                transition: "none",
-              },
-              "&:hover": {
-                bgcolor: needsWorkspacePath
-                  ? alpha(warningMain, 0.3)
-                  : alpha(accent, 0.3),
-                borderColor: needsWorkspacePath
-                  ? alpha(warningMain, 0.48)
-                  : alpha(accent, 0.22),
-              },
+              maxWidth: { xs: 120, sm: 180 },
+              ...(needsWorkspacePath
+                ? {
+                    bgcolor: alpha(warningMain, 0.1),
+                    borderColor: alpha(warningMain, 0.35),
+                  }
+                : {}),
             }}
           >
             <Typography
-              variant="body2"
-              noWrap
               component="span"
-              sx={{
-                ...composerLabelText,
-                color: "inherit",
-                display: "inline-flex",
-                alignItems: "center",
-                lineHeight: 1.25,
-              }}
+              noWrap
+              sx={{ ...composerLabelText, color: "inherit" }}
             >
               {pathLabel}
             </Typography>
           </Button>
 
-          {gitInfo?.isGit && !needsWorkspacePath && (
-            <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Box
-                sx={{
-                  display: "inline-flex",
-                  color: mut,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <GitBranch size={18} strokeWidth={2} />
-              </Box>
-              <FormControl size="small" sx={{ minWidth: 148 }}>
+          {gitInfo?.isGit && !needsWorkspacePath ? (
+            <Stack direction="row" alignItems="center" spacing={0.25}>
+              <GitBranch size={14} strokeWidth={2} color={mut} />
+              <FormControl size="small" sx={{ minWidth: 108, maxWidth: 160 }}>
                 <Select
                   value={branchValue || gitInfo.currentBranch}
                   displayEmpty
@@ -4189,27 +3874,25 @@ export const ChatComposer = memo(function ChatComposer({
                     height: "var(--composer-footer-h)",
                     bgcolor: "transparent",
                     color: ink,
-                    borderRadius: 2,
+                    borderRadius: 999,
                     ...composerLabelText,
+                    fontSize: 12,
                     boxShadow: "none",
-                    transition: "box-shadow 0.2s ease, border-color 0.2s ease",
-                    "& .MuiSelect-icon": { color: mut },
+                    "& .MuiSelect-icon": { color: mut, fontSize: 18 },
                     "& .MuiSelect-select": {
                       display: "flex",
                       alignItems: "center",
                       py: 0,
+                      px: 1.25,
                       minHeight: "var(--composer-footer-h)",
                       boxSizing: "border-box",
                     },
                     "& .MuiOutlinedInput-notchedOutline": {
                       borderColor: edge(0.14),
+                      borderRadius: 999,
                     },
                     "&:hover .MuiOutlinedInput-notchedOutline": {
                       borderColor: alpha(accent, 0.48),
-                    },
-                    "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
-                      borderColor: alpha(accent, 0.55),
-                      boxShadow: `0 0 0 3px ${alpha(accent, 0.15)}`,
                     },
                   }}
                 >
@@ -4221,76 +3904,90 @@ export const ChatComposer = memo(function ChatComposer({
                 </Select>
               </FormControl>
             </Stack>
-          )}
-
-          {!gitInfo?.isGit && !needsWorkspacePath && workspacePath && (
-            <Typography
-              variant="body2"
-              sx={{
-                ...composerLabelText,
-                fontWeight: 500,
-                color: mut,
-              }}
-            >
-              非 Git 仓库
-            </Typography>
-          )}
+          ) : null}
         </Stack>
-
-        <Stack
-          direction="row"
-          alignItems="center"
-          spacing={1}
-          flexWrap="wrap"
-          sx={{
-            flexShrink: 0,
-            justifyContent: "flex-end",
-            ml: { xs: 0, sm: "auto" },
-          }}
+        <Dialog
+          open={browserInstallDialogOpen}
+          onClose={closeBrowserInstallDialog}
+          maxWidth="sm"
+          fullWidth
         >
-          <FormControlLabel
-            control={
-              <Checkbox
-                size="small"
-                checked={useWorktree}
-                onChange={(_, v) => setUseWorktree(v)}
-                sx={{
-                  py: 0,
-                  color: mut,
-                  "&.Mui-checked": { color: accent },
-                  "& .MuiSvgIcon-root": { fontSize: 20 },
-                }}
-              />
-            }
-            label={
-              <Typography
-                variant="body2"
-                sx={{ ...composerLabelText, color: ink }}
-              >
-                worktree
+          <DialogTitle>需要安装 Browser Operator 后端</DialogTitle>
+          <DialogContent>
+            <Stack spacing={2} sx={{ pt: 0.5 }}>
+              <Typography variant="body2" color="text.secondary">
+                Omiga 已内置 browser_* 工具封装，但不会在你未启用浏览器控制时自动安装
+                browser-use 或下载 Playwright 浏览器。选择{" "}
+                {pendingBrowserUseMode
+                  ? BROWSER_USE_META[pendingBrowserUseMode].label
+                  : "浏览器模式"}{" "}
+                前，需要先完成一次本机 setup，而不是普通启用开关。
               </Typography>
-            }
-            sx={{
-              mr: 0,
-              px: 0.5,
-              py: 0,
-              minHeight: "var(--composer-footer-h)",
-              height: "var(--composer-footer-h)",
-              borderRadius: 2,
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              transition: "background-color 0.2s ease, border-color 0.2s ease",
-              "& .MuiFormControlLabel-label": {
-                ...composerLabelText,
-                color: ink,
-              },
-              "&:hover": {
-                bgcolor: alpha(accent, 0.3),
-                borderColor: alpha(accent, 0.24),
-              },
-            }}
-          />
-
+              <Alert severity="warning" sx={{ borderRadius: 2 }}>
+                点击下方按钮即表示你显式确认执行安装：会写入用户目录，且“安装并下载浏览器”可能联网下载
+                browser-use / Playwright browsers。
+              </Alert>
+              <Alert severity="info" sx={{ borderRadius: 2 }}>
+                后端会安装到用户目录，不会写入项目依赖。默认位置：
+                {browserBackendStatus?.managedHome ||
+                  "~/.omiga/browser-operator"}
+              </Alert>
+              <Typography variant="caption" color="text.secondary">
+                “只安装后端”会跳过 Playwright 浏览器下载，适合已配置
+                Chrome/CDP 的场景；“安装并下载浏览器”适合首次完整启用。
+              </Typography>
+              {browserBackendStatus?.configuredPython ? (
+                <Typography variant="caption" color="text.secondary">
+                  已配置外部 Python：{browserBackendStatus.configuredPython}
+                </Typography>
+              ) : null}
+              {browserBackendStatus?.playwrightBrowsersPath ? (
+                <Typography variant="caption" color="text.secondary">
+                  Playwright 浏览器缓存：
+                  {browserBackendStatus.playwrightBrowsersPath}
+                </Typography>
+              ) : null}
+              {browserInstallError ? (
+                <Alert severity="error" sx={{ borderRadius: 2 }}>
+                  {browserInstallError}
+                </Alert>
+              ) : null}
+            </Stack>
+          </DialogContent>
+          <DialogActions sx={{ px: 3, pb: 2, gap: 1, flexWrap: "wrap" }}>
+            <Button
+              onClick={closeBrowserInstallDialog}
+              disabled={browserInstallBusy}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={() =>
+                void handleBrowserBackendInstall("packages-only")
+              }
+              disabled={browserInstallBusy || browserInstallBlocked}
+              startIcon={
+                browserInstallIntent === "packages-only" ? (
+                  <CircularProgress size={16} />
+                ) : undefined
+              }
+            >
+              只安装后端
+            </Button>
+            <Button
+              variant="contained"
+              onClick={() => void handleBrowserBackendInstall("full")}
+              disabled={browserInstallBusy || browserInstallBlocked}
+              startIcon={
+                browserInstallIntent === "full" ? (
+                  <CircularProgress size={16} color="inherit" />
+                ) : undefined
+              }
+            >
+              安装并下载浏览器
+            </Button>
+          </DialogActions>
+        </Dialog>
           <Menu
             anchorEl={envAnchor}
             open={Boolean(envAnchor)}
@@ -4769,8 +4466,9 @@ export const ChatComposer = memo(function ChatComposer({
               </>
             )}
           </Menu>
-        </Stack>
-      </Stack>
+
+        </Paper>
+      </Box>
     </Stack>
   );
 });

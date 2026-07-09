@@ -1,9 +1,11 @@
 import { memo } from "react";
-import { Chip, Stack, Typography } from "@mui/material";
+import { Box, Chip, Stack, Typography } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import { CheckCircle, ExpandMore } from "@mui/icons-material";
+import { Brain } from "lucide-react";
 import type { getChatTokens } from "./chatTokens";
 import { formatToolDisplayName } from "../../utils/executionSurfaceLabel";
+import { AgentWorkingIndicator } from "./AgentWorkingIndicator";
 
 export type ToolCallStatus = "pending" | "running" | "completed" | "error";
 
@@ -247,6 +249,7 @@ export interface ToolFoldHeaderProps {
   isLastFold: boolean;
   activityIsStreaming: boolean;
   waitingFirstChunk: boolean;
+  processingStartedAt?: number | null;
   chat: ChatTokens;
   onToggle: (foldId: string) => void;
 }
@@ -262,86 +265,111 @@ export const ToolFoldHeader = memo(function ToolFoldHeader({
   isLastFold,
   activityIsStreaming,
   waitingFirstChunk,
+  processingStartedAt = null,
   chat,
   onToggle,
 }: ToolFoldHeaderProps) {
-  const runningSuffix = anyRunning
+  const statusTone = anyRunning
+    ? chat.accent
+    : showGroupDone
+      ? chat.doneGreen
+      : chat.toolIcon;
+  const workingLabel = anyRunning
     ? runningToolCount > 1
-      ? ` · ${runningToolCount} 并行`
+      ? `${runningToolCount} 个工具并行运行`
       : runningToolName
-        ? ` · ${formatToolDisplayName(runningToolName)}`
-        : ""
-    : "";
-  const streamingSuffix =
-    !anyRunning && isLastFold && activityIsStreaming
-      ? ` · ${waitingFirstChunk ? "推理中" : "解析输出"}`
-      : "";
-  const runningLabel = runningToolCount > 1
-    ? `${runningToolCount} 并行运行中`
-    : runningToolName
-      ? formatToolDisplayName(runningToolName)
-      : "运行中";
+        ? formatToolDisplayName(runningToolName)
+        : "运行中"
+    : waitingFirstChunk
+      ? "推理中"
+      : "解析输出";
 
   return (
-    <Stack
-      direction="row"
-      alignItems="center"
-      spacing={1}
+    <Box
       onClick={() => onToggle(foldId)}
       sx={{
+        position: "relative",
         cursor: "pointer",
         userSelect: "none",
         minWidth: 0,
-        borderRadius: "8px",
-        mx: -0.75,
-        px: 0.75,
+        borderRadius: expanded ? "12px" : "10px",
+        px: expanded ? 0.75 : 0.5,
         py: 0.5,
         transition: "background-color 150ms ease",
         "&:hover": {
-          bgcolor: alpha(chat.accent, 0.07),
+          bgcolor: alpha(chat.accent, 0.06),
         },
       }}
     >
-      <ExpandMore
-        sx={{
-          fontSize: 14,
-          color: chat.toolIcon,
-          opacity: 0.65,
-          transform: expanded ? "rotate(0deg)" : "rotate(-90deg)",
-          transition: "transform 0.2s ease",
-        }}
-      />
-      <Typography
-        sx={{
-          fontSize: 12,
-          color: chat.textMuted,
-          flex: 1,
-          minWidth: 0,
-          overflowWrap: "anywhere",
-          wordBreak: "break-word",
-        }}
-      >
-        {summary}
-        {runningSuffix}
-        {streamingSuffix}
-      </Typography>
-      {anyRunning && (
-        <Chip
-          size="small"
-          label={runningLabel}
-          sx={{ height: 22, fontSize: 11 }}
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
+        <Box
+          aria-hidden
+          sx={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            flexShrink: 0,
+            bgcolor: statusTone,
+            boxShadow: anyRunning
+              ? `0 0 0 3px ${alpha(statusTone, 0.18)}`
+              : "none",
+          }}
         />
-      )}
-      {showGroupDone && (
-        <Chip
-          size="small"
-          icon={<CheckCircle fontSize="small" />}
-          label="Done"
-          color="primary"
-          variant="outlined"
-          sx={{ height: 22, fontSize: 11 }}
+        <Brain size={14} strokeWidth={2} color={chat.toolIcon} style={{ flexShrink: 0 }} />
+        <Typography
+          sx={{
+            fontSize: 12,
+            fontWeight: 600,
+            color: chat.textMuted,
+            flex: 1,
+            minWidth: 0,
+            overflowWrap: "anywhere",
+            wordBreak: "break-word",
+          }}
+        >
+          {summary}
+        </Typography>
+        {isLastFold && activityIsStreaming && !anyRunning ? (
+          <AgentWorkingIndicator
+            active
+            startedAt={processingStartedAt}
+            label={workingLabel}
+          />
+        ) : null}
+        {anyRunning ? (
+          <Chip
+            size="small"
+            label={
+              runningToolCount > 1
+                ? `${runningToolCount} 并行`
+                : runningToolName
+                  ? formatToolDisplayName(runningToolName)
+                  : "运行中"
+            }
+            sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
+          />
+        ) : null}
+        {showGroupDone && !activityIsStreaming ? (
+          <Chip
+            size="small"
+            icon={<CheckCircle fontSize="small" />}
+            label="完成"
+            color="primary"
+            variant="outlined"
+            sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
+          />
+        ) : null}
+        <ExpandMore
+          sx={{
+            fontSize: 16,
+            color: chat.toolIcon,
+            opacity: 0.7,
+            flexShrink: 0,
+            transform: expanded ? "rotate(0deg)" : "rotate(-90deg)",
+            transition: "transform 0.2s ease",
+          }}
         />
-      )}
-    </Stack>
+      </Stack>
+    </Box>
   );
 });

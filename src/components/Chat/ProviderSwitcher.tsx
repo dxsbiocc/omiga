@@ -18,6 +18,7 @@ import {
   useTheme,
 } from "@mui/material";
 import { Settings } from "@mui/icons-material";
+import { ChevronDown } from "lucide-react";
 import { NotificationToast } from "../NotificationToast";
 
 interface ProviderConfigEntry {
@@ -38,6 +39,8 @@ interface ProviderSwitcherProps {
   onOpenSettings?: () => void;
   /** Merged into the trigger button for layout/theming (e.g. composer toolbar). */
   triggerSx?: SxProps<Theme>;
+  /** Optional icon shown before the model label. */
+  startIcon?: React.ReactNode;
 }
 
 const CUSTOM_MODEL_MENU_LABEL = "+ 配置自定义模型";
@@ -52,6 +55,7 @@ const estimateLabelWidthCh = (value: string) =>
 export function ProviderSwitcher({
   onOpenSettings,
   triggerSx,
+  startIcon,
 }: ProviderSwitcherProps) {
   const currentSessionId = useSessionStore((s) => s.currentSession?.id);
   const theme = useTheme();
@@ -195,6 +199,8 @@ export function ProviderSwitcher({
           size="small"
           variant="outlined"
           onClick={handleClick}
+          startIcon={startIcon}
+          endIcon={<ChevronDown size={14} strokeWidth={2} />}
           sx={[
             {
               borderRadius: 2,

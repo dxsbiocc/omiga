@@ -26,7 +26,6 @@ import {
 import { alpha } from "@mui/material/styles";
 import {
   SmartToy,
-  CheckCircle,
   ExpandMore,
   FolderOpen,
   Send as SendIcon,
@@ -79,6 +78,7 @@ import {
 } from "./ToolFoldSummary";
 import { toolTracePrefaceFromText } from "./toolTracePreface";
 import { UserMessageBubble } from "./UserMessageBubble";
+import { TurnCompleteIndicator } from "./TurnCompleteIndicator";
 import type { AskUserQuestionItem } from "./AskUserQuestionWizard";
 import { getChatTokens } from "./chatTokens";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
@@ -1427,6 +1427,7 @@ interface ReactFoldRenderItemProps {
   liveIntermediateText: string;
   activityIsStreaming: boolean;
   waitingFirstChunk: boolean;
+  processingStartedAt?: number | null;
   pendingAskUserToolUseId: string | null;
   nestedToolPanelOpenForFold: Readonly<Record<string, boolean>>;
   chat: ChatTokens;
@@ -1446,6 +1447,7 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
   liveIntermediateText,
   activityIsStreaming,
   waitingFirstChunk,
+  processingStartedAt = null,
   pendingAskUserToolUseId,
   nestedToolPanelOpenForFold,
   chat,
@@ -1477,15 +1479,16 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
           minWidth: 0,
           maxWidth: "100%",
           borderRadius: `${BUBBLE_RADIUS_PX}px`,
-          bgcolor: chat.agentBubbleBg,
-          border: `1px solid ${chat.agentBubbleBorder}`,
-          px: 1.75,
-          py: 1.25,
+          bgcolor: expanded ? chat.agentBubbleBg : alpha(chat.agentBubbleBg, 0.55),
+          border: `1px solid ${expanded ? chat.agentBubbleBorder : alpha(chat.agentBubbleBorder, 0.65)}`,
+          px: expanded ? 1.5 : 1.1,
+          py: expanded ? 1.1 : 0.65,
           fontFamily: chat.font,
           overflow: "visible",
-          transition: "border-color 200ms ease",
+          transition: "border-color 200ms ease, background-color 200ms ease, padding 200ms ease",
           "&:hover": {
             borderColor: alpha(chat.accent, 0.28),
+            bgcolor: expanded ? chat.agentBubbleBg : alpha(chat.accent, 0.04),
           },
         }}
       >
@@ -1500,6 +1503,7 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
           isLastFold={isLastFold}
           activityIsStreaming={activityIsStreaming}
           waitingFirstChunk={waitingFirstChunk}
+          processingStartedAt={processingStartedAt}
           chat={chat}
           onToggle={onToggleGroup}
         />
@@ -1507,13 +1511,13 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
         <Collapse in={expanded}>
           <Box
             sx={{
-              mt: 1.25,
-              pl: 1.75,
-              ml: 0.5,
-              borderLeft: `2px solid ${chat.agentBubbleBorder}`,
+              mt: 1,
+              pl: 1.5,
+              ml: 0.25,
+              borderLeft: `2px solid ${alpha(chat.agentBubbleBorder, 0.9)}`,
               display: "flex",
               flexDirection: "column",
-              gap: 1.25,
+              gap: 1,
             }}
           >
             {fold.map((message, foldIndex) => {
@@ -1577,21 +1581,6 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
                 chat={chat}
                 components={components}
               />
-            )}
-
-            {showGroupDone && (
-              <Stack direction="row" alignItems="center" spacing={1} sx={{ pt: 0.25 }}>
-                <CheckCircle sx={{ fontSize: 14, color: chat.doneGreen }} />
-                <Typography
-                  sx={{
-                    fontSize: 12,
-                    fontWeight: 600,
-                    color: chat.toolIcon,
-                  }}
-                >
-                  Done
-                </Typography>
-              </Stack>
             )}
           </Box>
         </Collapse>
@@ -1672,14 +1661,40 @@ const MessageRowRenderItem = memo(function MessageRowRenderItem({
       }}
     >
       {dividerBefore && (
-        <Divider
+        <Box
           sx={{
-            borderColor: chat.agentBubbleBorder,
-            "&::before, &::after": {
-              borderColor: chat.agentBubbleBorder,
-            },
+            display: "flex",
+            alignItems: "center",
+            gap: 1.25,
+            width: "100%",
+            py: 0.25,
           }}
-        />
+        >
+          <Divider
+            sx={{
+              flex: 1,
+              borderColor: chat.agentBubbleBorder,
+            }}
+          />
+          <Typography
+            variant="caption"
+            sx={{
+              flexShrink: 0,
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: "0.04em",
+              color: "text.secondary",
+            }}
+          >
+            回复
+          </Typography>
+          <Divider
+            sx={{
+              flex: 1,
+              borderColor: chat.agentBubbleBorder,
+            }}
+          />
+        </Box>
       )}
       <Box
         sx={{
@@ -2442,9 +2457,13 @@ export function Chat({ sessionId }: ChatProps) {
   /** Per-tool nested panels inside a fold: fold id → message id → open. Unset → default (open while running). */
   const [nestedToolPanelOpenByFold, setNestedToolPanelOpenByFold] =
     useState<NestedToolPanelOpenByFold>({});
+  const [lastCompletedTurn, setLastCompletedTurn] = useState<{
+    durationMs: number;
+  } | null>(null);
   const isConnecting = useActivityStore((s) => s.isConnecting);
   const activityIsStreaming = useActivityStore((s) => s.isStreaming);
   const waitingFirstChunk = useActivityStore((s) => s.waitingFirstChunk);
+  const executionStartedAt = useActivityStore((s) => s.executionStartedAt);
   /** First text chunk of each “segment” (after Start or after tool_result). */
   const segmentStartRef = useRef(true);
 
@@ -3826,6 +3845,22 @@ export function Chat({ sessionId }: ChatProps) {
     });
   }, []);
 
+  const collapseCompletedFold = useCallback((foldId: string | null) => {
+    if (!foldId) return;
+    setExpandedToolGroups((prev) => {
+      if (!prev.has(foldId)) return prev;
+      const next = new Set(prev);
+      next.delete(foldId);
+      return next;
+    });
+    setNestedToolPanelOpenByFold((prev) => {
+      if (!(foldId in prev)) return prev;
+      const next = { ...prev };
+      delete next[foldId];
+      return next;
+    });
+  }, []);
+
   const toggleNestedToolPanel = useCallback((
     foldId: string,
     messageId: string,
@@ -5115,6 +5150,13 @@ export function Chat({ sessionId }: ChatProps) {
         retrySendInFlightRef.current = false;
         act.finalizeExecutionRun();
         act.clearTransient();
+        const completedFoldId = activeReactFoldIdRef.current;
+        const activitySnapshot = useActivityStore.getState();
+        const durationMs =
+          activitySnapshot.executionStartedAt != null
+            ? (activitySnapshot.executionEndedAt ?? Date.now()) -
+              activitySnapshot.executionStartedAt
+            : 0;
         const roundId = currentRoundIdRef.current;
         if (roundId) {
           updateRoundStatus(roundId, "completed");
@@ -5131,7 +5173,7 @@ export function Chat({ sessionId }: ChatProps) {
         pendingTokenUsageRef.current = null;
         setMessages((prev) => {
           let next = settleRunningToolCalls(prev);
-          if (finalFoldIntermediate && activeReactFoldIdRef.current) {
+          if (finalFoldIntermediate && completedFoldId) {
             next = [
               ...next,
               {
@@ -5178,6 +5220,10 @@ export function Chat({ sessionId }: ChatProps) {
         pendingFoldIntermediateBufferRef.current = "";
         pendingToolTraceTextRef.current = "";
         clearRunningToolTracking();
+        collapseCompletedFold(completedFoldId);
+        if (finalResponse || completedFoldId) {
+          setLastCompletedTurn({ durationMs: Math.max(0, durationMs) });
+        }
         activeReactFoldIdRef.current = null;
 
         if (ownerSessionId) {
@@ -5584,6 +5630,8 @@ export function Chat({ sessionId }: ChatProps) {
           currentFoldIntermediateRef.current = "";
           pendingToolTraceTextRef.current = "";
           clearRunningToolTracking();
+          collapseCompletedFold(activeReactFoldIdRef.current);
+          setLastCompletedTurn(null);
           activeReactFoldIdRef.current = null;
           if (ownerSessionId) clearStreamSnapshot(ownerSessionId);
           if (isDev) {
@@ -5780,6 +5828,7 @@ export function Chat({ sessionId }: ChatProps) {
     }
     sendCancelledDuringRequestRef.current = false;
     setAwaitingResumeAfterCancel(false);
+    setLastCompletedTurn(null);
 
     const flushPayload = mainQueueFlushPayloadRef.current;
     if (flushPayload) {
@@ -7504,6 +7553,7 @@ export function Chat({ sessionId }: ChatProps) {
                       }
                       activityIsStreaming={activityIsStreaming}
                       waitingFirstChunk={waitingFirstChunk}
+                      processingStartedAt={executionStartedAt}
                       pendingAskUserToolUseId={pendingAskUser?.toolUseId ?? null}
                       nestedToolPanelOpenForFold={getNestedToolPanelOpenForFold(
                         nestedToolPanelOpenByFold,
@@ -7541,6 +7591,13 @@ export function Chat({ sessionId }: ChatProps) {
                 </Box>
               );
             })}
+
+            {lastCompletedTurn &&
+            !isStreaming &&
+            !activityIsStreaming &&
+            !isConnecting ? (
+              <TurnCompleteIndicator durationMs={lastCompletedTurn.durationMs} />
+            ) : null}
 
             {isConnecting && pendingAssistantHint && (
               <Box
@@ -8387,6 +8444,7 @@ export function Chat({ sessionId }: ChatProps) {
                 isConnecting={isConnecting}
                 waitingFirstChunk={waitingFirstChunk}
                 onCancel={handleCancelStream}
+                onSend={() => void handleSend()}
                 backgroundTasks={backgroundTasks}
                 followUpTaskId={followUpTaskId}
                 onFollowUpTaskIdChange={setFollowUpTaskId}
