@@ -391,7 +391,7 @@ fn probe_conda_manager(ctx: &ToolContext, canonical_id: &str) -> EnvironmentAvai
             manager: None,
             executable_path: None,
             error: Some(error),
-            message: "No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment.".to_string(),
+            message: "No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment. Operator execution will bootstrap micromamba from official releases to $HOME/.omiga/bin/micromamba when needed.".to_string(),
             install_hint: Some(runtime_install_hint("conda")),
             checked_at_ms: current_epoch_ms(),
             scope: "local".to_string(),
@@ -523,7 +523,7 @@ fn run_local_probe(ctx: &ToolContext, script: &str) -> Result<(String, String), 
 fn runtime_install_hint(runtime_type: &str) -> String {
     match runtime_type {
         "conda" | "mamba" | "micromamba" => {
-            "Install the official micromamba binary at $HOME/.omiga/bin/micromamba, or set OMIGA_MICROMAMBA=/absolute/path/to/micromamba; mamba or conda on PATH also work."
+            "Operator execution will auto-install micromamba to $HOME/.omiga/bin/micromamba when missing. For manual setup, install the official micromamba binary there, or set OMIGA_MICROMAMBA=/absolute/path/to/micromamba. Set OMIGA_DISABLE_MICROMAMBA_BOOTSTRAP=1 to disable auto-install."
                 .to_string()
         }
         "docker" => {
@@ -740,6 +740,14 @@ mod tests {
             first_line,
             format!("micromamba\t{}", fake_micromamba.display())
         );
+    }
+
+    #[test]
+    fn runtime_install_hint_for_conda_mentions_auto_bootstrap_and_disable_switch() {
+        let hint = runtime_install_hint("conda");
+        assert!(hint.contains("auto-install"));
+        assert!(hint.contains("$HOME/.omiga/bin/micromamba"));
+        assert!(hint.contains("OMIGA_DISABLE_MICROMAMBA_BOOTSTRAP"));
     }
 
     #[test]

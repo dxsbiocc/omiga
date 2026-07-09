@@ -7454,6 +7454,88 @@ fn operator_conda_env_prefix(
     crate::domain::tools::env_store::remote_path(ctx, &rel)
 }
 
+pub(crate) const MICROMAMBA_BOOTSTRAP_SHELL: &str = r#"omiga_bootstrap_micromamba() {
+  if [ "${OMIGA_DISABLE_MICROMAMBA_BOOTSTRAP:-}" = "1" ]; then
+    printf 'micromamba bootstrap is disabled by OMIGA_DISABLE_MICROMAMBA_BOOTSTRAP=1\n' >&2
+    return 1
+  fi
+  os=$(uname -s 2>/dev/null || true)
+  arch=$(uname -m 2>/dev/null || true)
+  case "${os}:${arch}" in
+    Linux:x86_64) platform=linux-64 ;;
+    Linux:arm64) platform=linux-aarch64 ;;
+    Linux:aarch64) platform=linux-aarch64 ;;
+    Darwin:x86_64) platform=osx-64 ;;
+    Darwin:arm64) platform=osx-arm64 ;;
+    *)
+      printf 'unsupported platform for micromamba bootstrap: %s:%s\n' "$os" "$arch" >&2
+      return 1
+      ;;
+  esac
+
+  micromamba_url="${OMIGA_MICROMAMBA_URL:-https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-${platform}}"
+  target_dir="$HOME/.omiga/bin"
+  target_bin="$target_dir/micromamba"
+  tmp_bin="$target_dir/.micromamba.tmp-$$"
+
+  mkdir -p "$target_dir"
+  rm -f "$tmp_bin"
+  if command -v curl >/dev/null 2>&1; then
+    if ! curl -fsSL --max-time 300 "$micromamba_url" -o "$tmp_bin" >/dev/null 2>&1; then
+      printf 'micromamba bootstrap download failed with curl\n' >&2
+      rm -f "$tmp_bin"
+      return 1
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if ! wget -T 300 -t 2 -qO- "$micromamba_url" > "$tmp_bin" 2>/dev/null; then
+      printf 'micromamba bootstrap download failed with wget\n' >&2
+      rm -f "$tmp_bin"
+      return 1
+    fi
+  else
+    printf 'no supported downloader for micromamba bootstrap\n' >&2
+    return 1
+  fi
+  if [ -n "$OMIGA_MICROMAMBA_SHA256" ]; then
+    if command -v shasum >/dev/null 2>&1; then
+      checksum="$(shasum -a 256 "$tmp_bin" | awk '{print $1}')"
+    elif command -v sha256sum >/dev/null 2>&1; then
+      checksum="$(sha256sum "$tmp_bin" | awk '{print $1}')"
+    else
+      printf 'micromamba bootstrap checksum unavailable: neither shasum nor sha256sum\n' >&2
+      rm -f "$tmp_bin"
+      return 1
+    fi
+    checksum_expected="$(printf '%s' "$OMIGA_MICROMAMBA_SHA256" | tr '[:upper:]' '[:lower:]')"
+    checksum_actual="$(printf '%s' "$checksum" | tr '[:upper:]' '[:lower:]')"
+    if [ "$checksum_actual" != "$checksum_expected" ]; then
+      printf 'micromamba bootstrap checksum mismatch for downloaded binary\n' >&2
+      rm -f "$tmp_bin"
+      return 1
+    fi
+  fi
+
+  if ! chmod +x "$tmp_bin" >/dev/null 2>&1; then
+    printf 'micromamba bootstrap binary is not executable\n' >&2
+    rm -f "$tmp_bin"
+    return 1
+  fi
+  if ! "$tmp_bin" --version >/dev/null 2>&1; then
+    printf 'micromamba bootstrap self-check failed\n' >&2
+    rm -f "$tmp_bin"
+    return 1
+  fi
+  if ! mv "$tmp_bin" "$target_bin"; then
+    printf 'micromamba bootstrap installation failed\n' >&2
+    rm -f "$tmp_bin"
+    return 1
+  fi
+  OMIGA_CONDA_MANAGER_KIND=micromamba
+  OMIGA_CONDA_BIN=$target_bin
+  return 0
+}
+"#;
+
 fn conda_environment_shell_script(
     selection: &OperatorCondaEnvironmentSelection,
     run_dir: &str,
@@ -7462,7 +7544,8 @@ fn conda_environment_shell_script(
     let env_yaml = format!("{run_dir}/env/conda-environment.yaml");
     let exports = shell_export_lines(&selection.env_vars);
     format!(
-        r#"set -e
+        r#"{bootstrap}
+set -e
 OMIGA_CONDA_PREFIX={env_prefix}
 OMIGA_CONDA_YAML={env_yaml}
 OMIGA_CONDA_HASH={env_hash}
@@ -7496,13 +7579,16 @@ omiga_find_conda_manager() {{
 }}
 omiga_missing_conda_manager() {{
   cat >&2 <<'OMIGA_CONDA_HINT'
-No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment.
-Recommended: install the official micromamba binary at $HOME/.omiga/bin/micromamba, or set OMIGA_MICROMAMBA=/absolute/path/to/micromamba.
+Automatic micromamba installation failed (reason above).
+Install the official micromamba binary at $HOME/.omiga/bin/micromamba, set OMIGA_MICROMAMBA=/absolute/path/to/micromamba, or set OMIGA_DISABLE_MICROMAMBA_BOOTSTRAP=1 to disable bootstrap.
 Then rerun the Operator; Omiga will create and reuse the isolated env from conda.yaml/conda.yml under .omiga/operator-envs/conda.
 OMIGA_CONDA_HINT
   exit 127
 }}
 omiga_find_conda_manager || true
+if [ -z "$OMIGA_CONDA_BIN" ]; then
+  omiga_bootstrap_micromamba || true
+fi
 if [ ! -f "$OMIGA_CONDA_PREFIX/.omiga-env-hash" ] || [ "$(cat "$OMIGA_CONDA_PREFIX/.omiga-env-hash" 2>/dev/null || true)" != "$OMIGA_CONDA_HASH" ]; then
   if [ -z "$OMIGA_CONDA_BIN" ]; then
     omiga_missing_conda_manager
@@ -7542,6 +7628,7 @@ esac"#,
         env_yaml_b64 = sh_quote(&selection.env_yaml_b64),
         exports = exports,
         inner = sh_quote(inner_command),
+        bootstrap = MICROMAMBA_BOOTSTRAP_SHELL,
     )
 }
 
@@ -12203,12 +12290,157 @@ diagnostics:
 
         assert!(command.contains("$HOME/.omiga/bin/micromamba"));
         assert!(command.contains("OMIGA_MICROMAMBA"));
-        assert!(command.contains("active PATH/base environment/virtual environment"));
+        assert!(command.contains("Automatic micromamba installation failed"));
         assert!(command.contains("env create -y -p"));
         assert!(command.contains("run -p"));
         assert!(command.contains(".omiga/operator-envs/conda"));
         assert!(command.contains("demoalign"));
         assert!(command.contains("ref.fa"));
+        assert!(command.contains("omiga_bootstrap_micromamba"));
+        assert!(command.contains("OMIGA_DISABLE_MICROMAMBA_BOOTSTRAP"));
+        assert!(command.contains(".micromamba.tmp-$$"));
+        assert!(command.contains("if [ -z \"$OMIGA_CONDA_BIN\" ]; then"));
+        assert!(command.contains("omiga_bootstrap_micromamba || true"));
+        assert!(command.contains("omiga_missing_conda_manager"));
+        let find_pos = command
+            .find("omiga_find_conda_manager || true")
+            .expect("find manager check");
+        let bootstrap_pos = find_pos
+            + command[find_pos..]
+                .find("omiga_bootstrap_micromamba || true")
+                .expect("bootstrap call exists");
+        let missing_pos = bootstrap_pos
+            + command[bootstrap_pos..]
+                .find("omiga_missing_conda_manager")
+                .expect("missing fallback exists");
+        assert!(find_pos < bootstrap_pos);
+        assert!(bootstrap_pos < missing_pos);
+    }
+
+    fn fake_tool_dir(base: &Path, commands: &[(&str, &str)]) -> PathBuf {
+        let bin = base.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for (name, script) in commands {
+            let path = bin.join(name);
+            fs::write(&path, script).unwrap();
+            let output = std::process::Command::new("chmod")
+                .arg("+x")
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        bin
+    }
+
+    #[test]
+    fn conda_bootstrap_shell_script_downloads_fake_micromamba() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let bin = fake_tool_dir(
+            tmp.path(),
+            &[
+                (
+                    "curl",
+                    "#!/bin/sh\n\nout=\n\nwhile [ \"$1\" != \"\" ]; do\n  if [ \"$1\" = \"-o\" ]; then\n    out=\"$2\"\n  fi\n  shift\ndone\n[ -n \"$out\" ] || exit 1\nprintf '%s\\n' '#!/bin/sh' > \"$out\"\nprintf '%s\\n' 'echo 1.0.0' >> \"$out\"\nchmod +x \"$out\"\n",                
+                ),
+            ],
+        );
+        let script = format!(
+            "{}\nif omiga_bootstrap_micromamba; then :; else exit 1; fi",
+            MICROMAMBA_BOOTSTRAP_SHELL
+        );
+
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(&tmp.path())
+            .env("HOME", &home)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env(
+                "OMIGA_MICROMAMBA_URL",
+                "https://example.invalid/micromamba-linux-64",
+            )
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{:?}", output);
+        let target = home.join(".omiga/bin/micromamba");
+        assert!(target.is_file(), "missing target: {}", target.display());
+        #[cfg(unix)]
+        {
+            let metadata = fs::metadata(&target).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            assert!(metadata.permissions().mode() & 0o111 != 0);
+        }
+        let script_text = fs::read_to_string(&target).unwrap();
+        assert!(script_text.contains("#!/bin/sh"));
+        assert!(script_text.contains("echo 1.0.0"));
+    }
+
+    #[test]
+    fn conda_bootstrap_shell_script_disables_with_env_switch() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let bin = fake_tool_dir(
+            tmp.path(),
+            &[("uname", "#!/bin/sh\nprintf 'Linux'\nprintf 'x86_64'\n")],
+        );
+        let script = format!(
+            "{}\nif omiga_bootstrap_micromamba; then :; else exit 1; fi",
+            MICROMAMBA_BOOTSTRAP_SHELL
+        );
+
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", &home)
+            .env("PATH", format!("{}", bin.display()))
+            .env("OMIGA_DISABLE_MICROMAMBA_BOOTSTRAP", "1")
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(1));
+        assert!(!home.join(".omiga/bin/micromamba").is_file());
+    }
+
+    #[test]
+    fn conda_bootstrap_shell_script_fails_without_downloaders() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let bin = fake_tool_dir(
+            tmp.path(),
+            &[
+                (
+                    "uname",
+                    "#!/bin/sh\ncase \"$1\" in -s) echo Linux ;; -m) echo x86_64 ;; esac",
+                ),
+                ("mkdir", "#!/bin/sh\n/bin/mkdir -p \"$@\"\n"),
+                ("rm", "#!/bin/sh\n/bin/rm -f \"$@\"\n"),
+            ],
+        );
+        let script = format!(
+            "{}\nif omiga_bootstrap_micromamba; then :; else exit 1; fi",
+            MICROMAMBA_BOOTSTRAP_SHELL
+        );
+
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(&tmp.path())
+            .env("HOME", &home)
+            .env("PATH", bin.display().to_string())
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("no supported downloader"));
+        assert!(!home.join(".omiga/bin/micromamba").is_file());
     }
 
     #[test]

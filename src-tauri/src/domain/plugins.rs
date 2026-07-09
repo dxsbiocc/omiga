@@ -12,7 +12,7 @@ use crate::domain::environments::{
     EnvironmentDiagnostics, EnvironmentRequirements, EnvironmentRuntimeProfile,
 };
 use crate::domain::mcp::config::{servers_from_mcp_json, McpServerConfig};
-use crate::domain::operators::OperatorCandidateSummary;
+use crate::domain::operators::{OperatorCandidateSummary, MICROMAMBA_BOOTSTRAP_SHELL};
 use crate::domain::plugin_runtime::retrieval::lifecycle::{
     PluginLifecycleKey, PluginLifecycleRouteStatus, PluginLifecycleState,
 };
@@ -3470,7 +3470,8 @@ fn conda_environment_check_shell_script(
 ) -> String {
     let exports = shell_export_lines(env_vars);
     format!(
-        r#"set -e
+        r#"{bootstrap}
+set -e
 OMIGA_CONDA_PREFIX={env_prefix}
 OMIGA_CONDA_YAML={env_yaml}
 OMIGA_CONDA_HASH={env_hash}
@@ -3501,13 +3502,18 @@ omiga_find_conda_manager() {{
   fi
   return 1
 }}
-omiga_find_conda_manager || {{
+omiga_find_conda_manager || true
+if [ -z "$OMIGA_CONDA_BIN" ]; then
+  omiga_bootstrap_micromamba || true
+fi
+if [ -z "$OMIGA_CONDA_BIN" ]; then
   cat >&2 <<'OMIGA_CONDA_HINT'
 No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment.
-Recommended: install the official micromamba binary at $HOME/.omiga/bin/micromamba, or set OMIGA_MICROMAMBA=/absolute/path/to/micromamba.
+Automatic micromamba installation failed (reason above).
+Install the official micromamba binary at $HOME/.omiga/bin/micromamba, set OMIGA_MICROMAMBA=/absolute/path/to/micromamba, or set OMIGA_DISABLE_MICROMAMBA_BOOTSTRAP=1 to disable bootstrap.
 OMIGA_CONDA_HINT
   exit 127
-}}
+fi
 if [ ! -f "$OMIGA_CONDA_PREFIX/.omiga-env-hash" ] || [ "$(cat "$OMIGA_CONDA_PREFIX/.omiga-env-hash" 2>/dev/null || true)" != "$OMIGA_CONDA_HASH" ]; then
   rm -rf "$OMIGA_CONDA_PREFIX"
   case "$OMIGA_CONDA_MANAGER_KIND" in
@@ -3531,6 +3537,7 @@ fi
         env_hash = sh_quote(env_hash),
         exports = exports,
         inner = sh_quote(inner_command),
+        bootstrap = MICROMAMBA_BOOTSTRAP_SHELL,
     )
 }
 
