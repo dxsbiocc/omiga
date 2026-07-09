@@ -447,7 +447,10 @@ async fn ssh_write_file_bytes_impl(
     args.push(target);
     // `cat` is a standard utility; a non-login shell avoids the per-call login
     // profile cost (see ssh_run_remote).
-    args.push(format!("bash -c {}", sh_quote(&format!("cat > {}", file_q))));
+    args.push(format!(
+        "bash -c {}",
+        sh_quote(&format!("cat > {}", file_q))
+    ));
 
     let fut = async {
         let mut child = Command::new("ssh")
