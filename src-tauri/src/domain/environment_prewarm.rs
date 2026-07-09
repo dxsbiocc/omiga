@@ -368,13 +368,13 @@ fn update_prewarm_record(
     prewarmed_at_ms: Option<u64>,
     error: Option<String>,
 ) -> Result<(), String> {
-    let mut record =
-        environment_availability::cached_record_at_path(cache_path, &task.canonical_id)
-            .unwrap_or_else(|| placeholder_record(task));
-    record.prewarm_status = Some(status.to_string());
-    record.prewarmed_at_ms = prewarmed_at_ms;
-    record.prewarm_error = error;
-    environment_availability::store_records_at_path(cache_path, std::slice::from_ref(&record))
+    environment_availability::mutate_record_at_path(cache_path, &task.canonical_id, |record| {
+        let mut record = record.unwrap_or_else(|| placeholder_record(task));
+        record.prewarm_status = Some(status.to_string());
+        record.prewarmed_at_ms = prewarmed_at_ms;
+        record.prewarm_error = error;
+        record
+    })
 }
 
 fn placeholder_record(task: &PrewarmTask) -> EnvironmentAvailabilityRecord {
@@ -779,6 +779,70 @@ mod tests {
             c.prewarm_error.as_deref().expect("missing skip reason"),
             "prewarm skipped because same dedupe key was already processed in this process"
         );
+    }
+
+    #[test]
+    fn run_prewarm_update_uses_latest_cached_snapshot() {
+        let tmp = tempdir().expect("temp dir");
+        let cache = tmp.path().join("availability.json");
+        let task = PrewarmTask {
+            canonical_id: "plugin-a@local/environment/a".to_string(),
+            runtime_kind: PrewarmRuntimeKind::Docker,
+            shell_script: prewarm_script_with_prelude("ok-a"),
+            dedupe_key: "dedupe-1".to_string(),
+        };
+        let placeholder = EnvironmentAvailabilityRecord {
+            canonical_id: "plugin-a@local/environment/a".to_string(),
+            runtime_type: "system".to_string(),
+            status: "missing".to_string(),
+            manager: None,
+            executable_path: None,
+            error: None,
+            message: "mock missing record".to_string(),
+            install_hint: None,
+            checked_at_ms: 0,
+            scope: "local".to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
+        };
+
+        let _ = environment_availability::store_record_at_path(&cache, &placeholder);
+        let discovered = EnvironmentAvailabilityRecord {
+            runtime_type: "docker".to_string(),
+            status: "available".to_string(),
+            checked_at_ms: 2,
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
+            ..placeholder
+        };
+        environment_availability::replace_records_at_path(
+            &cache,
+            environment_availability::RefreshScope::All,
+            std::slice::from_ref(&discovered),
+        )
+        .expect("replace probe");
+
+        update_prewarm_record(
+            &cache,
+            &task,
+            "warmed",
+            Some(1234),
+            Some("mock warm success".to_string()),
+        )
+        .expect("update prewarm");
+
+        let cache = environment_availability::load_cache_at_path(&cache);
+        let record = cache
+            .records
+            .get("plugin-a@local/environment/a")
+            .expect("cached prewarm record");
+        assert_eq!(record.status, "available");
+        assert_eq!(record.checked_at_ms, 2);
+        assert_eq!(record.prewarm_status.as_deref(), Some("warmed"));
+        assert_eq!(record.prewarmed_at_ms, Some(1234));
+        assert_eq!(record.prewarm_error.as_deref(), Some("mock warm success"));
     }
 
     #[tokio::test]

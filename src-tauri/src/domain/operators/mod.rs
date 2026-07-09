@@ -10254,6 +10254,9 @@ fn parse_duration_secs(raw: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::environment_fallback::{
+        classify_provisioning_failure, ProvisioningFailureKind,
+    };
     use std::ffi::OsString;
     use tempfile::TempDir;
 
@@ -12536,6 +12539,67 @@ diagnostics:
 
         assert!(command.contains("export NORMAL_VAR='y'"));
         assert!(!command.contains("MY_API_KEY"));
+    }
+
+    #[test]
+    fn provisioning_failure_markers_in_generated_scripts_match_classifier() {
+        let tmp = TempDir::new().unwrap();
+        let operator_script = conda_environment_shell_script(
+            &OperatorCondaEnvironmentSelection {
+                env_prefix: tmp
+                    .path()
+                    .join("oprun_conda_env")
+                    .to_string_lossy()
+                    .into_owned(),
+                env_yaml_b64: "Y29uZGEtZW52".to_string(),
+                env_hash: "abcd1234".to_string(),
+                env_vars: BTreeMap::new(),
+            },
+            "/tmp/oprun_conda",
+            "demoalign",
+        );
+        let plugin_script = crate::domain::plugins::conda_environment_check_shell_script(
+            &tmp.path().join("conda_prefix"),
+            &tmp.path().join("conda.yaml"),
+            "abcd1234",
+            &BTreeMap::new(),
+            "demoalign",
+        );
+        let docker_preflight = container_runtime_preflight_script(OperatorContainerKind::Docker);
+        let singularity_preflight =
+            container_runtime_preflight_script(OperatorContainerKind::Singularity);
+
+        let checks = [
+            (
+                operator_script.as_str(),
+                "Automatic micromamba installation failed (reason above).",
+                ProvisioningFailureKind::MicromambaBootstrapFailed,
+            ),
+            (
+                plugin_script.as_str(),
+                "No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment.",
+                ProvisioningFailureKind::CondaManagerMissing,
+            ),
+            (
+                docker_preflight,
+                "Docker runtime is required for this Operator environment but `docker` was not found in the active PATH/base environment/virtual environment.",
+                ProvisioningFailureKind::DockerRuntimeMissing,
+            ),
+            (
+                singularity_preflight,
+                "Singularity/Apptainer runtime is required for this Operator environment but neither `singularity` nor `apptainer` was found in the active PATH/base environment/virtual environment.",
+                ProvisioningFailureKind::SingularityRuntimeMissing,
+            ),
+        ];
+
+        for (script, marker, expected) in checks {
+            assert!(script.contains(marker), "marker missing: {marker}");
+            assert_eq!(
+                classify_provisioning_failure(Some(127), marker),
+                Some(expected),
+                "unexpected classification for marker: {marker}"
+            );
+        }
     }
 
     fn fake_tool_dir(base: &Path, commands: &[(&str, &str)]) -> PathBuf {

@@ -165,10 +165,32 @@ pub fn store_records_at_path(
     if records.is_empty() {
         return Ok(());
     }
-    let _guard = CACHE_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    write_records_with_merge(path, records)
+    mutate_cache_with_lock(path, |cache| {
+        for record in records {
+            let mut merged = record.clone();
+            if merged.prewarm_status.is_none() {
+                // 探测记录从不携带 prewarm 字段，None 即视为“未涉及”而继承。
+                if let Some(previous) = cache.records.get(&record.canonical_id) {
+                    merged.prewarm_status = previous.prewarm_status.clone();
+                    merged.prewarmed_at_ms = previous.prewarmed_at_ms;
+                    merged.prewarm_error = previous.prewarm_error.clone();
+                }
+            }
+            cache.records.insert(merged.canonical_id.clone(), merged);
+        }
+    })
+}
+
+pub fn mutate_record_at_path(
+    path: &Path,
+    canonical_id: &str,
+    mutate: impl FnOnce(Option<EnvironmentAvailabilityRecord>) -> EnvironmentAvailabilityRecord,
+) -> Result<(), String> {
+    mutate_cache_with_lock(path, |cache| {
+        let current = cache.records.remove(canonical_id);
+        let merged = mutate(current);
+        cache.records.insert(merged.canonical_id.clone(), merged);
+    })
 }
 
 pub fn replace_records_at_path(
@@ -176,33 +198,29 @@ pub fn replace_records_at_path(
     scope: RefreshScope,
     records: &[EnvironmentAvailabilityRecord],
 ) -> Result<(), String> {
-    let _guard = CACHE_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    let cache_original = load_cache_at_path(path);
-    let mut cache = cache_original.clone();
-    match scope {
-        RefreshScope::All => {
-            cache.records.clear();
+    mutate_cache_with_lock(path, |cache| {
+        let pre_existing = cache.records.clone();
+        match scope {
+            RefreshScope::All => {
+                cache.records.clear();
+            }
+            RefreshScope::Plugin(plugin_id) => {
+                let prefix = format!("{plugin_id}/environment/");
+                cache
+                    .records
+                    .retain(|canonical_id, _| !canonical_id.starts_with(&prefix));
+            }
         }
-        RefreshScope::Plugin(plugin_id) => {
-            let prefix = format!("{plugin_id}/environment/");
-            cache
-                .records
-                .retain(|canonical_id, _| !canonical_id.starts_with(&prefix));
+        for record in records {
+            let mut merged = record.clone();
+            if let Some(previous) = pre_existing.get(&record.canonical_id) {
+                merged.prewarm_status = previous.prewarm_status.clone();
+                merged.prewarmed_at_ms = previous.prewarmed_at_ms;
+                merged.prewarm_error = previous.prewarm_error.clone();
+            }
+            cache.records.insert(merged.canonical_id.clone(), merged);
         }
-    }
-    for record in records {
-        let mut merged = record.clone();
-        if let Some(previous) = cache_original.records.get(&record.canonical_id) {
-            merged.prewarm_status = previous.prewarm_status.clone();
-            merged.prewarmed_at_ms = previous.prewarmed_at_ms;
-            merged.prewarm_error = previous.prewarm_error.clone();
-        }
-        cache.records.insert(merged.canonical_id.clone(), merged);
-    }
-    cache.updated_at_ms = current_epoch_ms();
-    write_cache_to_path(path, &cache)
+    })
 }
 
 fn refresh_scope_for_plugin_id(plugin_id: Option<&str>) -> RefreshScope {
@@ -214,16 +232,15 @@ fn refresh_scope_for_plugin_id(plugin_id: Option<&str>) -> RefreshScope {
         .unwrap_or(RefreshScope::All)
 }
 
-fn write_records_with_merge(
+fn mutate_cache_with_lock(
     path: &Path,
-    records: &[EnvironmentAvailabilityRecord],
+    mutate: impl FnOnce(&mut EnvironmentAvailabilityCache),
 ) -> Result<(), String> {
+    let _guard = CACHE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let mut cache = load_cache_at_path(path);
-    for record in records {
-        cache
-            .records
-            .insert(record.canonical_id.clone(), record.clone());
-    }
+    mutate(&mut cache);
     cache.updated_at_ms = current_epoch_ms();
     write_cache_to_path(path, &cache)
 }
@@ -948,6 +965,67 @@ mod tests {
         assert!(cache
             .records
             .contains_key("plugin-b@local/environment/keep"));
+    }
+
+    #[test]
+    fn store_records_at_path_preserves_existing_prewarm_when_probe_does_not_touch() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("availability.json");
+        let canonical_id = "plugin-a@local/environment/prefetch";
+        let original = test_record_with_prewarm(
+            "plugin-a@local",
+            "prefetch",
+            "available",
+            Some("warmed"),
+            Some(1234),
+            Some("bootstrap timeout"),
+        );
+        store_records_at_path(&path, &[original.clone()]).expect("store seed");
+
+        let incoming = EnvironmentAvailabilityRecord {
+            status: "missing".to_string(),
+            checked_at_ms: 4321,
+            ..test_record("plugin-a@local", "prefetch", "missing")
+        };
+        store_records_at_path(&path, &[incoming.clone()]).expect("store probe");
+
+        let cached = cached_record_at_path(&path, canonical_id).expect("cached");
+        assert_eq!(cached.status, incoming.status);
+        assert_eq!(cached.prewarm_status.as_deref(), Some("warmed"));
+        assert_eq!(cached.prewarmed_at_ms, Some(1234));
+        assert_eq!(cached.prewarm_error.as_deref(), Some("bootstrap timeout"));
+    }
+
+    #[test]
+    fn store_records_at_path_uses_incoming_prewarm_when_present() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("availability.json");
+        let canonical_id = "plugin-a@local/environment/prefetch";
+        let original = test_record_with_prewarm(
+            "plugin-a@local",
+            "prefetch",
+            "available",
+            Some("warmed"),
+            Some(1234),
+            Some("bootstrap timeout"),
+        );
+        store_records_at_path(&path, &[original]).expect("store seed");
+
+        let incoming = test_record_with_prewarm(
+            "plugin-a@local",
+            "prefetch",
+            "missing",
+            Some("failed"),
+            Some(5678),
+            Some("write cache failed"),
+        );
+        store_records_at_path(&path, &[incoming.clone()]).expect("store own prewarm update");
+
+        let cached = cached_record_at_path(&path, canonical_id).expect("cached");
+        assert_eq!(cached.status, incoming.status);
+        assert_eq!(cached.prewarm_status.as_deref(), Some("failed"));
+        assert_eq!(cached.prewarmed_at_ms, Some(5678));
+        assert_eq!(cached.prewarm_error.as_deref(), Some("write cache failed"));
     }
 
     #[test]
