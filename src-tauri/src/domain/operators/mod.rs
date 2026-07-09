@@ -14,6 +14,9 @@
 
 #![allow(clippy::result_large_err, clippy::too_many_arguments)]
 
+use crate::domain::environment_fallback::{
+    classify_provisioning_failure, fallback_suggestions, ProvisioningFailure,
+};
 use crate::domain::tools::ToolSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
@@ -3594,6 +3597,8 @@ pub struct OperatorToolError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisioning_failure: Option<ProvisioningFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub slurm_diagnostic: Option<SacctDiagnostic>,
 }
 
@@ -3611,6 +3616,7 @@ impl OperatorToolError {
             stdout_tail: None,
             stderr_tail: None,
             suggested_action: None,
+            provisioning_failure: None,
             slurm_diagnostic: None,
         }
     }
@@ -3633,6 +3639,14 @@ impl OperatorToolError {
 
     pub fn with_suggested_action(mut self, action: impl Into<String>) -> Self {
         self.suggested_action = Some(action.into());
+        self
+    }
+
+    pub fn with_provisioning_failure(
+        mut self,
+        provisioning_failure: Option<ProvisioningFailure>,
+    ) -> Self {
+        self.provisioning_failure = provisioning_failure;
         self
     }
 
@@ -4199,6 +4213,17 @@ fn failure_json(
         "error": error,
     }))
     .unwrap_or_else(|_| "{\"status\":\"failed\"}".to_string())
+}
+
+fn provisioning_failure_for_error(
+    exit_code: Option<i64>,
+    stderr_tail: Option<&str>,
+) -> Option<ProvisioningFailure> {
+    let kind = classify_provisioning_failure(exit_code, stderr_tail.unwrap_or_default())?;
+    let availability = crate::domain::environment_availability::load_cache();
+    let records = availability.records.values().cloned().collect::<Vec<_>>();
+    let suggestions = fallback_suggestions(&kind, &records);
+    Some(ProvisioningFailure { kind, suggestions })
 }
 
 async fn record_operator_success_best_effort(
@@ -6131,6 +6156,10 @@ async fn execute_local(
     let stdout_tail = read_tail(run_path.join("logs/stdout.txt"));
     let stderr_tail = read_tail(run_path.join("logs/stderr.txt"));
     if result.returncode != 0 {
+        let provisioning_failure = provisioning_failure_for_error(
+            Some(i64::from(result.returncode)),
+            stderr_tail.as_deref(),
+        );
         let error = OperatorToolError::new(
             "tool_exit_nonzero",
             false,
@@ -6138,7 +6167,8 @@ async fn execute_local(
         )
         .with_run_dir(run_dir)
         .with_logs(stdout_tail, stderr_tail)
-        .with_suggested_action("Inspect stdout/stderr, then adjust inputs or params and retry.");
+        .with_suggested_action("Inspect stdout/stderr, then adjust inputs or params and retry.")
+        .with_provisioning_failure(provisioning_failure);
         update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
         return Err(error);
     }
@@ -6319,13 +6349,18 @@ async fn execute_in_environment(
     let stdout_tail = remote_tail(ctx, run_dir, "logs/stdout.txt").await;
     let stderr_tail = remote_tail(ctx, run_dir, "logs/stderr.txt").await;
     if result.returncode != 0 {
+        let provisioning_failure = provisioning_failure_for_error(
+            Some(i64::from(result.returncode)),
+            stderr_tail.as_deref(),
+        );
         let mut error = OperatorToolError::new(
             "tool_exit_nonzero",
             false,
             format!("Operator process exited with code {}.", result.returncode),
         )
         .with_run_dir(run_dir)
-        .with_logs(stdout_tail, stderr_tail);
+        .with_logs(stdout_tail, stderr_tail)
+        .with_provisioning_failure(provisioning_failure);
         if let Some(diagnostic) = slurm_diagnostic {
             if let Some(action) = diagnostic.suggested_action.clone() {
                 error = error.with_suggested_action(action);
@@ -12166,6 +12201,65 @@ execution:
         assert_eq!(payload["error"]["attempt"], json!(2));
         assert_eq!(payload["error"]["maxAttempts"], json!(3));
         assert_eq!(payload["error"]["previousErrors"][0]["attempt"], json!(1));
+    }
+
+    #[test]
+    fn failure_json_includes_provisioning_failure_when_present() {
+        let error = OperatorToolError::new("tool_exit_nonzero", false, "exit 127")
+            .with_provisioning_failure(Some(
+                crate::domain::environment_fallback::ProvisioningFailure {
+                    kind: crate::domain::environment_fallback::ProvisioningFailureKind::DockerRuntimeMissing,
+                    suggestions: vec![crate::domain::environment_fallback::FallbackSuggestion {
+                        title: "start docker".to_string(),
+                        detail: "start docker daemon".to_string(),
+                        action: "start_docker_daemon".to_string(),
+                    }],
+                },
+            ));
+        let raw = failure_json("x", None, Some("/tmp/oprun_pf"), None, error);
+        let payload = serde_json::from_str::<JsonValue>(&raw).unwrap();
+        assert_eq!(
+            payload["error"]["provisioningFailure"]["kind"],
+            "dockerRuntimeMissing"
+        );
+        assert!(!payload["error"]["provisioningFailure"]["suggestions"]
+            .as_array()
+            .expect("provisioning suggestions")
+            .is_empty());
+    }
+
+    #[test]
+    fn provisioning_failure_can_be_built_from_stderr_marker() {
+        let provisioning_failure = provisioning_failure_for_error(
+            Some(127),
+            Some("Docker runtime is required for this Operator environment but `docker` was not found."),
+        );
+        assert_eq!(
+            provisioning_failure.as_ref().map(|entry| &entry.kind),
+            Some(
+                &crate::domain::environment_fallback::ProvisioningFailureKind::DockerRuntimeMissing
+            )
+        );
+        let error = OperatorToolError::new("tool_exit_nonzero", false, "exit 127")
+            .with_provisioning_failure(provisioning_failure);
+        let raw = failure_json("x", None, Some("/tmp/oprun_pf"), None, error);
+        let payload = serde_json::from_str::<JsonValue>(&raw).unwrap();
+        assert_eq!(
+            payload["error"]["provisioningFailure"]["kind"],
+            "dockerRuntimeMissing"
+        );
+        assert!(!payload["error"]["provisioningFailure"]["suggestions"]
+            .as_array()
+            .expect("provisioning suggestions")
+            .is_empty());
+    }
+
+    #[test]
+    fn failure_json_omits_provisioning_failure_when_absent() {
+        let error = OperatorToolError::new("tool_exit_nonzero", false, "exit 2");
+        let raw = failure_json("x", None, Some("/tmp/oprun_pf"), None, error);
+        let payload = serde_json::from_str::<JsonValue>(&raw).unwrap();
+        assert!(payload["error"]["provisioningFailure"].is_null());
     }
 
     #[test]

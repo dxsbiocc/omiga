@@ -16,6 +16,7 @@ pub mod context_snapshot;
 pub mod cron_scheduler;
 pub mod env_hygiene;
 pub mod environment_availability;
+pub mod environment_fallback;
 pub mod environment_prewarm;
 pub mod environments;
 pub mod execution_records;
