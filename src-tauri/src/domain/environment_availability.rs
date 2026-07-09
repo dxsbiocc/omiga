@@ -66,6 +66,12 @@ pub struct EnvironmentAvailabilityRecord {
     pub install_hint: Option<String>,
     pub checked_at_ms: u64,
     pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prewarm_status: Option<String>,
+    #[serde(default)]
+    pub prewarmed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prewarm_error: Option<String>,
 }
 
 impl EnvironmentAvailabilityRecord {
@@ -91,6 +97,15 @@ impl EnvironmentAvailabilityRecord {
         });
         if let Some(error) = &self.error {
             value["error"] = serde_json::json!(error);
+        }
+        if let Some(prewarm_status) = &self.prewarm_status {
+            value["prewarmStatus"] = serde_json::json!(prewarm_status);
+        }
+        if let Some(prewarmed_at_ms) = self.prewarmed_at_ms {
+            value["prewarmedAtMs"] = serde_json::json!(prewarmed_at_ms);
+        }
+        if let Some(error) = &self.prewarm_error {
+            value["prewarmError"] = serde_json::json!(error);
         }
         value
     }
@@ -163,7 +178,8 @@ pub fn replace_records_at_path(
     let _guard = CACHE_WRITE_LOCK
         .lock()
         .unwrap_or_else(|err| err.into_inner());
-    let mut cache = load_cache_at_path(path);
+    let cache_original = load_cache_at_path(path);
+    let mut cache = cache_original.clone();
     match scope {
         RefreshScope::All => {
             cache.records.clear();
@@ -176,9 +192,13 @@ pub fn replace_records_at_path(
         }
     }
     for record in records {
-        cache
-            .records
-            .insert(record.canonical_id.clone(), record.clone());
+        let mut merged = record.clone();
+        if let Some(previous) = cache_original.records.get(&record.canonical_id) {
+            merged.prewarm_status = previous.prewarm_status.clone();
+            merged.prewarmed_at_ms = previous.prewarmed_at_ms;
+            merged.prewarm_error = previous.prewarm_error.clone();
+        }
+        cache.records.insert(merged.canonical_id.clone(), merged);
     }
     cache.updated_at_ms = current_epoch_ms();
     write_cache_to_path(path, &cache)
@@ -325,6 +345,9 @@ pub fn runtime_availability_for_profile(
             install_hint: Some(runtime_install_hint(&runtime_type)),
             checked_at_ms: current_epoch_ms(),
             scope: ctx.execution_environment.clone(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
         };
     }
 
@@ -366,6 +389,9 @@ pub fn runtime_availability_for_profile(
             install_hint: Some(runtime_install_hint(other)),
             checked_at_ms: current_epoch_ms(),
             scope: "local".to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
         },
     }
 }
@@ -383,6 +409,9 @@ fn probe_conda_manager(ctx: &ToolContext, canonical_id: &str) -> EnvironmentAvai
             install_hint: Some(runtime_install_hint("conda")),
             checked_at_ms: current_epoch_ms(),
             scope: "local".to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
         },
         Err(error) => EnvironmentAvailabilityRecord {
             canonical_id: canonical_id.to_string(),
@@ -395,6 +424,9 @@ fn probe_conda_manager(ctx: &ToolContext, canonical_id: &str) -> EnvironmentAvai
             install_hint: Some(runtime_install_hint("conda")),
             checked_at_ms: current_epoch_ms(),
             scope: "local".to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
         },
     }
 }
@@ -433,6 +465,9 @@ fn probe_single_runtime(
             install_hint: Some(install_hint.to_string()),
             checked_at_ms: current_epoch_ms(),
             scope: "local".to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
         },
         Err(error) => EnvironmentAvailabilityRecord {
             canonical_id: profile.canonical_id.clone(),
@@ -445,6 +480,9 @@ fn probe_single_runtime(
             install_hint: Some(install_hint.to_string()),
             checked_at_ms: current_epoch_ms(),
             scope: "local".to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
         },
     }
 }
@@ -472,6 +510,9 @@ fn probe_system_command(
             install_hint: profile.diagnostics.install_hint.clone(),
             checked_at_ms: current_epoch_ms(),
             scope: "local".to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
         };
     };
     probe_single_runtime(
@@ -549,7 +590,9 @@ fn current_epoch_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn environment_profiles_for_refresh(plugin_id: Option<&str>) -> Vec<EnvironmentSpecWithSource> {
+pub(crate) fn environment_profiles_for_refresh(
+    plugin_id: Option<&str>,
+) -> Vec<EnvironmentSpecWithSource> {
     let outcome = crate::domain::plugins::plugin_load_outcome();
     let plugin_id = plugin_id.map(str::trim).filter(|value| !value.is_empty());
 
@@ -645,6 +688,25 @@ mod tests {
             install_hint: None,
             checked_at_ms: 0,
             scope: "local".to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
+        }
+    }
+
+    fn test_record_with_prewarm(
+        plugin_id: &str,
+        profile_id: &str,
+        status: &str,
+        prewarm_status: Option<&str>,
+        prewarmed_at_ms: Option<u64>,
+        prewarm_error: Option<&str>,
+    ) -> EnvironmentAvailabilityRecord {
+        EnvironmentAvailabilityRecord {
+            prewarm_status: prewarm_status.map(str::to_string),
+            prewarmed_at_ms,
+            prewarm_error: prewarm_error.map(str::to_string),
+            ..test_record(plugin_id, profile_id, status)
         }
     }
 
@@ -680,6 +742,9 @@ mod tests {
             install_hint: Some("install command".to_string()),
             checked_at_ms: 0,
             scope: "local".to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
         };
 
         store_record_at_path(&path, &record).expect("store");
@@ -779,6 +844,56 @@ mod tests {
         assert!(!cache
             .records
             .contains_key("plugin-a@local/environment/old-a-2"));
+        assert!(cache
+            .records
+            .contains_key("plugin-b@local/environment/keep"));
+    }
+
+    #[test]
+    fn replace_records_with_plugin_scope_preserves_matching_prewarm_fields() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("availability.json");
+        let seed = vec![
+            test_record_with_prewarm(
+                "plugin-a@local",
+                "keep",
+                "available",
+                Some("warmed"),
+                Some(123),
+                Some("bootstrap timeout"),
+            ),
+            test_record("plugin-a@local", "old-a", "missing"),
+            test_record("plugin-b@local", "keep", "available"),
+        ];
+        store_records_at_path(&path, &seed).expect("seed");
+
+        let replacement = vec![test_record("plugin-a@local", "keep", "notRun")];
+        replace_records_at_path(
+            &path,
+            RefreshScope::Plugin("plugin-a@local".to_string()),
+            &replacement,
+        )
+        .expect("replace plugin scope");
+
+        let cache = load_cache_at_path(&path);
+        assert_eq!(
+            cache
+                .records
+                .get("plugin-a@local/environment/keep")
+                .expect("kept record")
+                .status,
+            "notRun"
+        );
+        let keep = cache
+            .records
+            .get("plugin-a@local/environment/keep")
+            .expect("kept record");
+        assert_eq!(keep.prewarm_status.as_deref(), Some("warmed"));
+        assert_eq!(keep.prewarmed_at_ms, Some(123));
+        assert_eq!(keep.prewarm_error.as_deref(), Some("bootstrap timeout"));
+        assert!(!cache
+            .records
+            .contains_key("plugin-a@local/environment/old-a"));
         assert!(cache
             .records
             .contains_key("plugin-b@local/environment/keep"));

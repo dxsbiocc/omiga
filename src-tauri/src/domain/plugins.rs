@@ -3398,7 +3398,9 @@ fn conda_environment_declares_executable(env_yaml: &Path, executable: &str) -> b
     })
 }
 
-fn plugin_conda_environment_file(profile: &EnvironmentProfileSummary) -> Result<PathBuf, String> {
+pub(crate) fn plugin_conda_environment_file(
+    profile: &EnvironmentProfileSummary,
+) -> Result<PathBuf, String> {
     let manifest = PathBuf::from(&profile.manifest_path);
     let manifest_dir = manifest.parent().ok_or_else(|| {
         format!(
@@ -3461,7 +3463,7 @@ fn validate_plugin_conda_yaml_path(
     Ok(())
 }
 
-fn conda_environment_check_shell_script(
+pub(crate) fn conda_environment_check_shell_script(
     env_prefix: &Path,
     env_yaml: &Path,
     env_hash: &str,

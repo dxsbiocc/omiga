@@ -3980,7 +3980,7 @@ pub struct OperatorRunCheck {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperatorExecutionSurfaceKind {
+pub(crate) enum OperatorExecutionSurfaceKind {
     Local,
     Ssh,
     Sandbox,
@@ -5058,7 +5058,7 @@ fn runtime_axis_values(runtime: &JsonValue, axis: &str) -> HashSet<String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperatorContainerKind {
+pub(crate) enum OperatorContainerKind {
     Docker,
     Singularity,
 }
@@ -5072,15 +5072,21 @@ impl OperatorContainerKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OperatorContainerSelection {
-    kind: OperatorContainerKind,
-    image: String,
-    prepare: Option<OperatorContainerImagePrepare>,
+impl std::fmt::Display for OperatorContainerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum OperatorContainerImagePrepare {
+pub(crate) struct OperatorContainerSelection {
+    pub(crate) kind: OperatorContainerKind,
+    pub(crate) image: String,
+    pub(crate) prepare: Option<OperatorContainerImagePrepare>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OperatorContainerImagePrepare {
     Dockerfile {
         dockerfile: String,
         context: String,
@@ -7020,7 +7026,7 @@ fn operator_container_from_environment_profile(
         .flatten()
 }
 
-fn operator_environment_container_selection(
+pub(crate) fn operator_environment_container_selection(
     ctx: &crate::domain::tools::ToolContext,
     spec: &OperatorSpec,
     surface_kind: OperatorExecutionSurfaceKind,
@@ -7352,14 +7358,110 @@ fn operator_conda_environment_command(
 }
 
 #[derive(Debug, Clone)]
-struct OperatorCondaEnvironmentSelection {
-    env_prefix: String,
-    env_yaml_b64: String,
-    env_hash: String,
-    env_vars: BTreeMap<String, String>,
+pub(crate) struct OperatorCondaEnvironmentSelection {
+    pub(crate) env_prefix: String,
+    pub(crate) env_yaml_b64: String,
+    pub(crate) env_hash: String,
+    pub(crate) env_vars: BTreeMap<String, String>,
 }
 
-fn operator_conda_environment_selection(
+pub(crate) fn operator_container_selection_for_profile(
+    ctx: &crate::domain::tools::ToolContext,
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Result<Option<OperatorContainerSelection>, String> {
+    let kind = profile
+        .runtime
+        .kind
+        .as_deref()
+        .unwrap_or("system")
+        .trim()
+        .to_ascii_lowercase();
+    let container_kind = container_kind_from_name(&kind).ok_or_else(|| {
+        format!(
+            "Environment profile `{}` runtime.type must be docker or singularity for container prewarm: `{kind}`",
+            profile.canonical_id
+        )
+    })?;
+
+    if let Some(image) = operator_environment_profile_image(profile) {
+        return Ok(Some(OperatorContainerSelection {
+            kind: container_kind,
+            image,
+            prepare: None,
+        }));
+    }
+
+    if surface_kind != OperatorExecutionSurfaceKind::Local {
+        return Err(format!(
+            "Environment profile `{}` uses `{kind}` without runtime.image. File-based `{kind}` builds are only supported for local Operator runs; build the image on the target system and set runtime.image.",
+            profile.canonical_id
+        ));
+    }
+
+    match container_kind {
+        OperatorContainerKind::Docker => {
+            let dockerfile = operator_dockerfile_from_environment_profile(profile)?;
+            let context =
+                operator_docker_build_context_from_environment_profile(profile, &dockerfile);
+            let dockerfile_bytes = fs::read(&dockerfile).map_err(|err| {
+                format!(
+                    "Read Dockerfile for environment profile `{}` at `{}`: {err}",
+                    profile.canonical_id,
+                    dockerfile.display()
+                )
+            })?;
+            let env_hash = sha256_hex(&dockerfile_bytes);
+            let tag = format!(
+                "omiga-env-{}:{}",
+                safe_operator_env_component(&profile.canonical_id).to_ascii_lowercase(),
+                &env_hash[..12]
+            );
+            Ok(Some(OperatorContainerSelection {
+                kind: OperatorContainerKind::Docker,
+                image: tag.clone(),
+                prepare: Some(OperatorContainerImagePrepare::Dockerfile {
+                    dockerfile: dockerfile.to_string_lossy().into_owned(),
+                    context: context.to_string_lossy().into_owned(),
+                    tag,
+                }),
+            }))
+        }
+        OperatorContainerKind::Singularity => {
+            let definition = operator_singularity_definition_from_environment_profile(profile)?;
+            let definition_bytes = fs::read(&definition).map_err(|err| {
+                format!(
+                    "Read Singularity definition for environment profile `{}` at `{}`: {err}",
+                    profile.canonical_id,
+                    definition.display()
+                )
+            })?;
+            let env_hash = sha256_hex(&definition_bytes);
+            let env_key = format!(
+                "{}-{}",
+                safe_operator_env_component(&profile.canonical_id),
+                &env_hash[..12]
+            );
+            let sif = ctx
+                .project_root
+                .join(".omiga/operator-envs/singularity")
+                .join(format!("{env_key}.sif"))
+                .to_string_lossy()
+                .into_owned();
+            Ok(Some(OperatorContainerSelection {
+                kind: OperatorContainerKind::Singularity,
+                image: sif.clone(),
+                prepare: Some(OperatorContainerImagePrepare::SingularityDefinition {
+                    definition: definition.to_string_lossy().into_owned(),
+                    sif,
+                    hash: env_hash,
+                }),
+            }))
+        }
+    }
+}
+
+pub(crate) fn operator_conda_environment_selection(
     ctx: &crate::domain::tools::ToolContext,
     profile: &crate::domain::environments::EnvironmentProfileSummary,
     surface_kind: OperatorExecutionSurfaceKind,
@@ -7442,7 +7544,7 @@ fn validate_conda_environment_yaml_path(
     Ok(())
 }
 
-fn operator_conda_env_prefix(
+pub(crate) fn operator_conda_env_prefix(
     ctx: &crate::domain::tools::ToolContext,
     surface_kind: OperatorExecutionSurfaceKind,
     env_key: &str,
@@ -7798,7 +7900,7 @@ fi"#
     }
 }
 
-fn container_runtime_prepare_script(prepare: &OperatorContainerImagePrepare) -> String {
+pub(crate) fn container_runtime_prepare_script(prepare: &OperatorContainerImagePrepare) -> String {
     match prepare {
         OperatorContainerImagePrepare::Dockerfile {
             dockerfile,

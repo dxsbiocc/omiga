@@ -3,6 +3,7 @@
 use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
 use crate::domain::environment_availability;
+use crate::domain::environment_prewarm;
 use crate::domain::plugin_runtime::retrieval::lifecycle::PluginLifecycleRouteStatus;
 use crate::domain::plugin_runtime::retrieval::validation::{
     validate_retrieval_plugin_root, PluginRetrievalValidationReport,
@@ -99,6 +100,35 @@ fn spawn_environment_availability_refresh(plugin_id: Option<String>) {
     });
 }
 
+fn spawn_environment_prewarm(plugin_id: Option<String>, project_root: Option<PathBuf>) {
+    tauri::async_runtime::spawn(async move {
+        let plan = environment_prewarm::build_prewarm_plan_for_plugin(
+            plugin_id.as_deref(),
+            project_root.as_deref(),
+        );
+        for diagnostic in &plan.diagnostics {
+            tracing::debug!(
+                plugin_id = plugin_id.as_deref().unwrap_or("<all>"),
+                canonical_id = %diagnostic.canonical_id,
+                runtime = %diagnostic.runtime_kind,
+                message = %diagnostic.message,
+                "environment prewarm skipped for plan entry"
+            );
+        }
+        let cache_path = crate::domain::environment_availability::cache_file_path();
+        let runner = environment_prewarm::LocalShellRunner;
+        if let Err(err) =
+            environment_prewarm::run_prewarm_tasks(&cache_path, &plan.tasks, &runner).await
+        {
+            tracing::warn!(
+                plugin_id = plugin_id.as_deref().unwrap_or("<all>"),
+                error = %err,
+                "environment prewarm hook failed; continuing with existing behavior"
+            );
+        }
+    });
+}
+
 fn plugin_error(error: String) -> AppError {
     AppError::Config(error)
 }
@@ -190,12 +220,13 @@ pub async fn install_omiga_plugin(
     plugin_name: String,
     project_root: Option<String>,
 ) -> CommandResult<PluginInstallResult> {
-    let _root = resolve_optional_project_root(project_root);
+    let root = resolve_optional_project_root(project_root);
     let result = plugins::install_plugin(Path::new(&marketplace_path), &plugin_name)
         .map_err(plugin_error)?;
     let plugin_id = result.plugin_id.clone();
     invalidate_plugin_dependent_caches(&app_state).await;
-    spawn_environment_availability_refresh(Some(plugin_id));
+    spawn_environment_availability_refresh(Some(plugin_id.clone()));
+    spawn_environment_prewarm(Some(plugin_id), root);
     Ok(result)
 }
 
@@ -251,11 +282,14 @@ pub async fn set_omiga_plugin_enabled(
     enabled: bool,
     project_root: Option<String>,
 ) -> CommandResult<()> {
-    let _root = resolve_optional_project_root(project_root);
+    let root = resolve_optional_project_root(project_root);
     clear_global_plugin_process_pool().await;
     plugins::set_plugin_enabled(&plugin_id, enabled).map_err(plugin_error)?;
     invalidate_plugin_dependent_caches(&app_state).await;
-    spawn_environment_availability_refresh(Some(plugin_id));
+    spawn_environment_availability_refresh(Some(plugin_id.clone()));
+    if enabled {
+        spawn_environment_prewarm(Some(plugin_id), root);
+    }
     Ok(())
 }
 
@@ -298,10 +332,13 @@ pub async fn set_omiga_environment_enabled(
     enabled: bool,
     project_root: Option<String>,
 ) -> CommandResult<()> {
-    let _root = resolve_optional_project_root(project_root);
+    let root = resolve_optional_project_root(project_root);
     plugins::set_environment_enabled(&plugin_id, &environment_id, enabled).map_err(plugin_error)?;
     invalidate_plugin_dependent_caches(&app_state).await;
-    spawn_environment_availability_refresh(Some(plugin_id));
+    spawn_environment_availability_refresh(Some(plugin_id.clone()));
+    if enabled {
+        spawn_environment_prewarm(Some(plugin_id), root);
+    }
     Ok(())
 }
 

@@ -792,6 +792,9 @@ diagnostics:
                     install_hint: None,
                     checked_at_ms: 1_700_000_000_000,
                     scope: "local".to_string(),
+                    prewarm_status: None,
+                    prewarmed_at_ms: None,
+                    prewarm_error: None,
                 },
             )]),
             ..Default::default()
