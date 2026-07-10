@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+use crate::domain::tools::ToolSchema;
+
 pub(crate) const OPERATOR_PREFLIGHT_MAX_QUESTIONS: usize = 4;
 pub(crate) const OPERATOR_PREFLIGHT_MAX_OPTIONS: usize = 5;
 pub(crate) const OPERATOR_PREFLIGHT_ASK_STATE: &str = "ask";
@@ -9,6 +12,7 @@ pub(crate) const OPERATOR_PARAM_SOURCE_CALLER: &str = "caller";
 pub(crate) const OPERATOR_PARAM_SOURCE_DEFAULT: &str = "default";
 pub(crate) const OPERATOR_PARAM_SOURCE_SYSTEM: &str = "system";
 
+#[cfg(test)]
 pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
     let name = format!("{OPERATOR_TOOL_PREFIX}{}", operator.alias);
     let mut description = operator
@@ -34,6 +38,7 @@ pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
     )
 }
 
+#[cfg(test)]
 fn operator_resource_profile_description(spec: &OperatorSpec) -> Option<String> {
     let profile = spec.runtime.as_ref()?.get("resourceProfile")?.as_object()?;
     let tier = profile
@@ -876,7 +881,8 @@ pub(crate) fn operator_project_preference_params(
     project_root: &Path,
     spec: &OperatorSpec,
 ) -> Option<BTreeMap<String, JsonValue>> {
-    let canonical_id = canonical_operator_unit_id_for_spec(spec);
+    let canonical_id =
+        crate::domain::operators::execution_types::canonical_operator_unit_id_for_spec(spec);
     let hints = crate::domain::learning_proposals::matching_learning_project_preference_hints(
         project_root,
         Some(spec.metadata.id.as_str()),
