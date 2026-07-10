@@ -85,6 +85,7 @@ pub(crate) use validation::{
     apply_operator_preflight_answers_for_spec, operator_operation_groups_for_spec,
     operator_operation_names, operator_operation_summaries_for_spec,
 };
+pub use validation::{operator_preflight_question, operator_preflight_question_for_spec};
 #[cfg(test)]
 pub(crate) use validation::{
     operator_tool_schema, OPERATOR_PARAM_SOURCE_DEFAULT, OPERATOR_PARAM_SOURCE_USER_PREFLIGHT,
