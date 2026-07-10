@@ -120,6 +120,7 @@ pub(crate) use io_support::{
 };
 #[cfg(test)]
 pub(crate) use manifest::OperatorPreflightAskWhen;
+pub use manifest::OPERATOR_API_VERSION_V1ALPHA2;
 pub(crate) use manifest::{
     discover_manifest_paths, load_operator_manifest, validate_operator_id,
     OperatorCandidateSummary, OperatorExecutionSpec, OperatorFieldKind, OperatorFieldSpec,
