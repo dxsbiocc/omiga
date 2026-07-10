@@ -754,13 +754,13 @@ pub fn load_operator_manifest(
     Ok(spec)
 }
 
-pub(crate) fn raw_execution_argv(execution: RawOperatorExecution) -> Option<Vec<String>> {
+fn raw_execution_argv(execution: RawOperatorExecution) -> Option<Vec<String>> {
     execution
         .argv
         .or_else(|| execution.command.and_then(|command| command.argv))
 }
 
-pub(crate) fn operator_interface_from_raw(raw: RawOperatorInterface) -> OperatorInterfaceSpec {
+fn operator_interface_from_raw(raw: RawOperatorInterface) -> OperatorInterfaceSpec {
     OperatorInterfaceSpec {
         inputs: raw
             .inputs
@@ -780,7 +780,7 @@ pub(crate) fn operator_interface_from_raw(raw: RawOperatorInterface) -> Operator
     }
 }
 
-pub(crate) fn resources_from_raw(
+fn resources_from_raw(
     raw: BTreeMap<String, RawResourceSpec>,
 ) -> BTreeMap<String, OperatorResourceSpec> {
     raw.into_iter()
@@ -788,7 +788,7 @@ pub(crate) fn resources_from_raw(
         .collect()
 }
 
-pub(crate) fn merge_operator_interfaces(
+fn merge_operator_interfaces(
     base: &OperatorInterfaceSpec,
     overlay: OperatorInterfaceSpec,
 ) -> OperatorInterfaceSpec {
@@ -799,7 +799,7 @@ pub(crate) fn merge_operator_interfaces(
     merged
 }
 
-pub(crate) fn normalize_operator_operations(
+fn normalize_operator_operations(
     raw_operations: BTreeMap<String, RawOperatorOperationSpec>,
     metadata: &OperatorMetadata,
     top_interface: &OperatorInterfaceSpec,
