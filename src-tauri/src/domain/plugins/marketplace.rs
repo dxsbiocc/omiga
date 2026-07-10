@@ -1832,9 +1832,9 @@ pub fn read_plugin(marketplace_path: &Path, plugin_name: &str) -> Result<PluginD
         summary,
         description: manifest.description.clone(),
         changelog: plugin_changelog_summary(&source_path, Some(&manifest)),
-        skills: plugin_skill_summaries(&source_path, &manifest),
-        mcp_servers: plugin_mcp_server_names(&source_path, &manifest),
-        apps: plugin_app_ids(&source_path, &manifest),
+        skills: contributions::plugin_skill_summaries(&source_path, &manifest),
+        mcp_servers: contributions::plugin_mcp_server_names(&source_path, &manifest),
+        apps: contributions::plugin_app_ids(&source_path, &manifest),
     })
 }
 pub(crate) fn copy_marketplace_resource_runner_assets(
