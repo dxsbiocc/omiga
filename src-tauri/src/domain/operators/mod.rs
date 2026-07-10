@@ -14,6 +14,7 @@
 
 #![allow(clippy::result_large_err, clippy::too_many_arguments)]
 
+use crate::domain::env_hygiene;
 use crate::domain::environment_fallback::{
     classify_provisioning_failure, fallback_suggestions, ProvisioningFailure,
 };
@@ -6576,11 +6577,17 @@ async fn execute_env_command(
             OperatorToolError::new("environment_unavailable", true, err.to_string())
                 .with_suggested_action("Check the selected execution environment and retry.")
         })?;
-    let exec_opts = crate::execution::ExecOptions {
-        timeout: Some(timeout_secs * 1000),
-        cwd: Some(cwd.to_string()),
-        stdin_data: None,
+    let operator_env_hygiene = if ctx.execution_environment == "local" {
+        env_hygiene::calculate_env_hygiene_remove_list()
+    } else {
+        Vec::new()
     };
+    if !operator_env_hygiene.is_empty() {
+        tracing::debug!(
+            names = ?operator_env_hygiene,
+            "filtered sensitive env vars before operator execution"
+        );
+    }
     let command = if ctx.execution_environment == "local" {
         crate::domain::tools::bash::prepend_venv_activation(
             &ctx.local_venv_type,
@@ -6590,8 +6597,21 @@ async fn execute_env_command(
     } else {
         command.to_string()
     };
+
+    let exec_opts = crate::execution::ExecOptions {
+        timeout: Some(timeout_secs * 1000),
+        cwd: Some(cwd.to_string()),
+        stdin_data: None,
+        env_remove_names: if operator_env_hygiene.is_empty() {
+            None
+        } else {
+            Some(operator_env_hygiene.clone())
+        },
+    };
+
     let mut guard = env.lock().await;
-    guard.execute(&command, exec_opts).await.map_err(|err| {
+    let result = guard.execute(&command, exec_opts).await;
+    result.map_err(|err| {
         OperatorToolError::new("execution_infra_error", true, err.to_string())
             .with_suggested_action("Retry if the execution backend was temporarily unavailable.")
     })
@@ -10257,8 +10277,39 @@ mod tests {
     use crate::domain::environment_fallback::{
         classify_provisioning_failure, ProvisioningFailureKind,
     };
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static OPERATOR_ENV_HYGIENE_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        old: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     struct ScopedEnvKeep {
         old: Option<OsString>,
@@ -12539,6 +12590,53 @@ diagnostics:
 
         assert!(command.contains("export NORMAL_VAR='y'"));
         assert!(!command.contains("MY_API_KEY"));
+    }
+
+    #[tokio::test]
+    async fn execute_env_command_filters_sensitive_env_vars_for_operator_run() {
+        let _lock = OPERATOR_ENV_HYGIENE_LOCK.lock().unwrap();
+        let _keep = ScopedEnvVar::remove("OMIGA_ENV_KEEP");
+        let _token = ScopedEnvVar::set("FAKE_SECRET_TOKEN", "absent-if-visible");
+
+        let tmp = TempDir::new().unwrap();
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let result = execute_env_command(
+            &ctx,
+            &tmp.path().to_string_lossy(),
+            "sh -c 'echo ${FAKE_SECRET_TOKEN:-absent}'",
+            30,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.output.trim(), "absent");
+    }
+
+    #[tokio::test]
+    async fn execute_env_command_keeps_allowed_vars_and_preserves_path_home() {
+        let _lock = OPERATOR_ENV_HYGIENE_LOCK.lock().unwrap();
+        let _token = ScopedEnvVar::set("FAKE_SECRET_TOKEN", "allowed-token");
+        let _keep = ScopedEnvVar::set("OMIGA_ENV_KEEP", "FAKE_SECRET_TOKEN");
+        let _path = ScopedEnvVar::set("PATH", "/bin:/tmp/operator-path");
+        let _home = ScopedEnvVar::set("HOME", "/tmp/operator-home");
+
+        let tmp = TempDir::new().unwrap();
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let value = execute_env_command(
+            &ctx,
+            &tmp.path().to_string_lossy(),
+            r#"sh -c 'echo $FAKE_SECRET_TOKEN:$PATH:$HOME'"#,
+            30,
+        )
+        .await
+        .unwrap();
+
+        let output = value.output.trim().to_string();
+        let mut parts = output.split(':').collect::<Vec<_>>();
+        assert!(parts.len() >= 3);
+        assert_eq!(parts.remove(0), "allowed-token");
+        assert_eq!(parts.pop(), Some("/tmp/operator-home"));
+        assert!(parts.join(":").contains("/tmp/operator-path"));
     }
 
     #[test]

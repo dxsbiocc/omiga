@@ -210,6 +210,7 @@ Container selection rules:
 - Supported image fields are `runtime.container.image`, `runtime.container.images.{docker,singularity}`, `dockerImage`/`docker_image`, and `singularityImage`/`singularity_image`.
 - Local/SSH direct container execution bind-mounts the isolated run directory read-write and path-like inputs read-only. Local execution also mounts the project root and plugin root read-only. SSH artifacts, logs, and provenance stay on the remote workspace.
 - Sandbox/remote backends remain responsible for their own container isolation; the operator runtime is validated and recorded rather than nested in another container command.
+- Operator local execution sub-processes apply sensitive env-var hygiene: names containing `KEY`, `SECRET`, or `TOKEN` are removed unless whitelisted by `OMIGA_ENV_KEEP`. Platform connector credentials such as `OMIGA_*_API_KEY` follow this default scrub-by-default path; if a plugin truly requires one of them, it must use an explicit user-side exception via `OMIGA_ENV_KEEP` (comma-separated list or prefix patterns like `PREFIX_*`).
 
 Container validation coverage now comes from Rust tests that generate temporary
 operator plugins at runtime. Omiga core must not ship app-local bundled plugin

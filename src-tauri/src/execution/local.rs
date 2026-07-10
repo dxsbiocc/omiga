@@ -183,7 +183,10 @@ impl LocalEnvironment {
     /// 构建运行环境变量
     ///
     /// 对应 hermes-agent 中的 _sanitize_subprocess_env() 和 _make_run_env()
-    fn build_run_env(&self) -> HashMap<String, String> {
+    fn build_run_env(
+        &self,
+        remove_names: Option<&[String]>,
+    ) -> (HashMap<String, String>, Vec<String>) {
         let mut run_env: HashMap<String, String> = HashMap::new();
 
         // 从当前进程环境变量复制，过滤黑名单
@@ -204,6 +207,15 @@ impl LocalEnvironment {
             run_env.insert(key.clone(), value.clone());
         }
 
+        let mut removed_names = Vec::new();
+        if let Some(remove_targets) = remove_names {
+            for name in remove_targets {
+                if run_env.remove(name).is_some() {
+                    removed_names.push(name.to_string());
+                }
+            }
+        }
+
         // 确保 PATH 包含标准目录
         if let Some(existing_path) = run_env.get("PATH") {
             if !existing_path.contains("/usr/bin") {
@@ -216,7 +228,7 @@ impl LocalEnvironment {
             run_env.insert("PATH".to_string(), SANE_PATH.to_string());
         }
 
-        run_env
+        (run_env, removed_names)
     }
 
     /// 直接执行命令并返回结果（覆盖基类方法以正确处理输出）
@@ -255,7 +267,7 @@ impl LocalEnvironment {
             vec!["-c", &wrapped]
         };
 
-        let run_env = self.build_run_env();
+        let (run_env, _) = self.build_run_env(options.env_remove_names.as_deref());
 
         let mut cmd = Command::new(&self.shell_path);
         cmd.args(&args)
@@ -524,6 +536,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_options_env_remove_names_is_per_call_and_not_sticky_after_cancel_like_drop() {
+        use std::time::Duration;
+
+        let original = std::env::var_os("FAKE_SECRET_TOKEN");
+        std::env::set_var("FAKE_SECRET_TOKEN", "absent-if-visible");
+
+        let config = super::super::EnvironmentConfig::local(
+            std::env::temp_dir().to_string_lossy().to_string(),
+        );
+        let env = create_environment(config).await.unwrap();
+
+        let first = {
+            let env = env.clone();
+            tokio::spawn(async move {
+                let mut guard = env.lock().await;
+                let mut options = ExecOptions::with_timeout(10_000);
+                options.env_remove_names = Some(vec!["FAKE_SECRET_TOKEN".to_string()]);
+                let _ = guard.execute("sleep 60", options).await;
+            })
+        };
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        first.abort();
+        let _ = first.await;
+
+        let second = {
+            let mut guard = env.lock().await;
+            guard
+                .execute(
+                    "sh -c 'echo ${FAKE_SECRET_TOKEN:-absent}'",
+                    ExecOptions::default(),
+                )
+                .await
+        }
+        .unwrap();
+        assert_eq!(second.output.trim(), "absent-if-visible");
+
+        match original {
+            Some(v) => std::env::set_var("FAKE_SECRET_TOKEN", v),
+            None => std::env::remove_var("FAKE_SECRET_TOKEN"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_local_env_timeout() {
         let config = super::super::EnvironmentConfig::default();
         let env = create_environment(config).await.unwrap();
@@ -605,7 +661,7 @@ mod tests {
             shell_path: "/bin/bash".to_string(),
         };
 
-        let run_env = env.build_run_env();
+        let (run_env, _removed_names) = env.build_run_env(None);
 
         // 确保黑名单中的变量被过滤
         assert!(!run_env.contains_key("OPENAI_API_KEY"));

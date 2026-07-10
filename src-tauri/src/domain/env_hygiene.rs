@@ -49,6 +49,23 @@ where
     (kept, dropped_names)
 }
 
+pub fn sensitive_env_names_to_remove<I, K, V>(vars: I, keep_exemptions: &[Pattern]) -> Vec<String>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    let (_, dropped_names) = filter_env_vars(vars, keep_exemptions);
+    dropped_names
+}
+
+pub(crate) fn calculate_env_hygiene_remove_list() -> Vec<String> {
+    sensitive_env_names_to_remove(
+        std::env::vars(),
+        &keep_exemptions_from(std::env::var("OMIGA_ENV_KEEP").ok().as_deref()),
+    )
+}
+
 fn is_exempt(name: &str, exemptions: &[Pattern]) -> bool {
     exemptions
         .iter()
@@ -134,6 +151,26 @@ mod tests {
     fn keep_exemptions_discards_empty_and_global_wildcard_patterns() {
         let exemptions = keep_exemptions_from(Some("*,   ,"));
         assert!(exemptions.is_empty());
+    }
+
+    #[test]
+    fn sensitive_env_names_to_remove_uses_keep_exemptions() {
+        let env = map_from(&[
+            ("FAKE_SECRET_TOKEN", "one"),
+            ("MY_API_KEY", "two"),
+            ("NORMAL", "three"),
+        ]);
+
+        let dropped = sensitive_env_names_to_remove(
+            env.iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+            &keep_exemptions_from(Some("NORMAL")),
+        );
+
+        assert_eq!(
+            dropped,
+            vec!["FAKE_SECRET_TOKEN".to_string(), "MY_API_KEY".to_string()]
+        );
     }
 
     #[test]
@@ -248,5 +285,47 @@ mod tests {
         let (kept, dropped) = filter_env_vars(std::iter::empty::<(String, String)>(), &[]);
         assert_eq!(kept, Vec::<(String, String)>::new());
         assert_eq!(dropped, Vec::<String>::new());
+    }
+
+    #[test]
+    fn platform_credentials_are_scrubbed_from_operator_children_by_design() {
+        let env = map_from(&[
+            ("OMIGA_EXA_API_KEY", "value-1"),
+            ("OMIGA_GMAIL_OAUTH_CLIENT_SECRET", "value-2"),
+            ("OMIGA_GITHUB_ACCESS_TOKEN_URL", "value-3"),
+            ("OMIGA_ENV_KEEP", "value-4"),
+        ]);
+        let dropped = sensitive_env_names_to_remove(
+            env.iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+            &[],
+        );
+
+        assert!(dropped.contains(&"OMIGA_EXA_API_KEY".to_string()));
+        assert!(dropped.contains(&"OMIGA_GMAIL_OAUTH_CLIENT_SECRET".to_string()));
+        assert!(dropped.contains(&"OMIGA_GITHUB_ACCESS_TOKEN_URL".to_string()));
+        assert!(
+            !dropped.contains(&"OMIGA_ENV_KEEP".to_string()),
+            "平台豁免变量应默认保留"
+        );
+    }
+
+    #[test]
+    fn platform_runtime_controls_are_not_scrubbed_from_operator_children_by_design() {
+        let env = map_from(&[
+            ("OMIGA_MICROMAMBA_SHA256", "value-1"),
+            ("OMIGA_ENV_KEEP", "value-2"),
+            ("OMIGA_DISABLE_ENV_PREWARM", "value-3"),
+        ]);
+        let (kept, dropped) = filter_env_vars(
+            env.iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+            &[],
+        );
+        let kept_names: Vec<_> = kept.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(kept_names.contains(&"OMIGA_MICROMAMBA_SHA256"));
+        assert!(kept_names.contains(&"OMIGA_ENV_KEEP"));
+        assert!(kept_names.contains(&"OMIGA_DISABLE_ENV_PREWARM"));
+        assert!(dropped.is_empty());
     }
 }

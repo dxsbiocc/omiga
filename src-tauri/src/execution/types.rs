@@ -57,6 +57,8 @@ pub struct ExecOptions {
     pub timeout: Option<u64>, // 毫秒
     pub stdin_data: Option<String>,
     pub cwd: Option<String>,
+    // 仅该次执行会话临时清洗的环境变量名；优先于实例级状态，不保留在对象上。
+    pub env_remove_names: Option<Vec<String>>,
 }
 
 impl ExecOptions {
