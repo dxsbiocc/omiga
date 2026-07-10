@@ -25,39 +25,65 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 
 mod chains;
+mod conda_env;
+mod container;
 mod execution;
 mod execution_types;
 mod io_support;
 mod manifest;
+mod outputs;
 mod registry;
 mod scripts;
+mod slurm;
 mod validation;
 
 pub use execution::{
-    cleanup_operator_runs_for_context, execute_operator_tool_call,
-    execute_operator_tool_call_with_context, execute_resolved_operator_tool_call_with_context,
-    list_operator_runs_for_context, read_operator_run_for_context,
-    read_operator_run_log_for_context, verify_operator_run_for_context,
-    with_operator_queue_status_sender, OperatorQueueStatusSender,
+    execute_operator_tool_call, execute_operator_tool_call_with_context,
+    execute_resolved_operator_tool_call_with_context, with_operator_queue_status_sender,
+    OperatorQueueStatusSender,
 };
 
-pub(crate) use execution::{
-    cache_config_enabled, container_runtime_prepare_script, operator_conda_environment_selection,
-    operator_container_selection_for_profile, operator_manifest_diagnostics_from_plugins,
+pub use outputs::{
+    cleanup_operator_runs_for_context, list_operator_runs_for_context,
+    read_operator_run_for_context, read_operator_run_log_for_context,
+    verify_operator_run_for_context,
+};
+
+pub(crate) use execution::{cache_config_enabled, operator_manifest_diagnostics_from_plugins};
+pub(crate) use outputs::{
     operator_run_dir, operator_run_relative_path, operator_runs_relative_path, operator_runs_root,
-    OperatorContainerImagePrepare, OperatorContainerKind, MICROMAMBA_BOOTSTRAP_SHELL,
+};
+
+pub(crate) use conda_env::{
+    operator_conda_environment_command, operator_conda_environment_selection,
+    MICROMAMBA_BOOTSTRAP_SHELL,
+};
+
+pub(crate) use container::{
+    container_runtime_prepare_script, containerized_operator_command,
+    operator_container_for_command, operator_container_selection_for_profile,
+    operator_environment_profile, operator_environment_ref_error_command,
+    OperatorContainerImagePrepare, OperatorContainerKind,
+};
+
+pub(crate) use slurm::{execute_via_slurm, operator_uses_slurm_scheduler};
+
+pub(crate) use outputs::{
+    collect_environment_outputs, collect_local_outputs, read_environment_json,
+    read_environment_structured_outputs, read_local_structured_outputs, update_environment_status,
+    update_local_status, validate_structured_outputs_against_manifest, write_environment_json,
 };
 
 #[cfg(test)]
 pub(crate) use execution::{
-    apply_status_metadata, collect_local_outputs, conda_environment_shell_script,
-    container_runtime_preflight_script, execute_env_command, execute_resolved_operator,
-    list_local_operator_runs, operator_container_for_command, operator_execution_command,
-    operator_retry_policy, parse_remote_path_fingerprint, parse_sacct_diagnostic_output,
-    read_local_operator_run, read_local_structured_outputs, runtime_supported, sha256_file,
-    should_retry_operator_error, validate_structured_outputs_against_manifest,
-    OperatorCondaEnvironmentSelection,
+    execute_resolved_operator, operator_execution_command, operator_retry_policy,
+    parse_remote_path_fingerprint, runtime_supported, sha256_file, should_retry_operator_error,
 };
+
+#[cfg(test)]
+pub(crate) use slurm::parse_sacct_diagnostic_output;
+
+// Intentionally no extra test re-exports; duplicates are intentionally avoided above.
 
 pub(crate) use execution_types::{
     failure_json, provisioning_failure_for_error, record_operator_failure_best_effort,
@@ -78,6 +104,16 @@ pub use chains::{
     save_user_script_operator, user_chains_dir, user_operators_dir, ChainStep, ChainTemplate,
     UserOperatorInput, UserOperatorOutput, UserOperatorParam,
 };
+#[cfg(test)]
+pub(crate) use conda_env::{conda_environment_shell_script, OperatorCondaEnvironmentSelection};
+#[cfg(test)]
+pub(crate) use container::container_runtime_preflight_script;
+pub(crate) use container::selected_direct_container;
+pub(crate) use execution::{
+    execute_env_command, operator_environment_cwd, operator_environment_manifest_dir,
+    operator_profile_relative_path, operator_runtime_env_ref, profile_runtime_extra_str,
+    runtime_axis_values, safe_operator_env_component, sha256_hex, validate_output_glob_pattern,
+};
 pub(crate) use io_support::{
     current_epoch_ms, read_json_value, read_tail, read_tail_limited, safe_relative_string,
     write_json_file,
@@ -92,6 +128,16 @@ pub(crate) use manifest::{
     OperatorPreflightOptionSpec, OperatorPreflightQuestionSpec, OperatorPreflightSpec,
     OperatorRegistryEntry, OperatorRegistryFile, OperatorRegistryUpdate, OperatorResourceSpec,
     OperatorSource, OperatorSpec, ResolvedOperator, OPERATOR_API_VERSION_V1ALPHA1, OPERATOR_KIND,
+};
+#[cfg(test)]
+pub(crate) use outputs::{
+    apply_status_metadata, list_local_operator_runs, read_local_operator_run,
+};
+pub(crate) use outputs::{
+    export_environment_operator_results, export_local_operator_results, is_safe_operator_run_id,
+    json_string_at, operator_result_markdown_report, remote_tail, rfc3339_sort_key,
+    summarize_local_operator_run_dir, summarize_operator_run_documents,
+    write_environment_operator_result_readme, write_local_operator_result_readme,
 };
 #[cfg(test)]
 pub(crate) use registry::{
