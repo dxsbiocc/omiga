@@ -26,6 +26,15 @@ use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
+mod io_support;
+mod scripts;
+
+pub(crate) use io_support::{
+    current_epoch_ms, read_json_value, read_tail, read_tail_limited, safe_relative_string,
+    write_json_file,
+};
+pub(crate) use scripts::{command_with_log_capture, sh_quote, shell_join};
+
 pub const OPERATOR_API_VERSION_V1ALPHA1: &str = "omiga.ai/operator/v1alpha1";
 pub const OPERATOR_API_VERSION_V1ALPHA2: &str = "omiga.ai/operator/v1alpha2";
 pub const OPERATOR_KIND: &str = "Operator";
@@ -72,13 +81,6 @@ fn current_operator_queue_status_sender() -> Option<OperatorQueueStatusSender> {
     OPERATOR_QUEUE_STATUS_SENDER
         .try_with(|sender| sender.clone())
         .ok()
-}
-
-fn current_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
 }
 
 pub mod operator_favorites {
@@ -6543,26 +6545,6 @@ async fn stage_remote_plugin_files(
     Ok(staged)
 }
 
-fn safe_relative_string(path: &Path) -> Result<String, OperatorToolError> {
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => {
-                parts.push(part.to_string_lossy().into_owned());
-            }
-            std::path::Component::CurDir => {}
-            _ => {
-                return Err(OperatorToolError::new(
-                    "execution_infra_error",
-                    true,
-                    format!("unsafe plugin relative path {}", path.display()),
-                ))
-            }
-        }
-    }
-    Ok(parts.join("/"))
-}
-
 async fn execute_env_command(
     ctx: &crate::domain::tools::ToolContext,
     cwd: &str,
@@ -7022,17 +7004,6 @@ async fn execute_via_slurm(
         }
         tokio::time::sleep(poll_interval).await;
     }
-}
-
-fn command_with_log_capture(argv: &[String]) -> String {
-    let rendered = argv
-        .iter()
-        .map(|arg| sh_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "set +e\n{rendered} > logs/stdout.txt 2> logs/stderr.txt\ncode=$?\nprintf '\\n__OMIGA_OPERATOR_EXIT_CODE=%s\\n' \"$code\"\nexit \"$code\""
-    )
 }
 
 fn operator_execution_command(
@@ -8056,18 +8027,6 @@ fn container_bind_spec(path: &str, writable: bool) -> String {
     }
 }
 
-fn shell_join(tokens: &[String]) -> String {
-    tokens
-        .iter()
-        .map(|token| sh_quote(token))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn sh_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 fn validate_output_glob_pattern<'a>(
     name: &str,
     pattern: &'a str,
@@ -9078,11 +9037,6 @@ fn apply_status_metadata(value: &mut JsonValue, metadata: Option<&OperatorRunSta
             }
         }
     }
-}
-
-fn write_json_file(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let raw = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
-    fs::write(path, format!("{raw}\n")).map_err(|err| err.to_string())
 }
 
 pub fn list_local_operator_runs(project_root: &Path, limit: usize) -> Vec<OperatorRunSummary> {
@@ -10104,11 +10058,6 @@ fn is_safe_operator_run_id(run_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-fn read_json_value(path: &Path) -> Result<JsonValue, String> {
-    let raw = fs::read_to_string(path).map_err(|err| err.to_string())?;
-    serde_json::from_str(&raw).map_err(|err| err.to_string())
-}
-
 fn json_value_at<'a>(value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValue> {
     let mut current = value;
     for key in path {
@@ -10172,17 +10121,6 @@ fn file_modified_rfc3339(path: &Path) -> Option<String> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     let datetime: chrono::DateTime<chrono::Utc> = modified.into();
     Some(datetime.to_rfc3339())
-}
-
-fn read_tail(path: impl AsRef<Path>) -> Option<String> {
-    read_tail_limited(path, 4000)
-}
-
-fn read_tail_limited(path: impl AsRef<Path>, limit_chars: usize) -> Option<String> {
-    let raw = fs::read_to_string(path).ok()?;
-    let chars = raw.chars().collect::<Vec<_>>();
-    let start = chars.len().saturating_sub(limit_chars);
-    Some(chars[start..].iter().collect())
 }
 
 fn run_identity(resolved: &ResolvedOperator) -> OperatorRunIdentity {
