@@ -8,6 +8,7 @@
 // Keep public module names flat for compatibility while storing same-family
 // tool implementations in subdirectories.
 pub mod agent;
+pub mod apply_patch;
 #[path = "interaction/ask_user_question.rs"]
 pub mod ask_user_question;
 pub mod bash;
@@ -17,12 +18,12 @@ pub mod cron_delete;
 pub mod cron_list;
 #[path = "plan/enter_mode.rs"]
 pub mod enter_plan_mode;
-pub mod enter_worktree;
 pub mod env_store;
 #[path = "environment/profile_check.rs"]
 pub mod environment_profile_check;
 #[path = "environment/profile_prepare_plan.rs"]
 pub mod environment_profile_prepare_plan;
+pub mod exec_session;
 #[path = "execution/archive_advisor.rs"]
 pub mod execution_archive_advisor;
 #[path = "execution/archive_suggestion_write.rs"]
@@ -35,7 +36,6 @@ pub mod execution_record_detail;
 pub mod execution_record_list;
 #[path = "plan/exit_mode.rs"]
 pub mod exit_plan_mode;
-pub mod exit_worktree;
 pub mod fetch;
 #[path = "file/edit.rs"]
 pub mod file_edit;
@@ -81,6 +81,7 @@ pub mod query;
 #[path = "mcp/read_resource.rs"]
 pub mod read_mcp_resource;
 pub mod recall;
+pub mod sandbox;
 pub mod search;
 #[path = "interaction/send_user_message.rs"]
 pub mod send_user_message;
@@ -124,7 +125,6 @@ pub mod visualization;
 pub mod web_safety;
 pub mod workflow;
 
-use crate::domain::agents::subagent_tool_filter::env_workflow_scripts_enabled;
 use crate::domain::background_shell::BackgroundShellHandle;
 use crate::domain::retrieval_registry::{self, RegistryEntryKind};
 use crate::domain::session::AgentTask;
@@ -138,6 +138,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolKind {
+    ApplyPatch,
     Bash,
     FileEdit,
     FileRead,
@@ -182,6 +183,7 @@ pub enum ToolKind {
     ReadMcpResource,
     #[serde(rename = "ListSkills")]
     ListSkills,
+    SkillView,
     #[serde(rename = "Skill")]
     SkillInvoke,
     #[serde(rename = "Agent")]
@@ -192,10 +194,6 @@ pub enum ToolKind {
     ExitPlanMode,
     #[serde(rename = "EnterPlanMode")]
     EnterPlanMode,
-    #[serde(rename = "EnterWorktree")]
-    EnterWorktree,
-    #[serde(rename = "ExitWorktree")]
-    ExitWorktree,
     #[serde(rename = "Monitor")]
     Monitor,
     #[serde(rename = "PushNotification")]
@@ -227,6 +225,7 @@ pub enum ToolKind {
 impl fmt::Display for ToolKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ToolKind::ApplyPatch => write!(f, "apply_patch"),
             ToolKind::Bash => write!(f, "bash"),
             ToolKind::FileEdit => write!(f, "file_edit"),
             ToolKind::FileRead => write!(f, "file_read"),
@@ -280,13 +279,12 @@ impl fmt::Display for ToolKind {
             ToolKind::ListMcpResources => write!(f, "list_mcp_resources"),
             ToolKind::ReadMcpResource => write!(f, "read_mcp_resource"),
             ToolKind::ListSkills => write!(f, "ListSkills"),
+            ToolKind::SkillView => write!(f, "skill_view"),
             ToolKind::SkillInvoke => write!(f, "Skill"),
             ToolKind::Agent => write!(f, "Agent"),
             ToolKind::SendUserMessage => write!(f, "SendUserMessage"),
             ToolKind::ExitPlanMode => write!(f, "ExitPlanMode"),
             ToolKind::EnterPlanMode => write!(f, "EnterPlanMode"),
-            ToolKind::EnterWorktree => write!(f, "EnterWorktree"),
-            ToolKind::ExitWorktree => write!(f, "ExitWorktree"),
             ToolKind::Monitor => write!(f, "Monitor"),
             ToolKind::PushNotification => write!(f, "PushNotification"),
             ToolKind::TaskStop => write!(f, "TaskStop"),
@@ -309,6 +307,7 @@ impl fmt::Display for ToolKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "tool", content = "arguments")]
 pub enum Tool {
+    ApplyPatch(apply_patch::ApplyPatchArgs),
     Bash(bash::BashArgs),
     FileEdit(file_edit::FileEditArgs),
     FileRead(file_read::FileReadArgs),
@@ -361,14 +360,13 @@ pub enum Tool {
     ReadMcpResource(read_mcp_resource::ReadMcpResourceArgs),
     #[serde(rename = "ListSkills")]
     ListSkills(list_skills::ListSkillsArgs),
+    SkillView(skill_view::SkillViewArgs),
     #[serde(rename = "Skill")]
     SkillInvoke(skill_invoke::SkillInvokeArgs),
     Agent(agent::AgentArgs),
     SendUserMessage(send_user_message::SendUserMessageArgs),
     ExitPlanMode(exit_plan_mode::ExitPlanModeArgs),
     EnterPlanMode(enter_plan_mode::EnterPlanModeArgs),
-    EnterWorktree(enter_worktree::EnterWorktreeArgs),
-    ExitWorktree(exit_worktree::ExitWorktreeArgs),
     Monitor(monitor::MonitorArgs),
     PushNotification(push_notification::PushNotificationArgs),
     TaskStop(task_stop::TaskStopArgs),
@@ -390,6 +388,7 @@ impl Tool {
     /// Get the tool kind
     pub fn kind(&self) -> ToolKind {
         match self {
+            Tool::ApplyPatch(_) => ToolKind::ApplyPatch,
             Tool::Bash(_) => ToolKind::Bash,
             Tool::FileEdit(_) => ToolKind::FileEdit,
             Tool::FileRead(_) => ToolKind::FileRead,
@@ -433,13 +432,12 @@ impl Tool {
             Tool::ListMcpResources(_) => ToolKind::ListMcpResources,
             Tool::ReadMcpResource(_) => ToolKind::ReadMcpResource,
             Tool::ListSkills(_) => ToolKind::ListSkills,
+            Tool::SkillView(_) => ToolKind::SkillView,
             Tool::SkillInvoke(_) => ToolKind::SkillInvoke,
             Tool::Agent(_) => ToolKind::Agent,
             Tool::SendUserMessage(_) => ToolKind::SendUserMessage,
             Tool::ExitPlanMode(_) => ToolKind::ExitPlanMode,
             Tool::EnterPlanMode(_) => ToolKind::EnterPlanMode,
-            Tool::EnterWorktree(_) => ToolKind::EnterWorktree,
-            Tool::ExitWorktree(_) => ToolKind::ExitWorktree,
             Tool::Monitor(_) => ToolKind::Monitor,
             Tool::PushNotification(_) => ToolKind::PushNotification,
             Tool::TaskStop(_) => ToolKind::TaskStop,
@@ -460,6 +458,7 @@ impl Tool {
     /// Get the tool name for display
     pub fn name(&self) -> &'static str {
         match self {
+            Tool::ApplyPatch(_) => "apply_patch",
             Tool::Bash(_) => "Bash",
             Tool::FileEdit(_) => "FileEdit",
             Tool::FileRead(_) => "FileRead",
@@ -501,13 +500,12 @@ impl Tool {
             Tool::ListMcpResources(_) => "ListMcpResources",
             Tool::ReadMcpResource(_) => "ReadMcpResource",
             Tool::ListSkills(_) => "ListSkills",
+            Tool::SkillView(_) => "skill_view",
             Tool::SkillInvoke(_) => "Skill",
             Tool::Agent(_) => "Agent",
             Tool::SendUserMessage(_) => "SendUserMessage",
             Tool::ExitPlanMode(_) => "ExitPlanMode",
             Tool::EnterPlanMode(_) => "EnterPlanMode",
-            Tool::EnterWorktree(_) => "EnterWorktree",
-            Tool::ExitWorktree(_) => "ExitWorktree",
             Tool::Monitor(_) => "Monitor",
             Tool::PushNotification(_) => "PushNotification",
             Tool::TaskStop(_) => "TaskStop",
@@ -528,6 +526,7 @@ impl Tool {
     /// Get tool description for LLM
     pub fn description(&self) -> &'static str {
         match self {
+            Tool::ApplyPatch(_) => apply_patch::DESCRIPTION,
             Tool::Bash(_) => bash::DESCRIPTION,
             Tool::FileEdit(_) => file_edit::DESCRIPTION,
             Tool::FileRead(_) => file_read::DESCRIPTION,
@@ -577,13 +576,14 @@ impl Tool {
             Tool::ListMcpResources(_) => list_mcp_resources::DESCRIPTION,
             Tool::ReadMcpResource(_) => read_mcp_resource::DESCRIPTION,
             Tool::ListSkills(_) => list_skills::DESCRIPTION,
+            Tool::SkillView(_) => {
+                "Read full SKILL.md text for one skill, or a bundled reference file."
+            }
             Tool::SkillInvoke(_) => skill_invoke::DESCRIPTION,
             Tool::Agent(_) => agent::DESCRIPTION,
             Tool::SendUserMessage(_) => send_user_message::DESCRIPTION,
             Tool::ExitPlanMode(_) => exit_plan_mode::DESCRIPTION,
             Tool::EnterPlanMode(_) => enter_plan_mode::DESCRIPTION,
-            Tool::EnterWorktree(_) => enter_worktree::DESCRIPTION,
-            Tool::ExitWorktree(_) => exit_worktree::DESCRIPTION,
             Tool::Monitor(_) => monitor::DESCRIPTION,
             Tool::PushNotification(_) => push_notification::DESCRIPTION,
             Tool::TaskStop(_) => task_stop::DESCRIPTION,
@@ -607,6 +607,7 @@ impl Tool {
         ctx: &ToolContext,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         let result: crate::infrastructure::streaming::StreamOutputBox = match self {
+            Tool::ApplyPatch(args) => apply_patch::ApplyPatchTool::execute(ctx, args).await?,
             Tool::Bash(args) => bash::BashTool::execute(ctx, args).await?,
             Tool::FileEdit(args) => file_edit::FileEditTool::execute(ctx, args).await?,
             Tool::FileRead(args) => file_read::FileReadTool::execute(ctx, args).await?,
@@ -724,6 +725,32 @@ impl Tool {
                     skills::list_skills_metadata_json(&all_skills, args.query.as_deref(), task_ctx);
                 return Ok(stream_single(StreamOutputItem::Text(json)));
             }
+            Tool::SkillView(args) => {
+                use crate::domain::skills;
+                use crate::infrastructure::streaming::{stream_single, StreamOutputItem};
+                let cache = ctx.skill_cache.clone().unwrap_or_else(|| {
+                    Arc::new(std::sync::Mutex::new(skills::SkillCacheMap::default()))
+                });
+                let all_skills = skills::load_skills_cached(&ctx.project_root, &cache).await;
+                match skills::execute_skill_view(
+                    &all_skills,
+                    args.skill.trim(),
+                    args.file_path.as_deref(),
+                )
+                .await
+                {
+                    Ok(value) => {
+                        let json = serde_json::to_string_pretty(&value)
+                            .unwrap_or_else(|_| "{\"success\":false}".to_string());
+                        return Ok(stream_single(StreamOutputItem::Text(json)));
+                    }
+                    Err(e) => {
+                        return Err(ToolError::ExecutionFailed {
+                            message: e.to_string(),
+                        })
+                    }
+                }
+            }
             Tool::SkillInvoke(args) => {
                 use crate::domain::skills;
                 use crate::infrastructure::streaming::{stream_single, StreamOutputItem};
@@ -758,10 +785,6 @@ impl Tool {
             Tool::EnterPlanMode(args) => {
                 enter_plan_mode::EnterPlanModeTool::execute(ctx, args).await?
             }
-            Tool::EnterWorktree(args) => {
-                enter_worktree::EnterWorktreeTool::execute(ctx, args).await?
-            }
-            Tool::ExitWorktree(args) => exit_worktree::ExitWorktreeTool::execute(ctx, args).await?,
             Tool::Monitor(args) => monitor::MonitorTool::execute(ctx, args).await?,
             Tool::PushNotification(args) => {
                 push_notification::PushNotificationTool::execute(ctx, args).await?
@@ -785,6 +808,12 @@ impl Tool {
     /// Parse tool from JSON arguments
     pub fn from_json(kind: ToolKind, json: &str) -> Result<Self, ToolError> {
         match kind {
+            ToolKind::ApplyPatch => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid apply_patch arguments: {}", e),
+                })?;
+                Ok(Tool::ApplyPatch(args))
+            }
             ToolKind::Bash => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid bash arguments: {}", e),
@@ -1040,6 +1069,12 @@ impl Tool {
                 })?;
                 Ok(Tool::ListSkills(args))
             }
+            ToolKind::SkillView => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid skill_view arguments: {}", e),
+                })?;
+                Ok(Tool::SkillView(args))
+            }
             ToolKind::SkillInvoke => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid SkillInvoke arguments: {}", e),
@@ -1069,18 +1104,6 @@ impl Tool {
                     message: format!("Invalid EnterPlanMode arguments: {}", e),
                 })?;
                 Ok(Tool::EnterPlanMode(args))
-            }
-            ToolKind::EnterWorktree => {
-                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
-                    message: format!("Invalid EnterWorktree arguments: {}", e),
-                })?;
-                Ok(Tool::EnterWorktree(args))
-            }
-            ToolKind::ExitWorktree => {
-                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
-                    message: format!("Invalid ExitWorktree arguments: {}", e),
-                })?;
-                Ok(Tool::ExitWorktree(args))
             }
             ToolKind::Monitor => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
@@ -1176,6 +1199,7 @@ impl Tool {
             normalize_legacy_retrieval_tool_arguments(tool_name, &normalized_tool_name, json);
         let kind = match normalized_tool_name.as_str() {
             "bash" => ToolKind::Bash,
+            "apply_patch" => ToolKind::ApplyPatch,
             "file_edit" => ToolKind::FileEdit,
             "file_read" => ToolKind::FileRead,
             "file_write" => ToolKind::FileWrite,
@@ -1237,14 +1261,13 @@ impl Tool {
             "ask_user_question" | "AskUserQuestion" => ToolKind::AskUserQuestion,
             "list_mcp_resources" | "ListMcpResourcesTool" => ToolKind::ListMcpResources,
             "read_mcp_resource" | "ReadMcpResourceTool" => ToolKind::ReadMcpResource,
-            "ListSkills" => ToolKind::ListSkills,
-            "Skill" => ToolKind::SkillInvoke,
+            "ListSkills" | "list_skills" | "skills_list" => ToolKind::ListSkills,
+            "skill_view" | "SkillView" => ToolKind::SkillView,
+            "Skill" | "skill" => ToolKind::SkillInvoke,
             "Agent" | "Task" | "agent" => ToolKind::Agent,
             "SendUserMessage" | "Brief" | "send_user_message" => ToolKind::SendUserMessage,
             "ExitPlanMode" | "exit_plan_mode" => ToolKind::ExitPlanMode,
             "EnterPlanMode" | "enter_plan_mode" => ToolKind::EnterPlanMode,
-            "EnterWorktree" | "enter_worktree" => ToolKind::EnterWorktree,
-            "ExitWorktree" | "exit_worktree" => ToolKind::ExitWorktree,
             "Monitor" | "monitor" => ToolKind::Monitor,
             "PushNotification" | "push_notification" => ToolKind::PushNotification,
             "TaskStop" | "task_stop" | "KillShell" => ToolKind::TaskStop,
@@ -1880,6 +1903,7 @@ pub enum ToolResult {
 /// (only when the project has at least one `SKILL.md` — see `domain::skills`).
 pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
     let mut v = vec![
+        apply_patch::schema(),
         bash::schema(),
         file_read::schema(),
         file_write::schema(),
@@ -1923,8 +1947,6 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         agent::schema(),
         exit_plan_mode::schema(),
         enter_plan_mode::schema(),
-        enter_worktree::schema(),
-        exit_worktree::schema(),
         monitor::schema(),
         push_notification::schema(),
         task_stop::schema(),
@@ -1939,9 +1961,8 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         cron_delete::schema(),
     ];
     v.push(recall::schema());
-    if env_workflow_scripts_enabled() {
-        v.push(workflow::schema());
-    }
+    // Do not expose the legacy `workflow` tool. It only previews workflow files and cannot
+    // execute the Claude Code workflow runtime, so advertising it causes fake capability.
     // Procedural memory: available even when no skills exist yet (bootstrap creates first skill).
     v.push(skill_manage::schema());
     v.push(skill_config::schema());
@@ -1987,24 +2008,25 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "browser_screenshot" => (1, 20),
 
         // Mutating tools.
-        "file_edit" => (2, 0),
-        "file_write" => (2, 1),
-        "notebook_edit" => (2, 2),
-        "todo_write" => (2, 3),
-        "operator_execute" => (2, 4),
-        "template_execute" => (2, 5),
-        "learning_proposal_decide" => (2, 6),
-        "learning_proposal_apply" => (2, 7),
-        "learning_preference_candidate_promote" => (2, 7),
-        "execution_archive_suggestion_write" => (2, 8),
-        "environment_profile_prepare_plan" => (2, 9),
-        "learning_self_evolution_report" => (2, 10),
-        "learning_self_evolution_draft_write" => (2, 11),
-        "learning_self_evolution_creator" => (2, 12),
-        "browser_open" => (2, 13),
-        "browser_click" => (2, 14),
-        "browser_fill" => (2, 15),
-        "browser_close" => (2, 16),
+        "apply_patch" => (2, 0),
+        "file_edit" => (2, 1),
+        "file_write" => (2, 2),
+        "notebook_edit" => (2, 3),
+        "todo_write" => (2, 4),
+        "operator_execute" => (2, 5),
+        "template_execute" => (2, 6),
+        "learning_proposal_decide" => (2, 7),
+        "learning_proposal_apply" => (2, 8),
+        "learning_preference_candidate_promote" => (2, 8),
+        "execution_archive_suggestion_write" => (2, 9),
+        "environment_profile_prepare_plan" => (2, 10),
+        "learning_self_evolution_report" => (2, 11),
+        "learning_self_evolution_draft_write" => (2, 12),
+        "learning_self_evolution_creator" => (2, 13),
+        "browser_open" => (2, 14),
+        "browser_click" => (2, 15),
+        "browser_fill" => (2, 16),
+        "browser_close" => (2, 17),
 
         // Orchestration and app-specific tools.
         "agent" | "Agent" => (3, 0),
@@ -2016,18 +2038,18 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "task_stop" | "TaskStop" => (3, 6),
         "sleep" => (3, 7),
         "ask_user_question" | "AskUserQuestion" => (3, 8),
-        "skill_manage" | "skill_config" | "list_skills" | "skill_view" | "Skill" => (3, 9),
+        "skill_manage" | "skill_config" | "list_skills" | "skill_view" | "Skill" | "skill" => {
+            (3, 9)
+        }
         "workflow" | "Workflow" => (3, 10),
         "visualization" => (3, 11),
         "enter_plan_mode" | "EnterPlanMode" => (3, 12),
         "exit_plan_mode" | "ExitPlanMode" => (3, 13),
-        "EnterWorktree" | "enter_worktree" => (3, 14),
-        "ExitWorktree" | "exit_worktree" => (3, 15),
-        "Monitor" | "monitor" => (3, 16),
-        "PushNotification" | "push_notification" => (3, 17),
-        "CronCreate" | "cron_create" => (3, 18),
-        "CronList" | "cron_list" => (3, 19),
-        "CronDelete" | "cron_delete" => (3, 20),
+        "Monitor" | "monitor" => (3, 14),
+        "PushNotification" | "push_notification" => (3, 15),
+        "CronCreate" | "cron_create" => (3, 16),
+        "CronList" | "cron_list" => (3, 17),
+        "CronDelete" | "cron_delete" => (3, 18),
 
         // Shell is intentionally late: use it for terminal operations only
         // after dedicated tools are not appropriate.
@@ -2172,6 +2194,8 @@ pub struct ToolSchema {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    #[serde(skip_serializing)]
+    pub concurrency_safe: bool,
 }
 
 impl ToolSchema {
@@ -2185,46 +2209,17 @@ impl ToolSchema {
             name: name.into(),
             description: description.into(),
             parameters,
+            concurrency_safe: false,
         }
+    }
+
+    pub fn concurrency_safe(mut self) -> Self {
+        self.concurrency_safe = true;
+        self
     }
 }
 
 use std::fmt;
-
-/// Returns true when the named tool can safely run concurrently with other such tools.
-///
-/// Mirrors TS `isConcurrencySafe` on each tool class (see `toolOrchestration.ts`).
-/// Only pure read-only tools that never modify shared state are safe to run in parallel.
-pub fn is_concurrency_safe_by_name(name: &str) -> bool {
-    matches!(
-        name,
-        "file_read"
-            | "ripgrep"
-            | "grep"
-            | "glob"
-            | "fetch"
-            | "query"
-            | "search"
-            | "connector"
-            | "operator_list"
-            | "operator_describe"
-            | "unit_list"
-            | "unit_search"
-            | "unit_describe"
-            | "unit_authoring_validate"
-            | "execution_record_list"
-            | "execution_record_detail"
-            | "execution_lineage_report"
-            | "execution_archive_advisor"
-            | "environment_profile_check"
-            | "ToolSearch"
-            | "tool_search"
-            | "visualization"
-            | "list_skills"  // read-only metadata scan
-            | "skill_view"
-            | "recall"
-    )
-}
 
 #[cfg(test)]
 mod tool_enum_tests {
@@ -2257,6 +2252,18 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("ReadMcpResourceTool", r#"{"server":"s","uri":"u"}"#).unwrap();
         assert!(matches!(t, Tool::ReadMcpResource(_)));
+
+        let t = Tool::from_json_str("list_skills", "{}").unwrap();
+        assert!(matches!(t, Tool::ListSkills(_)));
+
+        let t = Tool::from_json_str("skills_list", "{}").unwrap();
+        assert!(matches!(t, Tool::ListSkills(_)));
+
+        let t = Tool::from_json_str("skill_view", r#"{"skill":"diagnose"}"#).unwrap();
+        assert!(matches!(t, Tool::SkillView(_)));
+
+        let t = Tool::from_json_str("skill", r#"{"skill":"diagnose"}"#).unwrap();
+        assert!(matches!(t, Tool::SkillInvoke(_)));
 
         let t =
             Tool::from_json_str("Agent", r#"{"description":"test","prompt":"do thing"}"#).unwrap();
@@ -2473,6 +2480,21 @@ mod tool_enum_tests {
             names.contains("operator_execute"),
             "operator progressive disclosure should expose a generic operator_execute schema"
         );
+    }
+
+    #[test]
+    fn tool_schema_catalog_hides_worktree_tools() {
+        let names: HashSet<_> = all_tool_schemas(true)
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect();
+
+        assert!(
+            !names.contains("EnterWorktree") && !names.contains("ExitWorktree"),
+            "worktree tools are developer-focused and must not be exposed in the focused research UI"
+        );
+        assert!(Tool::from_json_str("EnterWorktree", "{}").is_err());
+        assert!(Tool::from_json_str("exit_worktree", "{}").is_err());
     }
 
     #[test]

@@ -3,6 +3,7 @@ import {
   buildComposerMentionChildPath,
   buildComposerPathInjection,
   filterComposerMentionRows,
+  formatComposerPathChipLabel,
   formatComposerPathPreview,
   joinWorkspaceMentionDirectory,
   mergeComposerPathsAndBody,
@@ -122,9 +123,30 @@ describe("composerPathMentions", () => {
 
     expect(merged).toContain("<omiga-selected-paths>");
     expect(merged).toContain("- src/components/Chat/ChatComposer.tsx");
-    expect(merged).toContain("do not infer or guess alternatives");
+    expect(merged).toContain("Do not run find");
     expect(stripLeadingPathPrefixFromMerged(merged, paths)).toBe(body);
     expect(pathsStillMatchMergedContent(paths, merged)).toBe(true);
+  });
+
+  it("preserves uploaded absolute attachment paths for direct reads", () => {
+    const paths = [
+      "/cluster/facility/yzhang/WorkSpace/code/EukDetect/附件1.xlsx",
+    ];
+    const merged = mergeComposerPathsAndBody(paths, "这个文件包含哪些内容");
+
+    expect(merged).toContain(
+      "- /cluster/facility/yzhang/WorkSpace/code/EukDetect/附件1.xlsx",
+    );
+    expect(merged).toContain("Absolute paths and ~/ paths are already resolved");
+    expect(formatComposerPathPreview(paths)).toBe(
+      "@/cluster/facility/yzhang/WorkSpace/code/EukDetect/附件1.xlsx",
+    );
+    expect(formatComposerPathChipLabel(paths[0])).toBe("附件1.xlsx");
+    expect(splitLeadingPathPrefixFromMerged(merged)).toMatchObject({
+      paths,
+      body: "这个文件包含哪些内容",
+      hasPathPrefix: true,
+    });
   });
 
   it("recovers paths from stored injection blocks when metadata is missing", () => {

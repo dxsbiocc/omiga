@@ -48,7 +48,6 @@ import {
   useChatComposerStore,
   type PermissionMode,
   type ComputerUseMode,
-  type BrowserUseMode,
   type SandboxBackend,
   type ExecutionEnvironment,
   type Message as StoreMessage,
@@ -74,6 +73,7 @@ import {
   getNestedToolPanelOpen,
   summarizeReactFold,
   ToolFoldHeader,
+  toolGroupHeaderAnyError,
   toolGroupAnyRunning,
   toolGroupFlowComplete,
 } from "./ToolFoldSummary";
@@ -127,6 +127,13 @@ import {
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { SessionSwitchSkeleton } from "./SessionSwitchSkeleton";
 import {
+  ResearchTaskLauncher,
+  buildResearchTaskPromptWithIntake,
+  mergeResearchTaskPromptWithDraft,
+  researchTaskPromptHasBlankFields,
+  shouldRequestResearchTaskIntake,
+} from "./ResearchTaskLauncher";
+import {
   ResearchGoalStatusPill,
   buildResearchGoalAutoRunCommand,
   researchGoalAutoRunElapsedBudgetReached,
@@ -157,6 +164,8 @@ import {
   parseSkillCommand,
   parseResearchCommand,
   parseWorkflowCommand,
+  shouldInvokeResearchSystemCommand,
+  type SlashCommandId,
 } from "../../utils/workflowCommands";
 import {
   formatComposerPathPreview,
@@ -506,6 +515,33 @@ function renderItemHasVisibleContent(item: RenderMsgItem): boolean {
   });
 }
 
+function latestTurnHasExecutionActivity(
+  messages: readonly Message[],
+  latestUserMessageId: string | null,
+): boolean {
+  if (!latestUserMessageId) return false;
+  let afterLatestUser = false;
+  for (const message of messages) {
+    if (message.role === "user") {
+      afterLatestUser = message.id === latestUserMessageId;
+      continue;
+    }
+    if (!afterLatestUser) continue;
+    if (message.role === "tool" && (message.toolCall || message.content.trim())) {
+      return true;
+    }
+    if (
+      message.role === "assistant" &&
+      (message.intermediate ||
+        message.prefaceBeforeTools?.trim() ||
+        (message.toolCallsList && message.toolCallsList.length > 0))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** One item in the main-session FIFO queue while a previous turn is still streaming. */
 interface QueuedMainSend {
   id: string;
@@ -515,7 +551,6 @@ interface QueuedMainSend {
   composerAgentType: string;
   permissionMode: PermissionMode;
   computerUseMode: ComputerUseMode;
-  browserUseMode: BrowserUseMode;
   /** 发送入队时的运行环境（与 composer 一致） */
   environment: ExecutionEnvironment;
   /** SSH 服务器名称（仅在 environment === "ssh" 时有效） */
@@ -541,10 +576,24 @@ function compactSuggestionLabel(label: string, prompt: string): string {
 
 function rewriteWorkflowBodyForBackend(body: string): {
   content: string;
-  workflowCommand?: "plan" | "schedule" | "team" | "autopilot";
+  workflowCommand?: SlashCommandId;
 } {
   const parsed = parseWorkflowCommand(body);
   if (!parsed) {
+    const research = parseResearchCommand(body);
+    if (research && !shouldInvokeResearchSystemCommand(research.body)) {
+      const researchBody = research.body.replace(/^run\s+/iu, "").trim();
+      return {
+        content: [
+          "请作为面向科研新手的科研任务助手，执行下面的科研任务。",
+          "要求：不要输出固定占位文本；优先给出围绕该问题的实际分析、检索词、证据边界和下一步。",
+          "如果当前环境无法完成真实外部检索，必须明确标注哪些结论需要后续检索验证，不要伪造文献。",
+          "",
+          researchBody || research.body,
+        ].join("\n"),
+        workflowCommand: "research",
+      };
+    }
     return { content: body };
   }
   const taskBody = parsed.body;
@@ -591,6 +640,61 @@ type ResearchGoalStatusResponse = {
 type SuggestResearchGoalCriteriaResponse = {
   criteria: string[];
 };
+
+const RESEARCH_TASK_INTAKE_QUESTIONS: AskUserQuestionItem[] = [
+  {
+    header: "研究问题",
+    question: "请填写具体研究问题是什么？",
+    options: [
+      {
+        label: "自定义研究问题",
+        description: "不要只保留模板；写成可以检索和回答的一句话。",
+        custom: true,
+        customPlaceholder: "例如：THRSP 是否通过脂代谢重塑影响乳腺癌进展？",
+        recommended: true,
+      },
+    ],
+  },
+  {
+    header: "对象领域",
+    question: "研究对象或领域是什么？",
+    options: [
+      {
+        label: "自定义对象/领域",
+        description: "填写疾病、模型、技术路线或学科领域。",
+        custom: true,
+        customPlaceholder: "例如：乳腺癌代谢组学与转录组学",
+        recommended: true,
+      },
+    ],
+  },
+  {
+    header: "关键词",
+    question: "关键词或时间范围是什么？",
+    options: [
+      {
+        label: "自定义关键词/时间范围",
+        description: "填写检索关键词、数据库范围或年份范围。",
+        custom: true,
+        customPlaceholder: "例如：THRSP, lipid metabolism, breast cancer, 2020-2026",
+        recommended: true,
+      },
+    ],
+  },
+];
+
+function askUserCustomAnswer(raw: string): string {
+  const trimmed = raw.trim();
+  const match = trimmed.match(/^[^：:]+[：:]\s*([\s\S]*)$/u);
+  return (match?.[1] ?? trimmed).trim();
+}
+
+function createResearchIntakeResetKey(): string {
+  return typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `research-intake-${Date.now()}`;
+}
 
 function researchGoalErrorMessage(error: unknown, fallback: string): string {
   if (typeof error === "string") return error;
@@ -696,6 +800,125 @@ const USER_BUBBLE_MAX_CSS = "min(1120px, 100%)";
 const MD_BLOCK_RADIUS_PX = 1;
 /** Inline `code` longer than this: no fill (e.g. protein sequences) */
 const INLINE_CODE_LONG_LEN = 80;
+
+function ImmediateThinkingPlaceholder({
+  chat,
+  hint,
+}: {
+  chat: ReturnType<typeof getChatTokens>;
+  hint?: string | null;
+}) {
+  const detail = hint?.trim() || "正在分析上下文，准备执行下一步…";
+
+  return (
+    <Fade in timeout={160}>
+      <Box
+        role="status"
+        aria-live="polite"
+        data-testid="chat-thinking-placeholder"
+        sx={{
+          width: "100%",
+          minWidth: 0,
+          maxWidth: "100%",
+          px: 1.4,
+          py: 1.15,
+          borderRadius: `${BUBBLE_RADIUS_PX}px`,
+          bgcolor: alpha(chat.agentBubbleBg, 0.82),
+          border: `1px solid ${alpha(chat.accent, 0.18)}`,
+          boxShadow: `0 10px 28px ${alpha(chat.accent, 0.08)}`,
+          fontFamily: chat.font,
+        }}
+      >
+        <Stack
+          direction="row"
+          alignItems="center"
+          spacing={1.1}
+          sx={{ minWidth: 0 }}
+        >
+          <Box
+            sx={{
+              width: 24,
+              height: 24,
+              borderRadius: "999px",
+              display: "grid",
+              placeItems: "center",
+              bgcolor: alpha(chat.accent, 0.12),
+              color: chat.accent,
+              flexShrink: 0,
+            }}
+          >
+            <CircularProgress size={14} thickness={5} sx={{ color: "inherit" }} />
+          </Box>
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={0.8}
+            sx={{ minWidth: 0, flex: 1 }}
+          >
+            <Typography
+              sx={{
+                fontSize: 13,
+                fontWeight: 700,
+                color: chat.textPrimary,
+                flexShrink: 0,
+              }}
+            >
+              正在思考
+            </Typography>
+            <Box
+              component="span"
+              sx={{
+                display: "inline-flex",
+                gap: 0.35,
+                flexShrink: 0,
+                "@media (prefers-reduced-motion: no-preference)": {
+                  "@keyframes omigaThinkingDot": {
+                    "0%, 80%, 100%": {
+                      opacity: 0.28,
+                      transform: "translateY(0)",
+                    },
+                    "40%": { opacity: 1, transform: "translateY(-2px)" },
+                  },
+                },
+                "& > span": {
+                  width: 4,
+                  height: 4,
+                  borderRadius: "999px",
+                  bgcolor: chat.accent,
+                  opacity: 0.45,
+                  "@media (prefers-reduced-motion: no-preference)": {
+                    animation: "omigaThinkingDot 1.1s ease-in-out infinite",
+                  },
+                },
+                "& > span:nth-of-type(2)": {
+                  animationDelay: "120ms",
+                },
+                "& > span:nth-of-type(3)": {
+                  animationDelay: "240ms",
+                },
+              }}
+            >
+              <Box component="span" />
+              <Box component="span" />
+              <Box component="span" />
+            </Box>
+            <Typography
+              noWrap
+              sx={{
+                minWidth: 0,
+                color: chat.textMuted,
+                fontSize: 13,
+                lineHeight: 1.5,
+              }}
+            >
+              {detail}
+            </Typography>
+          </Stack>
+        </Stack>
+      </Box>
+    </Fade>
+  );
+}
 
 /**
  * Skip adding a tool row when the payload has no tool name / id and no usable input.
@@ -827,7 +1050,12 @@ function executionStepSummary(name: string, args?: string): string {
  */
 type RenderMsgItem =
   | { kind: "row"; message: Message; dividerBefore?: boolean }
-  | { kind: "react_fold"; id: string; fold: Message[] };
+  | {
+      kind: "react_fold";
+      id: string;
+      fold: Message[];
+      finalAssistantText?: string;
+    };
 
 function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
   const out: RenderMsgItem[] = [];
@@ -941,7 +1169,12 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
     if (lastAssistantAfterTools >= 0) {
       const fold = segment.slice(0, lastAssistantAfterTools);
       if (fold.length > 0) {
-        out.push({ kind: "react_fold", id: `rf-${fold[0].id}`, fold });
+        out.push({
+          kind: "react_fold",
+          id: `rf-${fold[0].id}`,
+          fold,
+          finalAssistantText: segment[lastAssistantAfterTools].content,
+        });
       }
       out.push({
         kind: "row",
@@ -1457,6 +1690,7 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
   const toolMsgs = fold.filter((m) => m.role === "tool" && m.toolCall);
   const summary = summarizeReactFold(fold);
   const anyRunning = toolGroupAnyRunning(toolMsgs);
+  const anyError = toolGroupHeaderAnyError(toolMsgs, item.finalAssistantText);
   const showGroupDone = toolGroupFlowComplete(toolMsgs);
   const runningToolName = firstRunningToolName(toolMsgs);
   const runningToolCount = toolMsgs.filter(
@@ -1494,6 +1728,7 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
           expanded={expanded}
           summary={summary}
           anyRunning={anyRunning}
+          anyError={anyError}
           runningToolName={runningToolName}
           runningToolCount={runningToolCount}
           showGroupDone={showGroupDone}
@@ -1579,7 +1814,7 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
               />
             )}
 
-            {showGroupDone && (
+            {showGroupDone && !anyError && (
               <Stack direction="row" alignItems="center" spacing={1} sx={{ pt: 0.25 }}>
                 <CheckCircle sx={{ fontSize: 14, color: chat.doneGreen }} />
                 <Typography
@@ -1705,6 +1940,7 @@ const MessageRowRenderItem = memo(function MessageRowRenderItem({
             chat={chat}
             bubbleRadiusPx={BUBBLE_RADIUS_PX}
             maxWidth={USER_BUBBLE_MAX_CSS}
+            canRetry={!parseGoalCommand(userBubbleDisplayText.trim())}
             onRetry={() => onRetryMessage(message)}
             onEdit={() => onEditMessage(message)}
             onCopy={() => onCopyMessage(message)}
@@ -2540,7 +2776,6 @@ export function Chat({ sessionId }: ChatProps) {
         st.setComposerAgentType(item.composerAgentType);
         st.setPermissionMode(item.permissionMode);
         st.setComputerUseMode(item.computerUseMode);
-        st.setBrowserUseMode(item.browserUseMode);
         st.setEnvironment(item.environment);
         st.setSshServer(item.sshServer);
       });
@@ -2690,7 +2925,6 @@ export function Chat({ sessionId }: ChatProps) {
         composerAgentType: "general-purpose",
         permissionMode: st.permissionMode,
         computerUseMode: "off",
-        browserUseMode: "off",
         environment: st.environment,
         sshServer: st.sshServer,
         sandboxBackend: st.sandboxBackend,
@@ -3497,6 +3731,59 @@ export function Chat({ sessionId }: ChatProps) {
     [],
   );
 
+  const handleResearchTaskSelect = useCallback(
+    (prompt: string, autoSend: boolean) => {
+      const existingDraft = composerRef.current?.getValue() ?? "";
+      const content = mergeResearchTaskPromptWithDraft(
+        prompt,
+        existingDraft,
+      );
+      if (!content.trim()) return;
+
+      composerRef.current?.setValue(content);
+      if (!autoSend) {
+        queueMicrotask(() => composerRef.current?.focus());
+        return;
+      }
+
+      if (researchTaskPromptHasBlankFields(prompt) && !existingDraft.trim()) {
+        if (!shouldRequestResearchTaskIntake(prompt)) {
+          setBgToast("请先补充模板中的空字段，再开始执行。");
+          queueMicrotask(() => composerRef.current?.focus());
+          return;
+        }
+        setPendingResearchIntake({
+          prompt,
+          resetKey: createResearchIntakeResetKey(),
+        });
+        setResearchIntakeSelections({});
+        setBgToast("请先补充研究问题、研究对象和关键词，Omiga 再开始执行。");
+        queueMicrotask(() => composerRef.current?.focus());
+        return;
+      }
+
+      const st = useChatComposerStore.getState();
+      mainQueueFlushPayloadRef.current = {
+        id:
+          typeof crypto !== "undefined" &&
+          typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `research-task-${Date.now()}`,
+        body: content,
+        composerAttachedPaths: [...st.composerAttachedPaths],
+        composerSelectedPluginIds: [...st.composerSelectedPluginIds],
+        composerAgentType: st.composerAgentType,
+        permissionMode: st.permissionMode,
+        computerUseMode: st.computerUseMode,
+        environment: st.environment,
+        sshServer: st.sshServer,
+        sandboxBackend: st.sandboxBackend,
+      };
+      void handleSendRef.current();
+    },
+    [],
+  );
+
   const executeExistingPlan = useCallback(
     async (plan: SchedulerPlan, mode: "schedule" | "team" | "autopilot") => {
       const request =
@@ -4004,6 +4291,10 @@ export function Chat({ sessionId }: ChatProps) {
     }
     return foldId;
   }, [latestUserMessageId, messageRenderItems]);
+  const latestTurnHasLiveExecutionActivity = useMemo(
+    () => latestTurnHasExecutionActivity(messages, latestUserMessageId),
+    [latestUserMessageId, messages],
+  );
   useEffect(() => {
     activeReactFoldIdRef.current = activeReactFoldId;
   }, [activeReactFoldId]);
@@ -4268,7 +4559,14 @@ export function Chat({ sessionId }: ChatProps) {
     messageId: string;
     questions: AskUserQuestionItem[];
   } | null>(null);
+  const [pendingResearchIntake, setPendingResearchIntake] = useState<{
+    prompt: string;
+    resetKey: string;
+  } | null>(null);
   const [askUserSelections, setAskUserSelections] = useState<
+    Record<string, string>
+  >({});
+  const [researchIntakeSelections, setResearchIntakeSelections] = useState<
     Record<string, string>
   >({});
 
@@ -4306,6 +4604,7 @@ export function Chat({ sessionId }: ChatProps) {
     !isConnecting &&
     !waitingFirstChunk &&
     !pendingAskUser &&
+    !pendingResearchIntake &&
     !awaitingResumeAfterCancel &&
     composerSuggestions.length > 0;
   const showSuggestionsGeneratingPlaceholder =
@@ -4318,6 +4617,17 @@ export function Chat({ sessionId }: ChatProps) {
       waitingFirstChunk,
       activityIsStreaming,
     });
+  const showImmediateThinkingPlaceholder =
+    Boolean(sessionId) &&
+    !isSwitchingSession &&
+    !pendingAskUser &&
+    !pendingResearchIntake &&
+    !awaitingResumeAfterCancel &&
+    !latestTurnHasLiveExecutionActivity &&
+    !activeReactFoldId &&
+    !currentResponseHasVisibleText &&
+    !shouldRenderLiveTraceInFold &&
+    (isConnecting || waitingFirstChunk || isStreaming || activityIsStreaming);
   const showTurnSummaryCard =
     Boolean(sessionId) &&
     Boolean(stickyTurnSummary) &&
@@ -4325,11 +4635,14 @@ export function Chat({ sessionId }: ChatProps) {
     !isConnecting &&
     !waitingFirstChunk &&
     !pendingAskUser &&
+    !pendingResearchIntake &&
     !awaitingResumeAfterCancel;
 
   useEffect(() => {
     setPendingAskUser(null);
     setAskUserSelections({});
+    setPendingResearchIntake(null);
+    setResearchIntakeSelections({});
   }, [sessionId]);
 
   useEffect(() => {
@@ -4343,6 +4656,7 @@ export function Chat({ sessionId }: ChatProps) {
       isConnecting ||
       waitingFirstChunk ||
       pendingAskUser ||
+      pendingResearchIntake ||
       learningProposalPrompt
     ) {
       return;
@@ -4380,6 +4694,7 @@ export function Chat({ sessionId }: ChatProps) {
     isSwitchingSession,
     learningProposalPrompt,
     pendingAskUser,
+    pendingResearchIntake,
     sessionId,
     waitingFirstChunk,
   ]);
@@ -4406,6 +4721,42 @@ export function Chat({ sessionId }: ChatProps) {
       console.error("[Chat] submit_ask_user_answer failed", e);
     }
   }, [pendingAskUser, askUserSelections]);
+
+  const submitResearchIntake = useCallback(() => {
+    if (!pendingResearchIntake) return;
+    const answers = RESEARCH_TASK_INTAKE_QUESTIONS.map((q) =>
+      askUserCustomAnswer(researchIntakeSelections[q.question.trim()] ?? ""),
+    );
+    if (answers.some((answer) => !answer.trim())) return;
+
+    const content = buildResearchTaskPromptWithIntake(pendingResearchIntake.prompt, {
+      researchQuestion: answers[0],
+      researchScope: answers[1],
+      keywordsOrTimeRange: answers[2],
+    });
+    composerRef.current?.setValue(content);
+    setPendingResearchIntake(null);
+    setResearchIntakeSelections({});
+
+    const st = useChatComposerStore.getState();
+    mainQueueFlushPayloadRef.current = {
+      id:
+        typeof crypto !== "undefined" &&
+        typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `research-intake-${Date.now()}`,
+      body: content,
+      composerAttachedPaths: [...st.composerAttachedPaths],
+      composerSelectedPluginIds: [...st.composerSelectedPluginIds],
+      composerAgentType: st.composerAgentType,
+      permissionMode: st.permissionMode,
+      computerUseMode: st.computerUseMode,
+      environment: st.environment,
+      sshServer: st.sshServer,
+      sandboxBackend: st.sandboxBackend,
+    };
+    void handleSendRef.current();
+  }, [pendingResearchIntake, researchIntakeSelections]);
 
   // Sync messages from store when storeMessages change (e.g. streaming new messages).
   // On session switch the render-time guard above already resets messages synchronously,
@@ -5801,7 +6152,6 @@ export function Chat({ sessionId }: ChatProps) {
       localVenvType: storeVenvType,
       localVenvName: storeVenvName,
       computerUseMode: storeComputerUseMode,
-      browserUseMode: storeBrowserUseMode,
     } = useChatComposerStore.getState();
 
     const composerAgentType = flushPayload
@@ -5813,9 +6163,6 @@ export function Chat({ sessionId }: ChatProps) {
     const computerUseMode = flushPayload
       ? flushPayload.computerUseMode
       : storeComputerUseMode;
-    const browserUseMode = flushPayload
-      ? flushPayload.browserUseMode
-      : storeBrowserUseMode;
     const environment = flushPayload ? flushPayload.environment : storeEnv;
     const sshServer = flushPayload ? flushPayload.sshServer : storeSsh;
     const sandboxBackend = flushPayload ? flushPayload.sandboxBackend : storeSb;
@@ -5861,6 +6208,18 @@ export function Chat({ sessionId }: ChatProps) {
       return;
     }
 
+    if (researchParsed && shouldRequestResearchTaskIntake(trimmed)) {
+      composerRef.current?.setValue(trimmed);
+      setPendingResearchIntake({
+        prompt: trimmed,
+        resetKey: createResearchIntakeResetKey(),
+      });
+      setResearchIntakeSelections({});
+      setBgToast("请先补充研究问题、研究对象和关键词，Omiga 再开始执行。");
+      queueMicrotask(() => composerRef.current?.focus());
+      return;
+    }
+
     /** Queued main sends must stay on the main transcript; ignore teammate routing for this send. */
     const isFollowUp = Boolean(followUpTaskId) && !flushPayload;
 
@@ -5873,7 +6232,6 @@ export function Chat({ sessionId }: ChatProps) {
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
       useChatComposerStore.getState().resetTaskComputerUseMode();
-      useChatComposerStore.getState().resetTaskBrowserUseMode();
       try {
         const response = await invoke<{
           message_id: string;
@@ -5937,7 +6295,6 @@ export function Chat({ sessionId }: ChatProps) {
         composerAgentType,
         permissionMode,
         computerUseMode,
-        browserUseMode,
         environment,
         sshServer: useChatComposerStore.getState().sshServer,
         sandboxBackend: useChatComposerStore.getState().sandboxBackend,
@@ -5947,14 +6304,18 @@ export function Chat({ sessionId }: ChatProps) {
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
       useChatComposerStore.getState().resetTaskComputerUseMode();
-      useChatComposerStore.getState().resetTaskBrowserUseMode();
       return;
     }
 
     clearPostTurnMetaState();
 
-    if (researchParsed || goalParsed) {
-      const specialCommand = researchParsed
+    const shouldRunResearchSystemCommand = Boolean(
+      researchParsed && shouldInvokeResearchSystemCommand(researchParsed.body),
+    );
+
+    if (shouldRunResearchSystemCommand || goalParsed) {
+      const specialCommand =
+        shouldRunResearchSystemCommand && researchParsed
         ? {
             id: "research" as const,
             body: researchParsed.body,
@@ -6029,22 +6390,12 @@ export function Chat({ sessionId }: ChatProps) {
         composerSelectedPluginIds: bubbleSelectedPluginIds,
       };
 
-      setMessages((prev) => [...prev, userMessage]);
-      addMessage({
-        role: "user",
-        content: messageContent,
-        composerAgentType: undefined,
-        composerAttachedPaths: bubbleAttachedPaths,
-        composerSelectedPluginIds: bubbleSelectedPluginIds,
-        id: userMessage.id,
-        timestamp: userMessage.timestamp,
-      });
+      commitMessagesSnapshot([...messagesRef.current, userMessage]);
 
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
       useChatComposerStore.getState().resetTaskComputerUseMode();
-      useChatComposerStore.getState().resetTaskBrowserUseMode();
 
       const requestSessionId = sessionId;
       try {
@@ -6090,17 +6441,13 @@ export function Chat({ sessionId }: ChatProps) {
           timestamp: Date.now(),
           roundId: response.roundId,
         };
-        let nextMessages: Message[] = [];
-        setMessages((prev) => {
-          nextMessages = finalizeResearchCommandMessages(
-            prev,
-            userMessage.id,
-            persistedUserMessage,
-            assistantMessage,
-          );
-          return nextMessages;
-        });
-        replaceStoreMessagesSnapshot(nextMessages.map(chatMessageToStore));
+        const nextMessages = finalizeResearchCommandMessages(
+          messagesRef.current,
+          userMessage.id,
+          persistedUserMessage,
+          assistantMessage,
+        );
+        commitMessagesSnapshot(nextMessages);
         useActivityStore.getState().onOperationDone(
           operationId,
           specialCommand.label,
@@ -6256,7 +6603,6 @@ export function Chat({ sessionId }: ChatProps) {
     useChatComposerStore.getState().clearComposerAttachedPaths();
     useChatComposerStore.getState().clearComposerSelectedPluginIds();
     useChatComposerStore.getState().resetTaskComputerUseMode();
-    useChatComposerStore.getState().resetTaskBrowserUseMode();
 
     const requestSessionId = sessionId;
     try {
@@ -6301,7 +6647,6 @@ export function Chat({ sessionId }: ChatProps) {
           activeProviderEntryName,
           selectedPluginIds: composerSelectedPluginIds,
           computerUseMode,
-          browserUseMode,
         },
       });
 
@@ -6534,15 +6879,190 @@ export function Chat({ sessionId }: ChatProps) {
       );
       const rawRetryBody = retryContentParts.body;
       const researchRetry = parseResearchCommand(rawRetryBody);
-      const goalRetry = parseGoalCommand(rawRetryBody);
       const composeAgent = message.composerAgentType ?? "general-purpose";
-      if (researchRetry || goalRetry) {
-        setBgToast(
-          researchRetry
-            ? "`/research` 暂不支持通过“重试”按钮重放，请重新发送命令。"
-            : "`/goal` 暂不支持通过“重试”按钮重放，请重新发送命令。",
-        );
+      if (researchRetry && shouldRequestResearchTaskIntake(rawRetryBody)) {
+        composerRef.current?.setValue(rawRetryBody);
+        setPendingResearchIntake({
+          prompt: rawRetryBody,
+          resetKey: createResearchIntakeResetKey(),
+        });
+        setResearchIntakeSelections({});
+        setBgToast("请先补充研究问题、研究对象和关键词，Omiga 再开始执行。");
+        queueMicrotask(() => composerRef.current?.focus());
         retrySendInFlightRef.current = false;
+        return;
+      }
+      if (
+        researchRetry &&
+        shouldInvokeResearchSystemCommand(researchRetry.body)
+      ) {
+        const pendingFeedback = buildPendingExecutionFeedback({
+          workflowCommand: "research",
+          composerAgentType: composeAgent,
+        });
+        const truncated = messages
+          .slice(0, idx + 1)
+          .map((m, i) =>
+            i === idx && m.role === "user"
+              ? { ...message, schedulerPlan: undefined, initialTodos: undefined }
+              : m,
+          );
+        const operationId =
+          typeof crypto !== "undefined" &&
+          typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `research-retry-${Date.now()}`;
+        const requestSessionId = sessionId;
+        const userMessageId = message.id;
+
+        retrySendInFlightRef.current = true;
+        queuedMainSendQueueRef.current = [];
+        mainQueueFlushPayloadRef.current = null;
+        clearPostTurnMetaState();
+        bumpQueueUi();
+
+        commitMessagesSnapshot(truncated);
+        setCurrentResponse("");
+        currentResponseRef.current = "";
+        setCurrentFoldIntermediate("");
+        currentFoldIntermediateRef.current = "";
+        pendingTextBufferRef.current = "";
+        pendingFoldIntermediateBufferRef.current = "";
+        pendingToolTraceTextRef.current = "";
+        clearRunningToolTracking();
+        activeReactFoldIdRef.current = null;
+        if (textFlushRafRef.current !== null) {
+          cancelAnimationFrame(textFlushRafRef.current);
+          textFlushRafRef.current = null;
+        }
+        if (foldIntermediateFlushRafRef.current !== null) {
+          cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+          foldIntermediateFlushRafRef.current = null;
+        }
+        setAwaitingResumeAfterCancel(false);
+
+        setIndexingStatus("idle");
+        setPendingAssistantHint(pendingFeedback.assistantHint);
+        useActivityStore
+          .getState()
+          .beginExecutionRun(pendingFeedback.connectLabel);
+        useActivityStore.getState().setConnecting(true);
+        useActivityStore.getState().setStreaming(false, false);
+        useActivityStore.getState().onOperationStart(
+          operationId,
+          "Research System",
+          {
+            summary: researchRetry.body || "显示 Research System 帮助",
+          },
+        );
+
+        try {
+          const response = await invoke<ResearchCommandResponse>(
+            "run_research_command",
+            {
+              request: {
+                sessionId,
+                projectPath:
+                  currentSession?.workingDirectory ??
+                  currentSession?.projectPath ??
+                  ".",
+                content: messageContent,
+                body: researchRetry.body,
+                ...(isPersistedMessageIdForRetry(message.id)
+                  ? { retryFromUserMessageId: message.id }
+                  : {}),
+              },
+            },
+          );
+
+          if (sessionIdRef.current !== requestSessionId) {
+            return;
+          }
+
+          const persistedUserMessage = {
+            ...message,
+            id: response.userMessageId,
+            schedulerPlan: undefined,
+            initialTodos: undefined,
+          };
+          const assistantMessage = {
+            id: response.assistantMessageId,
+            role: "assistant" as const,
+            content: response.assistantContent,
+            timestamp: Date.now(),
+            roundId: response.roundId,
+          };
+          const nextMessages = finalizeResearchCommandMessages(
+            messagesRef.current,
+            userMessageId,
+            persistedUserMessage,
+            assistantMessage,
+          );
+          commitMessagesSnapshot(nextMessages);
+          useActivityStore.getState().onOperationDone(
+            operationId,
+            "Research System",
+            {
+              summary: `/research ${researchRetry.body || "help"}`,
+              output: response.assistantContent,
+            },
+          );
+          useActivityStore.getState().finalizeExecutionRun();
+          useChatComposerStore.getState().setComposerAgentType("general-purpose");
+        } catch (error: unknown) {
+          if (sessionIdRef.current !== requestSessionId) {
+            return;
+          }
+          console.error("Failed to retry /research command:", error);
+          useActivityStore.getState().clearTransient();
+          useActivityStore.getState().resetExecutionState();
+
+          let errorMessage = "Unknown error";
+          if (typeof error === "string") {
+            errorMessage = error;
+          } else if (error && typeof error === "object") {
+            const err = error as Record<string, unknown>;
+            if (
+              err.type === "Chat" &&
+              err.details &&
+              typeof err.details === "object"
+            ) {
+              const details = err.details as Record<string, unknown>;
+              if (typeof details.message === "string") {
+                errorMessage = details.message;
+              } else if (typeof details.kind === "string") {
+                errorMessage = details.kind;
+              }
+            } else if (typeof err.message === "string") {
+              errorMessage = err.message;
+            } else {
+              errorMessage = JSON.stringify(error);
+            }
+          } else {
+            errorMessage = String(error);
+          }
+
+          const errorMsg: Message = {
+            id: `error-${Date.now()}`,
+            role: "assistant",
+            content: `Failed to retry /research: ${errorMessage}`,
+            timestamp: Date.now(),
+          };
+          setMessages((prev) => [...prev, errorMsg]);
+        } finally {
+          useActivityStore.getState().clearTransient();
+          setCurrentStreamId(null);
+          setCurrentRoundId(null);
+          queueMicrotask(() => {
+            isStreamingRef.current = false;
+            setIsStreaming(false);
+            setPendingAskUser(null);
+            setAskUserSelections({});
+            pendingTokenUsageRef.current = null;
+            flushQueuedMainSendIfAnyRef.current();
+          });
+          retrySendInFlightRef.current = false;
+        }
         return;
       }
       const retryPrepared = rewriteWorkflowBodyForBackend(rawRetryBody);
@@ -6601,13 +7121,11 @@ export function Chat({ sessionId }: ChatProps) {
       flushSync(() => {
         useChatComposerStore.getState().setComposerAgentType(composeAgent);
       });
-      const { permissionMode, computerUseMode, browserUseMode } =
-        useChatComposerStore.getState();
+      const { permissionMode, computerUseMode } = useChatComposerStore.getState();
 
       const userMessageId = message.id;
       const requestSessionId = sessionId;
       useChatComposerStore.getState().resetTaskComputerUseMode();
-      useChatComposerStore.getState().resetTaskBrowserUseMode();
 
       try {
         const response = await invoke<{
@@ -6636,7 +7154,6 @@ export function Chat({ sessionId }: ChatProps) {
             activeProviderEntryName,
             selectedPluginIds: message.composerSelectedPluginIds ?? [],
             computerUseMode,
-            browserUseMode,
             ...(isPersistedMessageIdForRetry(message.id)
               ? { retryFromUserMessageId: message.id }
               : {}),
@@ -6778,6 +7295,7 @@ export function Chat({ sessionId }: ChatProps) {
       followUpTaskId,
       currentSession,
       getSessionNameForRequest,
+      commitMessagesSnapshot,
       replaceStoreMessagesSnapshot,
       bumpQueueUi,
       clearStaleRetryBusyFlag,
@@ -6895,7 +7413,6 @@ export function Chat({ sessionId }: ChatProps) {
       st.setComposerAgentType(next.composerAgentType);
       st.setPermissionMode(next.permissionMode);
       st.setComputerUseMode(next.computerUseMode);
-      st.setBrowserUseMode(next.browserUseMode);
       st.setEnvironment(next.environment);
       st.setSshServer(next.sshServer);
       st.setSandboxBackend(next.sandboxBackend);
@@ -7176,7 +7693,6 @@ export function Chat({ sessionId }: ChatProps) {
       composerAgentType,
       permissionMode,
       computerUseMode,
-      browserUseMode,
       environment,
       sshServer,
       sandboxBackend,
@@ -7184,8 +7700,6 @@ export function Chat({ sessionId }: ChatProps) {
       useChatComposerStore.getState();
     const resumeComputerUseMode =
       computerUseMode === "session" ? computerUseMode : "off";
-    const resumeBrowserUseMode =
-      browserUseMode === "session" ? browserUseMode : "off";
     const requestSessionId = sessionId;
 
     try {
@@ -7211,7 +7725,6 @@ export function Chat({ sessionId }: ChatProps) {
           localVenvName: useChatComposerStore.getState().localVenvName,
           activeProviderEntryName,
           computerUseMode: resumeComputerUseMode,
-          browserUseMode: resumeBrowserUseMode,
         },
       });
 
@@ -7408,19 +7921,32 @@ export function Chat({ sessionId }: ChatProps) {
                   flexDirection: "column",
                   alignItems: "center",
                   justifyContent: "center",
-                  height: "100%",
+                  minHeight: "100%",
                   color: "text.secondary",
+                  width: "100%",
+                  px: 2,
+                  py: 2,
                 }}
               >
-                <OmigaLogo size={64} style={{ marginBottom: 16, opacity: 0.85 }} />
-                <Typography variant="h6" gutterBottom>
-                  Welcome to Omiga
-                </Typography>
-                <Typography variant="body2">
-                  {sessionId
-                    ? "Send a message to start the conversation"
-                    : "Select or create a session to begin"}
-                </Typography>
+                {sessionId ? (
+                  <ResearchTaskLauncher
+                    onSelect={handleResearchTaskSelect}
+                    disabled={isStreaming || isConnecting}
+                  />
+                ) : (
+                  <>
+                    <OmigaLogo
+                      size={64}
+                      style={{ marginBottom: 16, opacity: 0.85 }}
+                    />
+                    <Typography variant="h6" gutterBottom>
+                      Welcome to Omiga
+                    </Typography>
+                    <Typography variant="body2">
+                      Select or create a session to begin
+                    </Typography>
+                  </>
+                )}
               </Box>
             )}
 
@@ -7542,25 +8068,8 @@ export function Chat({ sessionId }: ChatProps) {
               );
             })}
 
-            {isConnecting && pendingAssistantHint && (
-              <Box
-                sx={{
-                  width: "100%",
-                  minWidth: 0,
-                  maxWidth: "100%",
-                  px: 1.75,
-                  py: 1.5,
-                  borderRadius: `${BUBBLE_RADIUS_PX}px`,
-                  bgcolor: alpha(CHAT.agentBubbleBg, 0.75),
-                  border: `1px dashed ${alpha(CHAT.agentBubbleBorder, 0.9)}`,
-                  fontFamily: CHAT.font,
-                  color: "text.secondary",
-                }}
-              >
-                <Typography variant="body2" sx={{ fontSize: 14, lineHeight: 1.7 }}>
-                  {pendingAssistantHint}
-                </Typography>
-              </Box>
+            {showImmediateThinkingPlaceholder && (
+              <ImmediateThinkingPlaceholder chat={CHAT} hint={pendingAssistantHint} />
             )}
 
             {/* Streaming: visible assistant text is always a normal reply draft.
@@ -8400,10 +8909,18 @@ export function Chat({ sessionId }: ChatProps) {
                 onOpenBackgroundTranscript={handleOpenBackgroundTranscript}
                 onCloseBackgroundTranscript={() => setBgTranscriptTaskId(null)}
                 askUserQuestion={
-                  pendingAskUser
+                  pendingResearchIntake
                     ? {
-                        resetKey: pendingAskUser.toolUseId,
-                        questions: pendingAskUser.questions,
+                        resetKey: pendingResearchIntake.resetKey,
+                        questions: RESEARCH_TASK_INTAKE_QUESTIONS,
+                        selections: researchIntakeSelections,
+                        onSelectionsChange: setResearchIntakeSelections,
+                        onSubmit: () => submitResearchIntake(),
+                      }
+                    : pendingAskUser
+                      ? {
+                          resetKey: pendingAskUser.toolUseId,
+                          questions: pendingAskUser.questions,
                         selections: askUserSelections,
                         onSelectionsChange: setAskUserSelections,
                         onSubmit: () => void submitPendingAskUser(),

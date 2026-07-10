@@ -8,13 +8,16 @@ use crate::commands::fs::{
     DirectoryEntry, DirectoryListResponse, FileReadResponse, FileWriteResponse,
 };
 use crate::errors::{AppError, FsError};
+use crate::execution::ssh::ensure_ssh_control_socket;
 use crate::llm::config::SshExecConfig;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use std::path::{Component, Path, PathBuf};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 const SSH_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_WRITE_BYTES: usize = 50 * 1024 * 1024;
 
 fn expand_tilde_identity(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/") {
@@ -69,6 +72,11 @@ fn validate_remote_path(p: &str) -> Result<String, AppError> {
                 }
                 out.push(x);
             }
+            Component::ParentDir => {
+                return Err(AppError::Fs(FsError::PathTraversal {
+                    path: p.to_string(),
+                }));
+            }
             _ => {}
         }
     }
@@ -77,6 +85,22 @@ fn validate_remote_path(p: &str) -> Result<String, AppError> {
 
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+fn decode_upload_base64(data_base64: &str) -> Result<Vec<u8>, AppError> {
+    let bytes = BASE64.decode(data_base64.trim()).map_err(|e| {
+        AppError::Fs(FsError::IoError {
+            message: format!("invalid base64 upload payload: {}", e),
+        })
+    })?;
+    if bytes.len() > MAX_WRITE_BYTES {
+        return Err(AppError::Fs(FsError::FileTooLarge {
+            path: "ssh upload payload".to_string(),
+            size: bytes.len() as u64,
+            max: MAX_WRITE_BYTES as u64,
+        }));
+    }
+    Ok(bytes)
 }
 
 fn resolve_profile(name: &str) -> Result<SshExecConfig, AppError> {
@@ -104,8 +128,17 @@ fn resolve_profile(name: &str) -> Result<SshExecConfig, AppError> {
     Ok(cfg)
 }
 
-fn ssh_base_args(cfg: &SshExecConfig) -> Vec<String> {
+fn ssh_base_args(cfg: &SshExecConfig, control_socket: &Path) -> Vec<String> {
     let mut args = vec![
+        // Reuse a multiplexed master connection (shared with the execution
+        // layer via the same ControlPath) so browsing the remote tree does not
+        // reconnect + re-authenticate + re-run a login shell on every listing.
+        "-o".to_string(),
+        format!("ControlPath={}", control_socket.display()),
+        "-o".to_string(),
+        "ControlMaster=auto".to_string(),
+        "-o".to_string(),
+        "ControlPersist=300".to_string(),
         "-o".to_string(),
         "BatchMode=yes".to_string(),
         "-o".to_string(),
@@ -136,9 +169,14 @@ async fn ssh_run_remote(
     })?;
     let user = cfg.user.as_ref().unwrap();
     let target = format!("{}@{}", user, host);
-    let mut args = ssh_base_args(cfg);
+    let control_socket = ensure_ssh_control_socket(user, &host, cfg.port).await;
+    let mut args = ssh_base_args(cfg, &control_socket);
     args.push(target);
-    args.push(format!("bash -lc {}", sh_quote(remote_bash_script)));
+    // File-browser commands (find/echo/cat/printf/mkdir/base64) are all standard
+    // utilities on the default PATH, so a non-login shell is enough. Avoiding
+    // `-l` skips sourcing /etc/profile.d/* (module/lmod/conda init), which on
+    // HPC clusters can add many seconds per invocation.
+    args.push(format!("bash -c {}", sh_quote(remote_bash_script)));
 
     let fut = async {
         let out = Command::new("ssh")
@@ -365,7 +403,27 @@ pub async fn ssh_write_file(
     _expected_hash: Option<String>,
 ) -> CommandResult<FileWriteResponse> {
     let cfg = resolve_profile(&ssh_profile_name)?;
-    let file = validate_remote_path(&path)?;
+    ssh_write_file_bytes_impl(&cfg, &path, content.as_bytes()).await
+}
+
+/// Write raw bytes on the remote host. Used by composer drag-and-drop upload.
+#[tauri::command]
+pub async fn ssh_write_file_bytes(
+    ssh_profile_name: String,
+    path: String,
+    data_base64: String,
+) -> CommandResult<FileWriteResponse> {
+    let cfg = resolve_profile(&ssh_profile_name)?;
+    let bytes = decode_upload_base64(&data_base64)?;
+    ssh_write_file_bytes_impl(&cfg, &path, &bytes).await
+}
+
+async fn ssh_write_file_bytes_impl(
+    cfg: &SshExecConfig,
+    path: &str,
+    bytes: &[u8],
+) -> CommandResult<FileWriteResponse> {
+    let file = validate_remote_path(path)?;
     let file_q = sh_double_quote(&expand_tilde_to_home_var(&file));
     let parent_expanded = {
         let exp = expand_tilde_to_home_var(&file);
@@ -384,14 +442,16 @@ pub async fn ssh_write_file(
     let host = cfg.effective_hostname().unwrap();
     let user = cfg.user.as_ref().unwrap();
     let target = format!("{}@{}", user, host);
-    let mut args = ssh_base_args(&cfg);
+    let control_socket = ensure_ssh_control_socket(user, &host, cfg.port).await;
+    let mut args = ssh_base_args(&cfg, &control_socket);
     args.push(target);
+    // `cat` is a standard utility; a non-login shell avoids the per-call login
+    // profile cost (see ssh_run_remote).
     args.push(format!(
-        "bash -lc {}",
+        "bash -c {}",
         sh_quote(&format!("cat > {}", file_q))
     ));
 
-    let bytes = content.as_bytes();
     let fut = async {
         let mut child = Command::new("ssh")
             .args(&args)
@@ -450,4 +510,38 @@ pub async fn ssh_create_directory(ssh_profile_name: String, path: String) -> Com
         }));
     }
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_upload_base64, validate_remote_path, MAX_WRITE_BYTES};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    #[test]
+    fn upload_base64_decodes_binary_bytes() {
+        let bytes = decode_upload_base64("AAEC/4A=").expect("valid base64");
+        assert_eq!(bytes, vec![0, 1, 2, 255, 128]);
+    }
+
+    #[test]
+    fn upload_base64_rejects_invalid_payloads() {
+        let err = decode_upload_base64("not base64!").expect_err("invalid");
+        assert!(err.to_string().contains("invalid base64"));
+    }
+
+    #[test]
+    fn upload_base64_rejects_oversized_payloads() {
+        let payload = vec![0_u8; MAX_WRITE_BYTES + 1];
+        let encoded = BASE64.encode(payload);
+        let err = decode_upload_base64(&encoded).expect_err("oversized");
+        assert!(err.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn remote_upload_paths_must_be_absolute_or_home_relative() {
+        assert!(validate_remote_path("/tmp/drop.txt").is_ok());
+        assert!(validate_remote_path("~/drop.txt").is_ok());
+        assert!(validate_remote_path("relative/drop.txt").is_err());
+        assert!(validate_remote_path("/tmp/../drop.txt").is_err());
+    }
 }

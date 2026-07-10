@@ -52,7 +52,6 @@ export {
   shouldResetWorkspaceForExecutionScopeChange,
   type PermissionMode,
   type ComputerUseMode,
-  type BrowserUseMode,
   type SandboxBackend,
   type ExecutionEnvironment,
   type LocalVenvType,

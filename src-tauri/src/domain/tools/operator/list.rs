@@ -57,4 +57,5 @@ pub fn schema() -> ToolSchema {
             }
         }),
     )
+    .concurrency_safe()
 }

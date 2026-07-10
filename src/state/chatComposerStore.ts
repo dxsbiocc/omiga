@@ -7,11 +7,8 @@ export type PermissionMode = "ask" | "auto" | "bypass";
 /** Computer Use 显式开启范围：默认关闭，task 发送后自动回到 off。 */
 export type ComputerUseMode = "off" | "task" | "session";
 
-/** Browser Operator 显式开启范围：默认关闭，task 发送后自动回到 off。 */
-export type BrowserUseMode = "off" | "task" | "session";
-
-/** 与 `omiga/src-tauri/src/execution/types.rs` `EnvironmentType` 对齐（不含 Local）。 */
-export type SandboxBackend = "modal" | "daytona" | "docker" | "singularity";
+/** User-facing sandbox backends with real local integrations. */
+export type SandboxBackend = "docker" | "singularity";
 
 /** 本地虚拟环境类型 */
 export type LocalVenvType = "none" | "conda" | "venv" | "pyenv";
@@ -73,8 +70,9 @@ function asNullableString(v: unknown): string | null {
   return typeof v === "string" ? v : null;
 }
 
-function asBoolean(v: unknown, fallback: boolean): boolean {
-  return typeof v === "boolean" ? v : fallback;
+function normalizeSandboxBackendValue(v: unknown): SandboxBackend {
+  const value = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return value === "singularity" ? "singularity" : "docker";
 }
 
 export function normalizeSessionConfig(
@@ -95,10 +93,7 @@ export function normalizeSessionConfig(
       DEFAULT_SESSION_CONFIG.execution_environment,
     ),
     ssh_server: asNullableString(cfg?.ssh_server),
-    sandbox_backend: asString(
-      cfg?.sandbox_backend,
-      DEFAULT_SESSION_CONFIG.sandbox_backend,
-    ),
+    sandbox_backend: normalizeSandboxBackendValue(cfg?.sandbox_backend),
     local_venv_type: asString(
       cfg?.local_venv_type,
       DEFAULT_SESSION_CONFIG.local_venv_type,
@@ -107,10 +102,9 @@ export function normalizeSessionConfig(
       cfg?.local_venv_name,
       DEFAULT_SESSION_CONFIG.local_venv_name,
     ),
-    use_worktree: asBoolean(
-      cfg?.use_worktree,
-      DEFAULT_SESSION_CONFIG.use_worktree,
-    ),
+    // Worktree mode is intentionally hidden for the focused research UI.
+    // Keep the response field for backward compatibility, but never re-enable it.
+    use_worktree: false,
     runtime_constraints: cfg?.runtime_constraints,
   };
 }
@@ -118,14 +112,12 @@ export function normalizeSessionConfig(
 interface ChatComposerState {
   permissionMode: PermissionMode;
   computerUseMode: ComputerUseMode;
-  browserUseMode: BrowserUseMode;
   /** 注册表中的 Agent id，如 Explore、Plan、general-purpose */
   composerAgentType: string;
   /** `@` 选择器选中的工作区相对路径（仅内存，不持久化） */
   composerAttachedPaths: string[];
   /** `@` 选择器选中的 Omiga 插件 ID（仅本轮内存态，不持久化） */
   composerSelectedPluginIds: string[];
-  useWorktree: boolean;
   /** 执行环境：本地、SSH、沙箱 */
   environment: ExecutionEnvironment;
   /** SSH 服务器名称；仅在 `environment === "ssh"` 时生效。 */
@@ -143,8 +135,6 @@ interface ChatComposerState {
   setPermissionMode: (m: PermissionMode) => void;
   setComputerUseMode: (m: ComputerUseMode) => void;
   resetTaskComputerUseMode: () => void;
-  setBrowserUseMode: (m: BrowserUseMode) => void;
-  resetTaskBrowserUseMode: () => void;
   setComposerAgentType: (t: string) => void;
   addComposerAttachedPath: (relativePath: string) => void;
   removeComposerAttachedPath: (relativePath: string) => void;
@@ -154,7 +144,6 @@ interface ChatComposerState {
   removeComposerSelectedPluginId: (pluginId: string) => void;
   popComposerSelectedPluginId: () => void;
   clearComposerSelectedPluginIds: () => void;
-  setUseWorktree: (v: boolean) => void;
   setEnvironment: (e: ExecutionEnvironment) => void;
   setSshServer: (name: string | null) => void;
   setSandboxBackend: (b: SandboxBackend) => void;
@@ -173,11 +162,9 @@ function defaults() {
   return {
     permissionMode: "auto" as PermissionMode,
     computerUseMode: "off" as ComputerUseMode,
-    browserUseMode: "off" as BrowserUseMode,
     composerAgentType: "auto",
     composerAttachedPaths: [] as string[],
     composerSelectedPluginIds: [] as string[],
-    useWorktree: false,
     environment: "local" as ExecutionEnvironment,
     sshServer: null as string | null,
     sandboxBackend: "docker" as SandboxBackend,
@@ -192,8 +179,6 @@ async function saveSessionConfig(
     setPermissionMode: unknown;
     setComputerUseMode: unknown;
     resetTaskComputerUseMode: unknown;
-    setBrowserUseMode: unknown;
-    resetTaskBrowserUseMode: unknown;
     setComposerAgentType: unknown;
     addComposerAttachedPath: unknown;
     removeComposerAttachedPath: unknown;
@@ -203,7 +188,6 @@ async function saveSessionConfig(
     removeComposerSelectedPluginId: unknown;
     popComposerSelectedPluginId: unknown;
     clearComposerSelectedPluginIds: unknown;
-    setUseWorktree: unknown;
     setEnvironment: unknown;
     setSshServer: unknown;
     setSandboxBackend: unknown;
@@ -229,11 +213,25 @@ async function saveSessionConfig(
         sandbox_backend: state.sandboxBackend,
         local_venv_type: state.localVenvType,
         local_venv_name: state.localVenvName,
-        use_worktree: state.useWorktree,
+        use_worktree: false,
       },
     });
   } catch (e) {
     console.error("[OmigaDebug] Failed to save session config:", e);
+  }
+}
+
+async function syncSessionPermissionStance(
+  sessionId: string,
+  permissionMode: PermissionMode,
+) {
+  try {
+    await invoke("permission_set_session_stance", {
+      sessionId,
+      stance: permissionMode,
+    });
+  } catch (e) {
+    console.error("[OmigaDebug] Failed to sync permission stance:", e);
   }
 }
 
@@ -245,19 +243,16 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
   setPermissionMode: (permissionMode) => {
     set({ permissionMode });
     const { activeSessionId } = get();
-    if (activeSessionId) saveSessionConfig(activeSessionId, get());
+    if (activeSessionId) {
+      void saveSessionConfig(activeSessionId, get());
+      void syncSessionPermissionStance(activeSessionId, permissionMode);
+    }
   },
   setComputerUseMode: (computerUseMode) => {
     set({ computerUseMode });
   },
   resetTaskComputerUseMode: () => {
     if (get().computerUseMode === "task") set({ computerUseMode: "off" });
-  },
-  setBrowserUseMode: (browserUseMode) => {
-    set({ browserUseMode });
-  },
-  resetTaskBrowserUseMode: () => {
-    if (get().browserUseMode === "task") set({ browserUseMode: "off" });
   },
   setComposerAgentType: (composerAgentType) => {
     set({ composerAgentType });
@@ -266,7 +261,12 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
   },
   addComposerAttachedPath: (relativePath) =>
     set((s) => {
-      const t = relativePath.trim().replace(/\\/g, "/");
+      const t = relativePath
+        .trim()
+        .replace(/^@(?:file:)?/u, "")
+        .replace(/\\/g, "/")
+        .replace(/\/{2,}/g, "/")
+        .replace(/(.+)\/+$/u, "$1");
       if (!t || s.composerAttachedPaths.includes(t)) return s;
       return {
         composerAttachedPaths: [...s.composerAttachedPaths, t],
@@ -302,11 +302,6 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       composerSelectedPluginIds: s.composerSelectedPluginIds.slice(0, -1),
     })),
   clearComposerSelectedPluginIds: () => set({ composerSelectedPluginIds: [] }),
-  setUseWorktree: (useWorktree) => {
-    set({ useWorktree });
-    const { activeSessionId } = get();
-    if (activeSessionId) saveSessionConfig(activeSessionId, get());
-  },
   setEnvironment: (environment) => {
     set({ environment });
     const { activeSessionId } = get();
@@ -338,14 +333,12 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       activeSessionId: sessionId,
       permissionMode: normalized.permission_mode as PermissionMode,
       computerUseMode: "off",
-      browserUseMode: "off",
       composerAgentType: normalized.composer_agent_type || "auto",
       environment: normalized.execution_environment as ExecutionEnvironment,
       sshServer: normalized.ssh_server,
       sandboxBackend: normalized.sandbox_backend as SandboxBackend,
       localVenvType: normalized.local_venv_type as LocalVenvType,
       localVenvName: normalized.local_venv_name,
-      useWorktree: normalized.use_worktree,
       // Keep one-turn picker selections empty on switch
       composerAttachedPaths: [],
       composerSelectedPluginIds: [],
@@ -357,7 +350,6 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       ...defaults(),
       activeSessionId: null,
       computerUseMode: "off",
-      browserUseMode: "off",
       composerAttachedPaths: [],
       composerSelectedPluginIds: [],
     });

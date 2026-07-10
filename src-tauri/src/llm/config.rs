@@ -10,8 +10,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Execution environment configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionEnvsConfig {
+    /// Whether sandbox-denied shell commands may ask for one-shot unsandboxed retry approval.
+    #[serde(default = "default_true")]
+    pub sandbox_escalation_enabled: bool,
+
     /// Modal cloud configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalExecConfig>,
@@ -23,6 +27,17 @@ pub struct ExecutionEnvsConfig {
     /// SSH configurations (keyed by name)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh: Option<HashMap<String, SshExecConfig>>,
+}
+
+impl Default for ExecutionEnvsConfig {
+    fn default() -> Self {
+        Self {
+            sandbox_escalation_enabled: true,
+            modal: None,
+            daytona: None,
+            ssh: None,
+        }
+    }
 }
 
 /// Modal cloud execution configuration

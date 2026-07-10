@@ -230,6 +230,20 @@ pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
+}
+
+impl TokenUsage {
+    pub fn has_any_tokens(&self) -> bool {
+        self.prompt_tokens > 0
+            || self.completion_tokens > 0
+            || self.total_tokens > 0
+            || self.cache_creation_input_tokens.unwrap_or(0) > 0
+            || self.cache_read_input_tokens.unwrap_or(0) > 0
+    }
 }
 
 /// Complete response (non-streaming)

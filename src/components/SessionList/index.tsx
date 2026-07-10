@@ -26,8 +26,8 @@ import {
   Edit,
   Add,
   Search,
-  BusinessCenterOutlined,
   FolderOutlined,
+  FolderOpenOutlined,
   UnfoldMore,
   Settings as SettingsIcon,
   Language as LanguageIcon,
@@ -43,12 +43,14 @@ import {
   ChevronRight,
   FileDownloadOutlined,
 } from "@mui/icons-material";
+import { Icon } from "@iconify/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { OMIGA_GITHUB_RELEASES_URL } from "../../constants/appLinks";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   useSessionStore,
   UNUSED_SESSION_LABEL,
+  isUnsetWorkspacePath,
   shouldShowNewSessionPlaceholder,
   type Session,
 } from "../../state/sessionStore";
@@ -73,16 +75,73 @@ interface SessionListProps {
 const HELP_CENTER_URL = "https://support.anthropic.com/";
 const LEARN_MORE_URL = "https://www.anthropic.com/claude";
 const LANGUAGE_SUBMENU_BRIDGE_MS = 90;
+const UNSET_PROJECT_GROUP_KEY = "__omiga_unset_project__";
+
+function normalizeSidebarProjectPath(raw: string | undefined): string {
+  const trimmed = (raw ?? "").trim();
+  if (isUnsetWorkspacePath(trimmed)) return ".";
+  return trimmed.replace(/\\/g, "/").replace(/\/+$/u, "") || ".";
+}
+
+function projectKeyForSession(session: {
+  workingDirectory?: string;
+  projectPath?: string;
+}): string {
+  const normalized = normalizeSidebarProjectPath(
+    session.projectPath ?? session.workingDirectory,
+  );
+  return isUnsetWorkspacePath(normalized) ? UNSET_PROJECT_GROUP_KEY : normalized;
+}
+
+function projectDisplayName(projectPath: string, noProjectLabel: string): string {
+  const normalized = normalizeSidebarProjectPath(projectPath);
+  if (isUnsetWorkspacePath(normalized)) return noProjectLabel;
+  const last = normalized.split("/").filter(Boolean).pop();
+  return last ?? normalized;
+}
+
+function updatedAtMs(value: string | undefined): number {
+  const ms = Date.parse(value ?? "");
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function isChineseSidebarLocale(locale: string): boolean {
+  return locale.toLowerCase().replace("_", "-").startsWith("zh");
+}
+
+export function formatSidebarRelativeTime(
+  value: string | undefined,
+  locale: string,
+): string {
+  const ms = updatedAtMs(value);
+  if (!ms) return "";
+  const isChinese = isChineseSidebarLocale(locale);
+  const diffMs = Math.max(0, Date.now() - ms);
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 1) return isChinese ? "刚刚" : "now";
+  if (minutes < 60) return isChinese ? `${minutes} 分` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return isChinese ? `${hours} 小时` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return isChinese ? `${days} 天` : `${days}d`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return isChinese ? `${weeks} 周` : `${weeks}w`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return isChinese ? `${months} 月` : `${months}mo`;
+  const years = Math.floor(days / 365);
+  return isChinese ? `${years} 年` : `${years}y`;
+}
 
 function sessionProjectLabel(session: {
   workingDirectory?: string;
   projectPath?: string;
 }): string {
-  const raw = (session.workingDirectory ?? session.projectPath ?? "").trim();
-  if (!raw || raw === ".") return "";
-  const normalized = raw.replace(/\\/g, "/").replace(/\/+$/u, "");
+  const normalized = normalizeSidebarProjectPath(
+    session.projectPath ?? session.workingDirectory,
+  );
+  if (isUnsetWorkspacePath(normalized)) return "";
   const last = normalized.split("/").filter(Boolean).pop();
-  return last ?? raw;
+  return last ?? normalized;
 }
 
 interface SessionSearchSummary {
@@ -100,11 +159,46 @@ interface SessionSearchRow {
   matchSnippet?: string | null;
 }
 
+interface ProjectSessionGroup {
+  key: string;
+  projectPath: string;
+  label: string;
+  latestUpdatedAt: string;
+  rows: SessionSearchRow[];
+  isCurrent: boolean;
+}
+
+export function compareProjectGroupsForSidebar(
+  a: Pick<ProjectSessionGroup, "key" | "label" | "latestUpdatedAt">,
+  b: Pick<ProjectSessionGroup, "key" | "label" | "latestUpdatedAt">,
+): number {
+  const updatedDelta = updatedAtMs(b.latestUpdatedAt) - updatedAtMs(a.latestUpdatedAt);
+  if (updatedDelta !== 0) return updatedDelta;
+  const labelDelta = a.label.localeCompare(b.label, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+  if (labelDelta !== 0) return labelDelta;
+  return a.key.localeCompare(b.key, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
 export function SessionList({ onSelectSession }: SessionListProps) {
   const theme = useTheme();
   const locale = useLocaleStore((s) => s.locale);
   const setLocale = useLocaleStore((s) => s.setLocale);
   const t = (key: SessionListStringKey) => tSessionList(locale, key);
+  const sidebarText = theme.palette.text.secondary;
+  const sidebarTextStrong =
+    theme.palette.mode === "dark"
+      ? theme.palette.text.primary
+      : theme.palette.text.secondary;
+  const sidebarAccentText =
+    theme.palette.mode === "dark"
+      ? theme.palette.primary.light
+      : theme.palette.primary.dark;
 
   // ── Selective subscriptions ───────────────────────────────────────────────
   // Subscribe to storeMessages.length (a primitive) instead of the full array.
@@ -196,8 +290,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
+  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
   const [userMenuAnchorEl, setUserMenuAnchorEl] = useState<null | HTMLElement>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isRenaming, setIsRenaming] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [selectError, setSelectError] = useState<string | null>(null);
@@ -207,6 +303,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const languageSubmenuLeaveTimerRef = useRef<ReturnType<
     typeof setTimeout
   > | null>(null);
+  const [expandedProjectKeys, setExpandedProjectKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const projectKeysInitializedRef = useRef(false);
 
   // Load sessions on mount
   useEffect(() => {
@@ -259,7 +359,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   }, [sessions, currentSession?.id, loadSession]);
 
   useEffect(() => {
-    document.documentElement.lang = locale === "zh-CN" ? "zh-CN" : "en";
+    document.documentElement.lang = isChineseSidebarLocale(locale) ? "zh-CN" : "en";
   }, [locale]);
 
   const handleMenuOpen = (
@@ -308,8 +408,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   };
 
   const handleRenameClick = () => {
-    const session = sessions.find((s) => s.id === selectedSessionId);
+    const targetSessionId = selectedSessionId;
+    const session = sessions.find((s) => s.id === targetSessionId);
     if (session) {
+      setRenameSessionId(session.id);
       setNewName(session.name);
       setRenameDialogOpen(true);
     }
@@ -317,9 +419,24 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   };
 
   const handleRenameConfirm = async () => {
-    if (!selectedSessionId || !newName.trim()) return;
-    await renameSession(selectedSessionId, newName.trim());
+    const targetSessionId = renameSessionId;
+    const trimmed = newName.trim();
+    if (!targetSessionId || !trimmed) return;
+    setIsRenaming(true);
+    try {
+      await renameSession(targetSessionId, trimmed);
+      setRenameDialogOpen(false);
+      setRenameSessionId(null);
+      setNewName("");
+    } finally {
+      setIsRenaming(false);
+    }
+  };
+
+  const handleRenameDialogClose = () => {
+    if (isRenaming) return;
     setRenameDialogOpen(false);
+    setRenameSessionId(null);
     setNewName("");
   };
 
@@ -460,11 +577,29 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const handleCreateClick = async () => {
     setSelectError(null);
     try {
-      await createSessionQuick();
+      const currentProjectPath =
+        currentSession && !isUnsetWorkspacePath(currentSession.projectPath)
+          ? currentSession.projectPath
+          : undefined;
+      await createSessionQuick(currentProjectPath);
       onSelectSession?.();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[SessionList] createSessionQuick failed", e);
+      setSelectError(msg);
+    }
+  };
+
+  const handleCreateProjectSession = async (projectPath: string) => {
+    setSelectError(null);
+    try {
+      await createSessionQuick(
+        isUnsetWorkspacePath(projectPath) ? undefined : projectPath,
+      );
+      onSelectSession?.();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[SessionList] create project session failed", e);
       setSelectError(msg);
     }
   };
@@ -516,6 +651,69 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     for (const row of sessionRows) rowsById.set(row.session.id, row);
     return rowsById;
   }, [sessionRows]);
+
+  const noProjectLabel = t("noProject");
+  const projectGroups = useMemo<ProjectSessionGroup[]>(() => {
+    const groups = new Map<string, ProjectSessionGroup>();
+    const currentId = currentSession?.id ?? null;
+
+    for (const row of sessionRows) {
+      const projectPath = normalizeSidebarProjectPath(
+        row.session.projectPath ?? row.session.workingDirectory,
+      );
+      const key = projectKeyForSession(row.session);
+      const existing = groups.get(key);
+      const latestUpdatedAt =
+        existing && updatedAtMs(existing.latestUpdatedAt) > updatedAtMs(row.session.updatedAt)
+          ? existing.latestUpdatedAt
+          : row.session.updatedAt;
+      const group =
+        existing ??
+        ({
+          key,
+          projectPath,
+          label: projectDisplayName(projectPath, noProjectLabel),
+          latestUpdatedAt: row.session.updatedAt,
+          rows: [],
+          isCurrent: false,
+        } satisfies ProjectSessionGroup);
+
+      group.latestUpdatedAt = latestUpdatedAt;
+      group.rows.push(row);
+      group.isCurrent = group.isCurrent || row.session.id === currentId;
+      groups.set(key, group);
+    }
+
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        rows: [...group.rows].sort(
+          (a, b) =>
+            updatedAtMs(b.session.updatedAt) - updatedAtMs(a.session.updatedAt),
+        ),
+      }))
+      .sort(compareProjectGroupsForSidebar);
+  }, [currentSession?.id, noProjectLabel, sessionRows]);
+
+  const currentProjectKey = currentSession
+    ? projectKeyForSession(currentSession)
+    : null;
+
+  useEffect(() => {
+    if (projectKeysInitializedRef.current || projectGroups.length === 0) return;
+    projectKeysInitializedRef.current = true;
+    setExpandedProjectKeys(new Set(projectGroups.map((group) => group.key)));
+  }, [projectGroups]);
+
+  useEffect(() => {
+    if (!currentProjectKey) return;
+    setExpandedProjectKeys((previous) => {
+      if (previous.has(currentProjectKey)) return previous;
+      const next = new Set(previous);
+      next.add(currentProjectKey);
+      return next;
+    });
+  }, [currentProjectKey]);
 
   const filteredSessions = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -635,10 +833,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     () => ({
       fontSize: 14,
       fontWeight: 500,
-      color: theme.palette.text.primary,
+      color: sidebarText,
       lineHeight: 1.3,
     }),
-    [theme.palette.text.primary],
+    [sidebarText],
   );
 
   const navRowSx = useMemo(
@@ -650,13 +848,185 @@ export function SessionList({ onSelectSession }: SessionListProps) {
       py: 1,
       borderRadius: 1,
       cursor: "pointer",
-      color: theme.palette.text.primary,
+      color: sidebarText,
       "&:hover": {
         bgcolor: "action.hover",
       },
     }),
-    [theme.palette.text.primary],
+    [sidebarText],
   );
+
+  const renderSessionRow = (
+    { session, isPlaceholder }: SessionSearchRow,
+    opts?: { nested?: boolean },
+  ) => {
+    const relativeTime = formatSidebarRelativeTime(session.updatedAt, locale);
+    const selected = currentSession?.id === session.id;
+    return (
+      <Box
+        key={session.id}
+        onClick={() => handleSelectSession(session.id)}
+        onMouseEnter={() => handleSessionMouseEnter(session.id)}
+        onMouseLeave={handleSessionMouseLeave}
+        onMouseDown={() => handleSessionMouseDown(session.id)}
+        sx={{
+          px: opts?.nested ? 1 : 1.25,
+          py: 0.55,
+          borderRadius: 1.25,
+          cursor: "pointer",
+          position: "relative",
+          overflow: "hidden",
+          minHeight: 32,
+          bgcolor:
+            selected
+              ? alpha(
+                  theme.palette.primary.main,
+                  theme.palette.mode === "dark" ? 0.2 : 0.08,
+                )
+              : "transparent",
+          border: "1px solid",
+          borderColor:
+            selected
+              ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.36 : 0.22)
+              : "transparent",
+          transition: "background-color 120ms ease, border-color 120ms ease",
+          "&:hover": {
+            bgcolor:
+              selected
+                ? alpha(
+                    theme.palette.primary.main,
+                    theme.palette.mode === "dark" ? 0.26 : 0.12,
+                  )
+                : "action.hover",
+          },
+          "&:hover .session-row-time, &:focus-within .session-row-time": {
+            opacity: 0,
+            transform: "translateX(-3px)",
+          },
+          "&:hover .session-row-menu, &:focus-within .session-row-menu": {
+            opacity: 1,
+            pointerEvents: "auto",
+            transform: "translate(0, -50%)",
+          },
+          "@media (prefers-reduced-motion: no-preference)": {
+            "&:active::after": {
+              content: '""',
+              position: "absolute",
+              inset: 0,
+              borderRadius: "inherit",
+              background: alpha(theme.palette.primary.main, 0.18),
+              "@keyframes omigaBloom": {
+                from: { opacity: 1, transform: "scale(0.6)" },
+                to: { opacity: 0, transform: "scale(1.4)" },
+              },
+              animation: "omigaBloom 320ms cubic-bezier(0.2, 0, 0.6, 1) forwards",
+              pointerEvents: "none",
+            },
+          },
+        }}
+      >
+        <Stack direction="row" alignItems="center" spacing={0.5}>
+          {isSessionRunning(session.id) && (
+            <Box
+              aria-label="running"
+              sx={{
+                flexShrink: 0,
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                bgcolor: "primary.main",
+                boxShadow: (t) =>
+                  `0 0 6px 1px ${alpha(t.palette.primary.main, 0.55)}`,
+                "@media (prefers-reduced-motion: no-preference)": {
+                  "@keyframes omigaRunPulse": {
+                    "0%, 100%": { opacity: 1, transform: "scale(1)" },
+                    "50%": { opacity: 0.45, transform: "scale(0.65)" },
+                  },
+                  animation: "omigaRunPulse 1.2s ease-in-out infinite",
+                },
+              }}
+            />
+          )}
+          <Typography
+            variant="body2"
+              fontWeight={selected ? 600 : 500}
+            noWrap
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              fontSize: 14,
+              lineHeight: 1.35,
+              ...(isPlaceholder
+                ? {
+                    color: "text.secondary",
+                    fontStyle: "italic",
+                    fontWeight: 400,
+                  }
+                : { color: selected ? sidebarAccentText : sidebarText }),
+            }}
+          >
+            {isPlaceholder ? UNUSED_SESSION_LABEL : session.name}
+          </Typography>
+          <Box
+            sx={{
+              position: "relative",
+              width: 38,
+              height: 24,
+              flexShrink: 0,
+            }}
+          >
+            <Typography
+              className="session-row-time"
+              variant="body2"
+              noWrap
+              sx={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "flex-end",
+                color: "text.secondary",
+                fontSize: 12.5,
+                fontWeight: 500,
+                transition: "opacity 120ms ease, transform 120ms ease",
+                userSelect: "none",
+              }}
+            >
+              {relativeTime}
+            </Typography>
+            <IconButton
+              className="session-row-menu"
+              size="small"
+              aria-label={t("sessionActions")}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleMenuOpen(e, session.id);
+              }}
+              sx={{
+                position: "absolute",
+                right: -1,
+                top: "50%",
+                transform: "translate(4px, -50%)",
+                width: 24,
+                height: 24,
+                opacity: 0,
+                pointerEvents: "none",
+                color: "text.secondary",
+                transition:
+                  "opacity 120ms ease, transform 120ms ease, background-color 120ms ease",
+                "&:hover": {
+                  bgcolor: "action.hover",
+                  color: "text.primary",
+                },
+              }}
+            >
+              <MoreVert fontSize="small" />
+            </IconButton>
+          </Box>
+        </Stack>
+      </Box>
+    );
+  };
 
   // Only block the whole panel on the initial list fetch — not when switching sessions
   if (isLoading && sessions.length === 0) {
@@ -696,52 +1066,39 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         </Alert>
       )}
 
-      {/* App logo */}
-      <Box sx={{ px: 2, pt: 2, pb: 1.25, display: "flex", alignItems: "center", gap: 1.25 }}>
-        <OmigaLogo size={28} />
-        <Typography variant="h6" fontWeight={750} sx={{ letterSpacing: 0, color: "text.primary" }}>
-          Omiga
-        </Typography>
-      </Box>
-
-      {/* Top nav: icon + label (reference layout) */}
-      <Stack spacing={0} sx={{ p: 1.5, pb: 1 }}>
+      {/* Top nav: compact utility actions only. Project navigation lives below. */}
+      <Stack spacing={0} sx={{ px: 1.5, pt: 1.5, pb: 1 }}>
         <Box
           data-testid="new-session-btn"
           sx={navRowSx}
           onClick={() => {
-            handleCreateClick();
+            void handleCreateClick();
           }}
         >
-          <Add sx={{ fontSize: 20, color: "text.secondary" }} />
+          <Box
+            component="span"
+            sx={{
+              width: 20,
+              height: 20,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "text.secondary",
+              flexShrink: 0,
+            }}
+          >
+            <Icon icon="codicon:new-session" width={20} height={20} />
+          </Box>
           <Typography sx={navTextSx}>{t("newSession")}</Typography>
         </Box>
-        <Box
-          sx={navRowSx}
-          onClick={handleOpenSearchDialog}
-        >
+        <Box sx={navRowSx} onClick={handleOpenSearchDialog}>
           <Search sx={{ fontSize: 20, color: "text.secondary" }} />
           <Typography sx={navTextSx}>{t("search")}</Typography>
         </Box>
-        <Box
-          sx={navRowSx}
-          onClick={() => {
-            window.dispatchEvent(
-              new CustomEvent("openSettings", { detail: { tab: "plugins" } }),
-            );
-          }}
-        >
-          <BusinessCenterOutlined sx={{ fontSize: 20, color: "text.secondary" }} />
-          <Typography sx={navTextSx}>{t("customize")}</Typography>
-        </Box>
-        <Box sx={navRowSx} onClick={() => {}}>
-          <FolderOutlined sx={{ fontSize: 20, color: "text.secondary" }} />
-          <Typography sx={navTextSx}>{t("projects")}</Typography>
-        </Box>
       </Stack>
 
-      {/* Recents */}
-      <Box sx={{ px: 1.5, pt: 0.5, pb: 0.75 }}>
+      {/* Projectized sessions: one project folder can contain many sessions that share project memory. */}
+      <Box sx={{ px: 1.5, pt: 0.75, pb: 0.75 }}>
         <Typography
           variant="caption"
           sx={{
@@ -749,17 +1106,16 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             px: 0.5,
             color: "text.secondary",
             fontSize: 12,
-            fontWeight: 500,
+            fontWeight: 650,
           }}
         >
-          {t("recents")}
+          {t("projectsSection")}
         </Typography>
       </Box>
 
-      {/* Session list */}
       <Box data-testid="session-list" sx={{ flex: 1, overflow: "auto", px: 1, pb: 1, minHeight: 0 }}>
-        <Stack spacing={0.5}>
-          {sessionRows.length === 0 ? (
+        <Stack spacing={0.75}>
+          {projectGroups.length === 0 ? (
             <Box
               sx={{
                 p: 3,
@@ -770,118 +1126,114 @@ export function SessionList({ onSelectSession }: SessionListProps) {
               <Typography variant="body2">{t("noSessions")}</Typography>
             </Box>
           ) : (
-            sessionRows.map(({ session, isPlaceholder }) => (
-              <Box
-                key={session.id}
-                onClick={() => handleSelectSession(session.id)}
-                onMouseEnter={() => handleSessionMouseEnter(session.id)}
-                onMouseLeave={handleSessionMouseLeave}
-                onMouseDown={() => handleSessionMouseDown(session.id)}
-                sx={{
-                  px: 1.25,
-                  py: 1,
-                  borderRadius: 1.5,
-                  cursor: "pointer",
-                  position: "relative",
-                  overflow: "hidden",
-                  bgcolor:
-                    currentSession?.id === session.id
-                      ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.14 : 0.1)
-                      : "transparent",
-                  border: "1px solid",
-                  borderColor:
-                    currentSession?.id === session.id
-                      ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.25 : 0.18)
-                      : "transparent",
-                  transition: "background-color 120ms ease, border-color 120ms ease",
-                  "&:hover": {
-                    bgcolor:
-                      currentSession?.id === session.id
-                        ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.2 : 0.14)
-                        : "action.hover",
-                  },
-                  // Radial bloom on click — expands from press point outward.
-                  // Uses a pseudo-element so it never affects layout.
-                  // prefers-reduced-motion: animation is suppressed entirely.
-                  "@media (prefers-reduced-motion: no-preference)": {
-                    "&:active::after": {
-                      content: '""',
-                      position: "absolute",
-                      inset: 0,
-                      borderRadius: "inherit",
-                      background: alpha(theme.palette.primary.main, 0.18),
-                      "@keyframes omigaBloom": {
-                        from: { opacity: 1, transform: "scale(0.6)" },
-                        to:   { opacity: 0, transform: "scale(1.4)" },
-                      },
-                      animation: "omigaBloom 320ms cubic-bezier(0.2, 0, 0.6, 1) forwards",
-                      pointerEvents: "none",
-                    },
-                  },
-                }}
-              >
-                <Stack direction="row" alignItems="center" spacing={0.5}>
-                  {/* Running indicator — pulsing dot + left glow strip */}
-                  {isSessionRunning(session.id) && (
-                    <Box
-                      aria-label="running"
-                      sx={{
-                        flexShrink: 0,
-                        width: 7,
-                        height: 7,
-                        borderRadius: "50%",
-                        bgcolor: "primary.main",
-                        boxShadow: (t) =>
-                          `0 0 6px 1px ${alpha(t.palette.primary.main, 0.55)}`,
-                        "@media (prefers-reduced-motion: no-preference)": {
-                          "@keyframes omigaRunPulse": {
-                            "0%, 100%": { opacity: 1, transform: "scale(1)" },
-                            "50%":       { opacity: 0.45, transform: "scale(0.65)" },
-                          },
-                          animation: "omigaRunPulse 1.2s ease-in-out infinite",
-                        },
-                      }}
-                    />
-                  )}
-                  <Typography
-                    variant="body2"
-                    fontWeight={500}
-                    noWrap
-                    sx={{
-                      flex: 1,
-                      minWidth: 0,
-                      ...(isPlaceholder
-                        ? {
-                            color: "text.secondary",
-                            fontStyle: "italic",
-                            fontWeight: 400,
-                          }
-                        : { color: "text.primary" }),
+            projectGroups.map((project) => {
+              const expanded = expandedProjectKeys.has(project.key);
+              return (
+                <Box key={project.key} data-testid="project-session-group">
+                  <Box
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      setExpandedProjectKeys((previous) => {
+                        const next = new Set(previous);
+                        if (next.has(project.key)) next.delete(project.key);
+                        else next.add(project.key);
+                        return next;
+                      });
                     }}
-                  >
-                    {isPlaceholder ? UNUSED_SESSION_LABEL : session.name}
-                  </Typography>
-                  <IconButton
-                    size="small"
-                    aria-label={t("sessionActions")}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleMenuOpen(e, session.id);
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setExpandedProjectKeys((previous) => {
+                          const next = new Set(previous);
+                          if (next.has(project.key)) next.delete(project.key);
+                          else next.add(project.key);
+                          return next;
+                        });
+                      }
                     }}
                     sx={{
-                      p: 0.25,
-                      flexShrink: 0,
-                      color: "text.secondary",
-                      "&:hover": {
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 0.85,
+                      px: 1,
+                      py: 0.58,
+                      borderRadius: 1.25,
+                      cursor: "pointer",
+                      color: project.isCurrent ? sidebarAccentText : "text.secondary",
+                      minHeight: 32,
+                      bgcolor: "transparent",
+                      outline: "none",
+                      "&:hover, &:focus-visible": {
                         bgcolor: "action.hover",
                       },
                     }}
                   >
-                    <MoreVert fontSize="small" />
-                  </IconButton>
-                </Stack>
-              </Box>
-            ))
+                    {expanded ? (
+                      <FolderOpenOutlined
+                        sx={{
+                          fontSize: 19,
+                          color: "text.secondary",
+                          flexShrink: 0,
+                        }}
+                      />
+                    ) : (
+                      <FolderOutlined
+                        sx={{
+                          fontSize: 19,
+                          color: "text.secondary",
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
+                    <Typography
+                      variant="body2"
+                      noWrap
+                      sx={{
+                        flex: 1,
+                        minWidth: 0,
+                        color: project.isCurrent ? sidebarAccentText : "text.secondary",
+                        fontWeight: project.isCurrent ? 620 : 540,
+                        lineHeight: 1.25,
+                      }}
+                    >
+                      {project.label}
+                    </Typography>
+                    <IconButton
+                      size="small"
+                      aria-label={t("newProjectSession")}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleCreateProjectSession(project.projectPath);
+                      }}
+                      sx={{
+                        width: 24,
+                        height: 24,
+                        opacity: 0,
+                        pointerEvents: "none",
+                        color: "text.secondary",
+                        transition:
+                          "opacity 120ms ease, color 120ms ease, background-color 120ms ease",
+                        ".MuiBox-root:hover > &, .MuiBox-root:focus-within > &": {
+                          opacity: 1,
+                          pointerEvents: "auto",
+                        },
+                        "&:hover": { bgcolor: "action.hover", color: "text.primary" },
+                      }}
+                    >
+                      <Add sx={{ fontSize: 17 }} />
+                    </IconButton>
+                  </Box>
+                  {expanded && (
+                    <Stack spacing={0.18} sx={{ mt: 0.18, pl: 2.5, pr: 0 }}>
+                      {project.rows.map((row) =>
+                        renderSessionRow(row, { nested: true }),
+                      )}
+                    </Stack>
+                  )}
+                </Box>
+              );
+            })
           )}
         </Stack>
       </Box>
@@ -1148,7 +1500,12 @@ export function SessionList({ onSelectSession }: SessionListProps) {
       >
         <OmigaLogo size={24} animated={false} />
         <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Typography variant="body2" fontWeight={600} color="text.primary" noWrap>
+          <Typography
+            variant="body2"
+            fontWeight={600}
+            color={sidebarTextStrong}
+            noWrap
+          >
             {t("localWorkspace")}
           </Typography>
           <Typography variant="caption" color="text.secondary" display="block" noWrap>
@@ -1328,64 +1685,129 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         onClose={handleMenuClose}
         anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
+        MenuListProps={{ sx: { py: 0.5 } }}
         PaperProps={{
-          sx: { minWidth: 140 },
+          sx: {
+            width: 228,
+            borderRadius: 2.5,
+            border: "1px solid",
+            borderColor: alpha(theme.palette.divider, 0.8),
+            bgcolor: alpha(theme.palette.background.paper, theme.palette.mode === "dark" ? 0.96 : 0.98),
+            backgroundImage: "none",
+            boxShadow:
+              theme.palette.mode === "dark"
+                ? "0 18px 48px rgba(0,0,0,0.55)"
+                : "0 18px 48px rgba(15,23,42,0.18)",
+          },
         }}
       >
-        <MenuItem onClick={handleRenameClick}>
-          <Edit fontSize="small" sx={{ mr: 1 }} />
-          {t("rename")}
-        </MenuItem>
-        <MenuItem onClick={() => void handleExportMarkdown()}>
-          <FileDownloadOutlined fontSize="small" sx={{ mr: 1 }} />
-          {t("exportMarkdown")}
+        <MenuItem
+          aria-label={t("rename")}
+          onClick={handleRenameClick}
+          disabled={isRenaming}
+          sx={{
+            minHeight: 42,
+            mx: 0.75,
+            my: 0.125,
+            px: 1.25,
+            borderRadius: 1.5,
+            "& .MuiListItemIcon-root": { minWidth: 34, color: "text.secondary" },
+            "& .MuiListItemText-primary": { fontSize: 14, fontWeight: 650 },
+          }}
+        >
+          <ListItemIcon>
+            <Edit fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>{t("rename")}</ListItemText>
         </MenuItem>
         <MenuItem
+          aria-label={t("exportMarkdown")}
+          onClick={() => void handleExportMarkdown()}
+          sx={{
+            minHeight: 42,
+            mx: 0.75,
+            my: 0.125,
+            px: 1.25,
+            borderRadius: 1.5,
+            "& .MuiListItemIcon-root": { minWidth: 34, color: "text.secondary" },
+            "& .MuiListItemText-primary": { fontSize: 14, fontWeight: 650 },
+          }}
+        >
+          <ListItemIcon>
+            <FileDownloadOutlined fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>{t("exportMarkdown")}</ListItemText>
+        </MenuItem>
+        <Divider sx={{ my: 0.5 }} />
+        <MenuItem
+          aria-label={t("delete")}
           onClick={handleDelete}
           disabled={isDeleting}
-          sx={{ color: "error.main" }}
+          sx={{
+            minHeight: 42,
+            mx: 0.75,
+            my: 0.125,
+            px: 1.25,
+            borderRadius: 1.5,
+            color: "error.main",
+            "& .MuiListItemIcon-root": { minWidth: 34, color: "error.main" },
+            "& .MuiListItemText-primary": { fontSize: 14, fontWeight: 700 },
+          }}
         >
-          <Delete fontSize="small" sx={{ mr: 1 }} />
-          {isDeleting ? t("deleting") : t("delete")}
+          <ListItemIcon>
+            <Delete fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>{isDeleting ? t("deleting") : t("delete")}</ListItemText>
         </MenuItem>
       </Menu>
 
       {/* Rename Dialog */}
       <Dialog
         open={renameDialogOpen}
-        onClose={() => setRenameDialogOpen(false)}
+        onClose={handleRenameDialogClose}
         maxWidth="xs"
         fullWidth
-        PaperProps={{ sx: { borderRadius: 3 } }}
+        PaperProps={{
+          sx: {
+            borderRadius: 4,
+            backgroundImage: "none",
+            boxShadow:
+              theme.palette.mode === "dark"
+                ? "0 24px 80px rgba(0,0,0,0.64)"
+                : "0 24px 80px rgba(15,23,42,0.26)",
+          },
+        }}
       >
-        <DialogTitle>{t("renameSession")}</DialogTitle>
-        <DialogContent>
+        <DialogTitle sx={{ pb: 1, fontWeight: 750 }}>{t("renameSession")}</DialogTitle>
+        <DialogContent sx={{ pt: 1 }}>
           <TextField
             autoFocus
             fullWidth
+            disabled={isRenaming}
             label={t("sessionName")}
             value={newName}
+            onFocus={(e) => e.currentTarget.select()}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => {
               const ne = e.nativeEvent;
               if (ne.isComposing || ne.keyCode === 229) return;
               if (e.key === "Enter" && newName.trim()) {
-                handleRenameConfirm();
+                void handleRenameConfirm();
               }
             }}
             sx={{ mt: 1 }}
           />
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setRenameDialogOpen(false)}>
+        <DialogActions sx={{ px: 3, pb: 2.5, gap: 1 }}>
+          <Button onClick={handleRenameDialogClose} disabled={isRenaming}>
             {t("cancel")}
           </Button>
           <Button
-            onClick={handleRenameConfirm}
+            onClick={() => void handleRenameConfirm()}
             variant="contained"
-            disabled={!newName.trim()}
+            disabled={isRenaming || !newName.trim()}
           >
-            {t("rename")}
+            {isRenaming ? `${t("rename")}…` : t("rename")}
           </Button>
         </DialogActions>
       </Dialog>

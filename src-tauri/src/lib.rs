@@ -30,10 +30,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            // Initialize tracing/logging
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-                .init();
+            if let Some(otel_guard) = crate::infrastructure::otel::init_tracing() {
+                app.manage(otel_guard);
+            }
 
             tracing::info!("Omiga starting up...");
 
@@ -160,7 +159,6 @@ pub fn run() {
             commands::chat::research_goal::update_research_goal_criteria,
             commands::chat::research_goal::update_research_goal_settings,
             commands::chat::list_orchestration_events,
-            commands::chat::run_mock_orchestration_scenario,
             commands::chat::list_session_background_tasks,
             commands::chat::load_background_agent_transcript,
             commands::chat::cancel_background_agent_task,
@@ -247,6 +245,7 @@ pub fn run() {
             commands::fs::read_file,
             commands::fs::read_file_bytes,
             commands::fs::read_file_bytes_fast,
+            commands::fs::read_dropped_file_bytes,
             commands::fs::read_local_file_for_view,
             commands::fs::write_file,
             commands::fs::read_image_base64,
@@ -259,6 +258,7 @@ pub fn run() {
             commands::ssh_fs::ssh_list_directory,
             commands::ssh_fs::ssh_read_file,
             commands::ssh_fs::ssh_write_file,
+            commands::ssh_fs::ssh_write_file_bytes,
             commands::ssh_fs::ssh_create_directory,
             commands::sandbox_fs::sandbox_list_directory,
             commands::sandbox_fs::sandbox_read_file,
@@ -381,21 +381,15 @@ pub fn run() {
             commands::extensions::list_vscode_extensions,
             commands::extensions::read_vscode_extension_file,
 
-            // Execution environments configuration
-            commands::execution_envs::get_execution_envs_config,
-            commands::execution_envs::save_execution_envs_config,
-            commands::execution_envs::get_modal_config,
-            commands::execution_envs::save_modal_config,
-            commands::execution_envs::get_daytona_config,
-            commands::execution_envs::save_daytona_config,
+            // Execution environments configuration (only implemented SSH UI is exposed)
             commands::execution_envs::get_ssh_configs,
             commands::execution_envs::get_ssh_config,
             commands::execution_envs::save_ssh_config,
             commands::execution_envs::delete_ssh_config,
-            commands::execution_envs::is_modal_configured,
-            commands::execution_envs::is_daytona_configured,
             commands::execution_envs::get_execution_envs_config_path,
             commands::execution_envs::is_rsync_available,
+            commands::execution_envs::get_sandbox_escalation_enabled,
+            commands::execution_envs::set_sandbox_escalation_enabled,
 
             commands::memory::memory_get_status,
             commands::memory::memory_build_index,

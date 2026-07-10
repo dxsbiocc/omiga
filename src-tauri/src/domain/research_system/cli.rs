@@ -24,14 +24,7 @@ pub fn run_research_cli(args: &[String], cwd: &Path) -> Result<String, String> {
         "init" => init_workspace(&layout),
         "list-agents" => list_agents(&layout),
         "list-proposals" => list_proposals(&layout),
-        "plan" => {
-            let request = collect_request(&args[1..])?;
-            let registry = load_registry(&layout)?;
-            let director = ResearchDirector::new(registry, MockAgentRunner::new());
-            let (plan, _) = director.prepare(&request)?;
-            serde_json::to_string_pretty(&plan).map_err(|err| err.to_string())
-        }
-        "run" => run_flow(&layout, &collect_request(&args[1..])?),
+        "plan" | "run" => Err(research_execution_unavailable(command)),
         "review-traces" => review_traces(&layout),
         "approve-proposal" => approve_proposal(&layout, &collect_identifier(&args[1..])?),
         "help" | "--help" | "-h" => Ok(help_text()),
@@ -70,12 +63,21 @@ fn list_agents(layout: &WorkspaceLayout) -> Result<String, String> {
     serde_json::to_string_pretty(&agents).map_err(|err| err.to_string())
 }
 
-fn run_flow(layout: &WorkspaceLayout, request: &str) -> Result<String, String> {
+/// Internal execution entrypoint for the research goal engine.
+///
+/// Not reachable from the user-facing CLI surface: `research plan/run` stay
+/// gated in `run_research_cli`. The goals engine drives cycles through here.
+pub(super) fn execute_research_request(cwd: &Path, request: &str) -> Result<String, String> {
+    let request = request.trim();
+    if request.is_empty() {
+        return Err("a user request string is required".to_string());
+    }
+    let layout = WorkspaceLayout::new(cwd);
     layout.ensure_dirs()?;
     if !layout.agents_dir.exists() {
         write_default_agent_cards(&layout.agents_dir)?;
     }
-    let registry = load_registry(layout)?;
+    let registry = load_registry(&layout)?;
     let director = ResearchDirector::new(registry.clone(), MockAgentRunner::new());
     let (plan, control_plane_report) = director.prepare(request)?;
     let mut executor = Executor::new(ExecutorDependencies {
@@ -136,15 +138,6 @@ fn load_registry(layout: &WorkspaceLayout) -> Result<AgentRegistry, String> {
     }
 }
 
-fn collect_request(parts: &[String]) -> Result<String, String> {
-    let request = parts.join(" ").trim().to_string();
-    if request.is_empty() {
-        Err("a user request string is required".to_string())
-    } else {
-        Ok(request)
-    }
-}
-
 fn collect_identifier(parts: &[String]) -> Result<String, String> {
     let value = parts.join(" ").trim().to_string();
     if value.is_empty() {
@@ -152,6 +145,12 @@ fn collect_identifier(parts: &[String]) -> Result<String, String> {
     } else {
         Ok(value)
     }
+}
+
+fn research_execution_unavailable(command: &str) -> String {
+    format!(
+        "`research {command}` is an internal command and is not exposed in the product UI. Use `/research <scientific task>` in chat so the interactive research flow can ask for missing information and run through the normal agent path."
+    )
 }
 
 fn help_text() -> String {
@@ -162,11 +161,11 @@ fn help_text() -> String {
         "  init               Create agents/ and .research/ state directories",
         "  list-agents        List active agent cards",
         "  list-proposals     List saved creator proposals",
-        "  plan <request>     Print a TaskGraph for the request",
-        "  run <request>      Execute the request with MockAgentRunner",
         "  review-traces      Generate creator proposals from saved traces",
         "  approve-proposal <proposal_id>",
         "                     Approve a proposal and apply or emit its registry patch",
+        "",
+        "Scientific tasks: send `/research <your task>` in chat. Internal plan/run commands are hidden from the product UI.",
     ]
     .join("\n")
 }

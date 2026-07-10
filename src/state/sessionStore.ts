@@ -150,6 +150,11 @@ export function isUnsetWorkspacePath(projectPath: string | undefined): boolean {
   return p === "" || p === ".";
 }
 
+function normalizeWorkspacePathForSession(projectPath: string | undefined): string {
+  const p = (projectPath ?? "").trim();
+  return isUnsetWorkspacePath(p) ? "." : p;
+}
+
 export type RoundStatus = "running" | "partial" | "cancelled" | "completed";
 
 export interface SchedulerPlan {
@@ -318,7 +323,7 @@ interface SendMessageRequest {
   executionEnvironment?: "local" | "ssh" | "sandbox";
   /** Selected SSH server name; used when executionEnvironment === "ssh" */
   sshServer?: string | null;
-  /** `modal` | `daytona` | `docker` | `singularity` — composer sandbox backend */
+  /** `docker` | `singularity` — composer sandbox backend */
   sandboxBackend?: string;
   /** `"none"` | `"conda"` | `"venv"` | `"pyenv"` — local virtual env type */
   localVenvType?: string;
@@ -332,8 +337,6 @@ interface SendMessageRequest {
   permissionMode?: string;
   /** `off` | `task` | `session` — explicit Computer Use gate for this turn */
   computerUseMode?: "off" | "task" | "session";
-  /** `off` | `task` | `session` — explicit Browser Operator gate for this turn */
-  browserUseMode?: "off" | "task" | "session";
   /** DB user row id — truncate after this row and reuse instead of inserting a duplicate user message */
   retryFromUserMessageId?: string;
   /** Session's stored provider entry name — passed through for lazy LLM config restoration. */
@@ -370,7 +373,7 @@ interface SessionState {
   /** Sessions created with placeholder path — show “pick folder” until set */
   pendingProjectPathSessions: Set<string>;
   createSession: (name: string, projectPath: string) => Promise<void>;
-  createSessionQuick: () => Promise<void>;
+  createSessionQuick: (projectPath?: string) => Promise<void>;
   updateSessionProjectPath: (
     sessionId: string,
     projectPath: string,
@@ -559,9 +562,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  createSessionQuick: async () => {
+  createSessionQuick: async (projectPath) => {
     const { sessions, currentSession, storeMessages } = get();
+    const targetProjectPath = normalizeWorkspacePathForSession(projectPath);
+    const targetWasExplicit = projectPath !== undefined;
     const reusable = sessions.find((s) => {
+      if (
+        targetWasExplicit &&
+        normalizeWorkspacePathForSession(s.projectPath) !== targetProjectPath
+      ) {
+        return false;
+      }
       const isCur = currentSession?.id === s.id;
       return shouldShowNewSessionPlaceholder(s, {
         isCurrentSession: isCur,
@@ -572,7 +583,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       await get().setCurrentSession(reusable.id);
       return;
     }
-    await get().createSession(UNUSED_SESSION_LABEL, ".");
+    await get().createSession(UNUSED_SESSION_LABEL, targetProjectPath);
   },
 
   updateSessionProjectPath: async (sessionId, projectPath) => {

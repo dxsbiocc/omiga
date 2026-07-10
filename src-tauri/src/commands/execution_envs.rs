@@ -52,6 +52,37 @@ pub fn save_execution_envs_config(env_config: ExecutionEnvsConfig) -> Result<(),
     save_config(&config)
 }
 
+/// Load sandbox escalation approval setting, falling back open on read failure.
+pub(crate) fn sandbox_escalation_enabled_setting_or_default() -> bool {
+    load_config()
+        .ok()
+        .and_then(|config| config.execution_envs)
+        .unwrap_or_default()
+        .sandbox_escalation_enabled
+}
+
+/// Get whether sandbox-denied commands should request one-shot escalation approval.
+#[tauri::command]
+pub fn get_sandbox_escalation_enabled() -> Result<bool, String> {
+    Ok(sandbox_escalation_enabled_setting_or_default())
+}
+
+/// Persist whether sandbox-denied commands should request one-shot escalation approval.
+#[tauri::command]
+pub fn set_sandbox_escalation_enabled(enabled: bool) -> Result<(), String> {
+    let mut config = match load_config() {
+        Ok(config) => config,
+        Err(err) if find_config_file().is_none() => LlmConfigFile::default(),
+        Err(err) => return Err(err),
+    };
+
+    let mut envs = config.execution_envs.take().unwrap_or_default();
+    envs.sandbox_escalation_enabled = enabled;
+    config.execution_envs = Some(envs);
+
+    save_config(&config)
+}
+
 /// Get Modal configuration
 #[tauri::command]
 pub fn get_modal_config() -> Result<Option<ModalExecConfig>, String> {
@@ -237,6 +268,21 @@ mod tests {
         assert_eq!(deserialized.host_name, Some("192.168.1.100".to_string()));
         assert_eq!(deserialized.user, Some("ubuntu".to_string()));
         assert_eq!(deserialized.port, 22);
+    }
+
+    #[test]
+    fn test_execution_envs_config_defaults_sandbox_escalation_enabled() {
+        let envs = ExecutionEnvsConfig::default();
+
+        assert!(envs.sandbox_escalation_enabled);
+    }
+
+    #[test]
+    fn test_execution_envs_config_deserializes_missing_sandbox_escalation_as_enabled() {
+        let yaml = "ssh: {}\n";
+        let envs: ExecutionEnvsConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(envs.sandbox_escalation_enabled);
     }
 
     #[test]

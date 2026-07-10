@@ -138,6 +138,10 @@ pub struct MessageTokenUsage {
     pub total: Option<u32>,
     #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation: Option<u32>,
 }
 
 /// A chat message

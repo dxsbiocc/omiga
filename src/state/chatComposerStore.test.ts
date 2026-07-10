@@ -8,52 +8,78 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import {
   executionWorkspaceScopeKey,
+  normalizeSessionConfig,
   shouldResetWorkspaceForExecutionScopeChange,
   useChatComposerStore,
 } from "./chatComposerStore";
 
-describe("chatComposerStore browserUseMode", () => {
+describe("chatComposerStore permissionMode", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
     useChatComposerStore.getState().resetToDefaults();
   });
 
-  it("defaults browserUseMode to off", () => {
-    expect(useChatComposerStore.getState().browserUseMode).toBe("off");
-  });
-
-  it("resets task-scoped browserUseMode after send-style cleanup", () => {
-    const store = useChatComposerStore.getState();
-
-    store.setBrowserUseMode("task");
-    store.resetTaskBrowserUseMode();
-
-    expect(useChatComposerStore.getState().browserUseMode).toBe("off");
-  });
-
-  it("keeps session-scoped browserUseMode enabled across task reset", () => {
-    const store = useChatComposerStore.getState();
-
-    store.setBrowserUseMode("session");
-    store.resetTaskBrowserUseMode();
-
-    expect(useChatComposerStore.getState().browserUseMode).toBe("session");
-  });
-
-  it("clears browserUseMode when switching sessions", () => {
-    useChatComposerStore.getState().setBrowserUseMode("session");
-
-    useChatComposerStore.getState().initForSession("session-2", {
+  it("syncs permission mode changes to the active backend session immediately", () => {
+    useChatComposerStore.getState().initForSession("session-stance", {
       composer_agent_type: "auto",
-      permission_mode: "auto",
+      permission_mode: "ask",
       execution_environment: "local",
       sandbox_backend: "docker",
       local_venv_type: "none",
       local_venv_name: "",
       use_worktree: false,
     });
+    invokeMock.mockClear();
 
-    expect(useChatComposerStore.getState().browserUseMode).toBe("off");
+    useChatComposerStore.getState().setPermissionMode("auto");
+
+    expect(invokeMock).toHaveBeenCalledWith("save_session_config_command", {
+      sessionId: "session-stance",
+      config: expect.objectContaining({ permission_mode: "auto" }),
+    });
+    expect(invokeMock).toHaveBeenCalledWith("permission_set_session_stance", {
+      sessionId: "session-stance",
+      stance: "auto",
+    });
+  });
+
+  it("does not sync permission stance before a session is active", () => {
+    invokeMock.mockClear();
+
+    useChatComposerStore.getState().setPermissionMode("auto");
+
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "permission_set_session_stance",
+      expect.anything(),
+    );
+  });
+
+  it("keeps legacy worktree session config disabled", () => {
+    const normalized = normalizeSessionConfig({
+      use_worktree: true,
+      sandbox_backend: "docker",
+    });
+
+    expect(normalized.use_worktree).toBe(false);
+
+    useChatComposerStore.getState().initForSession("session-no-worktree", {
+      composer_agent_type: "auto",
+      permission_mode: "ask",
+      execution_environment: "local",
+      sandbox_backend: "docker",
+      local_venv_type: "none",
+      local_venv_name: "",
+      use_worktree: true,
+    });
+    invokeMock.mockClear();
+
+    useChatComposerStore.getState().setEnvironment("ssh");
+
+    expect(invokeMock).toHaveBeenCalledWith("save_session_config_command", {
+      sessionId: "session-no-worktree",
+      config: expect.objectContaining({ use_worktree: false }),
+    });
   });
 });
 
@@ -97,5 +123,22 @@ describe("chatComposerStore execution workspace scopes", () => {
         executionWorkspaceScopeKey("sandbox", null, "singularity"),
       ),
     ).toBe(true);
+  });
+});
+
+describe("chatComposerStore attachments", () => {
+  beforeEach(() => {
+    useChatComposerStore.getState().resetToDefaults();
+  });
+
+  it("preserves absolute uploaded paths for model-facing attachment context", () => {
+    const path =
+      "/cluster/facility/yzhang/WorkSpace/code/EukDetect/附件1.xlsx";
+
+    useChatComposerStore.getState().addComposerAttachedPath(path);
+
+    expect(useChatComposerStore.getState().composerAttachedPaths).toEqual([
+      path,
+    ]);
   });
 });

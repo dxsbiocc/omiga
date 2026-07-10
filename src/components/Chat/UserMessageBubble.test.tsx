@@ -47,8 +47,8 @@ describe("UserMessageBubble", () => {
 
     expect(html).toContain("hello");
     expect(html).toContain("/executor");
-    expect(html).toContain("@src/App.tsx");
-    expect(html).toContain("user-msg-inline-flow");
+    expect(html).toContain("@App.tsx");
+    expect(html).toContain("user-msg-meta-row");
     expect(html).toContain("user-msg-inline-chip");
     expect(html).toContain("user-msg-agent-chip");
     expect(html).toContain("user-msg-file-chip");
@@ -65,7 +65,20 @@ describe("UserMessageBubble", () => {
     expect(html).toContain("user-msg-plugin-chip");
   });
 
-  it("splits workflow slash commands so command chips flow inline with body text", () => {
+  it("uses compact attachment labels while preserving full paths in tooltips", () => {
+    const path =
+      "/cluster/facility/yzhang/WorkSpace/code/EukDetect/附件1.xlsx";
+    const html = renderBubble({
+      attachedPaths: [path],
+      content: "这个文件包含哪些内容",
+      displayText: "这个文件包含哪些内容",
+    });
+
+    expect(html).toContain("@附件1.xlsx");
+    expect(html).toContain(path);
+  });
+
+  it("renders workflow slash commands as metadata above body text", () => {
     const command = splitUserMessageInlineCommand(
       "/plan 提取文件中与 QS 核心相关的分组、基因",
     );
@@ -80,9 +93,13 @@ describe("UserMessageBubble", () => {
 
     expect(html).toContain("/plan");
     expect(html).toContain("提取文件中与 QS 核心相关的分组、基因");
-    expect(html).toContain("user-msg-inline-flow");
+    expect(html).toContain("user-msg-meta-row");
     expect(html).toContain("user-msg-inline-chip");
     expect(html).toContain("user-msg-command-chip");
+    expect(html).toContain("user-msg-body-text");
+    expect(html.indexOf("user-msg-meta-row")).toBeLessThan(
+      html.indexOf("user-msg-body-text"),
+    );
   });
 
   it("renders /goal as a workflow command chip", () => {
@@ -92,6 +109,13 @@ describe("UserMessageBubble", () => {
 
     expect(command?.command.label).toBe("/goal");
     expect(command?.body).toBe("解析 QS 核心基因并形成机制假设");
+
+    const html = renderBubble({
+      displayText: "/goal 解析 QS 核心基因并形成机制假设",
+      canRetry: false,
+    });
+    expect(html).toContain("/goal");
+    expect(html).not.toContain("aria-label=\"重试\"");
   });
 
   it("server-renders edit controls while editing", () => {

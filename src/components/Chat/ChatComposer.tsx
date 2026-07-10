@@ -23,22 +23,15 @@ import {
   Stack,
   Tooltip,
   Button,
-  Alert,
   Menu,
   MenuItem,
   ListItemIcon,
   ListItemText,
   Divider,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
   Typography,
   Collapse,
   Select,
   FormControl,
-  FormControlLabel,
-  Checkbox,
   Paper,
   Chip,
   Popover,
@@ -84,10 +77,7 @@ import {
   Terminal,
   Server,
   Container,
-  Cloud,
-  Gauge,
   Atom,
-  Settings,
 } from "lucide-react";
 import {
   useUiStore,
@@ -95,7 +85,6 @@ import {
   usePermissionStore,
   usePluginStore,
   type PermissionMode,
-  type BrowserUseMode,
   type SandboxBackend,
   type ExecutionEnvironment,
   type LocalVenvType,
@@ -117,13 +106,8 @@ import {
   RSYNC_INSTALL_HELP_URL,
   RSYNC_SSH_WARN_STORAGE_KEY,
 } from "../../lib/rsyncSsh";
-import {
-  browserOperatorErrorMessage,
-  isBrowserOperatorBackendReady,
-  type BrowserOperatorBackendStatus,
-  type BrowserOperatorInstallIntent,
-  type BrowserOperatorInstallResult,
-} from "../../lib/browserOperator";
+import { extractErrorMessage } from "../../utils/errorMessage";
+import { getCurrentWindowIfTauri } from "../../utils/tauriRuntime";
 import {
   getLocalStorageItem,
   setLocalStorageItem,
@@ -131,6 +115,7 @@ import {
 import {
   buildComposerMentionChildPath,
   filterComposerMentionRows,
+  formatComposerPathChipLabel,
   joinWorkspaceMentionDirectory,
   normalizeComposerMentionPath,
   parentComposerMentionDirectory,
@@ -146,22 +131,16 @@ import {
 
 const SANDBOX_BACKENDS: { id: SandboxBackend; label: string }[] = [
   { id: "docker", label: "Docker" },
-  { id: "modal", label: "Modal" },
-  { id: "daytona", label: "Daytona" },
   { id: "singularity", label: "Singularity" },
 ];
 
 /** 与各沙箱后端对应的图标（与二级菜单一致） */
 const SANDBOX_BACKEND_ICON: Record<SandboxBackend, LucideIcon> = {
   docker: Container,
-  modal: Cloud,
-  daytona: Gauge,
   singularity: Atom,
 };
 
 const SANDBOX_LABEL: Record<SandboxBackend, string> = {
-  modal: "Modal",
-  daytona: "Daytona",
   docker: "Docker",
   singularity: "Singularity",
 };
@@ -169,16 +148,57 @@ const SANDBOX_LABEL: Record<SandboxBackend, string> = {
 /** 与 SessionList「Language」二级菜单一致：离开一级行后再关闭子菜单的延迟（ms） */
 const ENV_SUBMENU_PARENT_LEAVE_MS = 200;
 export const COMPOSER_PROMPT_OVERLAY_POSITION = "absolute";
-export const COMPOSER_PROMPT_OVERLAY_BOTTOM = "100%";
-export const COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT = "min(42vh, 420px)";
-export const COMPOSER_PROMPT_OVERLAY_Z_INDEX = 18;
-export const COMPOSER_INPUT_JOINED_Z_INDEX =
-  COMPOSER_PROMPT_OVERLAY_Z_INDEX;
-export const COMPOSER_PROMPT_JOINED_BORDER_RADIUS = "24px 24px 0 0";
-export const COMPOSER_INPUT_JOINED_BORDER_RADIUS = "0 0 24px 24px";
+export const COMPOSER_PROMPT_OVERLAY_BOTTOM = "calc(100% + 8px)";
+export const COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT = "min(48vh, 360px)";
+export const COMPOSER_PROMPT_OVERLAY_WIDTH = "100%";
+export const COMPOSER_PROMPT_OVERLAY_Z_INDEX = 24;
+export const COMPOSER_INPUT_JOINED_Z_INDEX = 1;
+export const COMPOSER_PROMPT_JOINED_BORDER_RADIUS = "12px";
+export const COMPOSER_INPUT_JOINED_BORDER_RADIUS = "24px";
+export const COMPOSER_PERMISSION_MODE_MENU_WIDTH = 180;
 export const COMPOSER_CONTEXT_TRAY_PLACEMENT = "above-input";
 export const COMPOSER_CONTEXT_TRAY_MAX_HEIGHT = "min(28vh, 152px)";
 export const COMPOSER_CONTEXT_ITEM_MAX_WIDTH = "calc((100% - 16px) / 3)";
+export const COMPOSER_FILE_CONTEXT_CHIP_MAX_WIDTH = "min(46vw, 240px)";
+export const COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+export const COMPOSER_SSH_DROP_UPLOAD_MAX_FILES = 20;
+export const COMPOSER_DROP_UPLOAD_SNACKBAR_AUTO_HIDE_MS = 6000;
+export const COMPOSER_DROP_UPLOAD_SNACKBAR_ERROR_AUTO_HIDE_MS = 10000;
+
+export function sanitizeComposerDroppedFileName(name: string): string {
+  const base = (name || "")
+    .split(/[/\\]/u)
+    .pop()
+    ?.trim()
+    .replace(/[\x00-\x1F\x7F]/gu, "_")
+    .replace(/[/:\\]/gu, "_")
+    .replace(/\s+/gu, " ");
+  if (!base || /^\.+$/u.test(base)) return "upload.bin";
+  return base;
+}
+
+export function buildComposerWorkspaceUploadPath(
+  workspacePath: string,
+  fileName: string,
+): string {
+  const safeName = sanitizeComposerDroppedFileName(fileName);
+  const normalizedRoot = workspacePath.trim().replace(/\\/g, "/");
+  if (!normalizedRoot || normalizedRoot === ".") return safeName;
+  if (normalizedRoot === "/") return `/${safeName}`;
+  if (normalizedRoot === "~") return `~/${safeName}`;
+  return `${normalizedRoot.replace(/\/+$/u, "")}/${safeName}`;
+}
+
+export function composerPointInRect(
+  point: { x: number; y: number },
+  rect: Pick<DOMRect, "left" | "right" | "top" | "bottom">,
+  scale = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
+): boolean {
+  const logical = { x: point.x / scale, y: point.y / scale };
+  const within = (p: { x: number; y: number }) =>
+    p.x >= rect.left && p.x <= rect.right && p.y >= rect.top && p.y <= rect.bottom;
+  return within(logical) || within(point);
+}
 
 /** React StrictMode 下 effect 会双跑，避免同页两次 `invoke` + 弹窗 */
 let rsyncAvailabilityCheckStarted = false;
@@ -196,6 +216,25 @@ interface SshServerConfig {
 }
 
 type SshServersMap = Record<string, SshServerConfig>;
+type ComposerDropUploadStatus = {
+  severity: "info" | "success" | "error";
+  message: string;
+};
+
+interface FileWriteResponse {
+  bytes_written: number;
+  new_hash: string;
+}
+
+interface ComposerUploadItem {
+  name: string;
+  size: number;
+  getBase64: () => Promise<string>;
+}
+
+type DataTransferFileWithPath = File & {
+  path?: string;
+};
 
 function sshResolvedHost(cfg: SshServerConfig): string | undefined {
   return cfg.HostName ?? cfg.host_name ?? cfg.host ?? undefined;
@@ -275,24 +314,6 @@ const PERMISSION_META: Record<PermissionMode, { label: string; hint: string }> =
     },
   };
 
-const BROWSER_USE_META: Record<
-  BrowserUseMode,
-  { label: string; hint: string }
-> = {
-  off: {
-    label: "浏览器：关闭",
-    hint: "关闭 Browser Operator。",
-  },
-  task: {
-    label: "浏览器：本次",
-    hint: "仅下一条消息启用 Browser Operator，发送后自动关闭。",
-  },
-  session: {
-    label: "浏览器：会话",
-    hint: "当前会话持续启用 Browser Operator；取消后继续仍保留。",
-  },
-};
-
 /** 解析 hex 相对亮度（0–1），非 hex 时返回 0.5 避免误判 */
 function hexRelativeLuminance(color: string): number {
   if (typeof color !== "string" || !color.startsWith("#")) return 0.5;
@@ -340,17 +361,74 @@ function permissionModeAccent(theme: Theme, mode: PermissionMode): string {
   }
 }
 
-function browserUseModeAccent(theme: Theme, mode: BrowserUseMode): string {
-  const p = theme.palette;
-  switch (mode) {
-    case "task":
-      return askPermissionAccent(theme);
-    case "session":
-      return p.success.main;
-    case "off":
-    default:
-      return p.text.secondary;
+function dataTransferHasFiles(dataTransfer: DataTransfer): boolean {
+  return (
+    Array.from(dataTransfer.types ?? []).includes("Files") ||
+    dataTransfer.files.length > 0
+  );
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
+  return btoa(binary);
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return bytesToBase64(bytes);
+}
+
+function basenameFromDroppedPath(path: string): string {
+  return path.split(/[/\\]/u).pop() || path;
+}
+
+function normalizeDroppedFilesystemPath(path: string): string {
+  const normalized = path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/");
+  if (normalized === "/" || /^[a-z]:\/$/iu.test(normalized)) {
+    return normalized;
+  }
+  return normalized.replace(/\/+$/u, "");
+}
+
+function pathStartsWithRoot(path: string, root: string): boolean {
+  if (!root) return false;
+  if (path === root) return true;
+  const rootPrefix = root === "/" ? "/" : `${root}/`;
+  if (path.startsWith(rootPrefix)) return true;
+
+  // Windows drive letters are case-insensitive; keep POSIX paths case-sensitive.
+  if (/^[a-z]:\//iu.test(root)) {
+    return path.toLowerCase().startsWith(rootPrefix.toLowerCase());
+  }
+  return false;
+}
+
+export function normalizeComposerDroppedLocalPath(
+  workspacePath: string,
+  droppedPath: string,
+): string {
+  const dropped = normalizeDroppedFilesystemPath(droppedPath);
+  if (!dropped) return "";
+
+  const root = normalizeDroppedFilesystemPath(workspacePath);
+  if (!root || root === ".") return dropped;
+  if (!pathStartsWithRoot(dropped, root)) return dropped;
+  if (dropped === root) return ".";
+
+  const rootPrefix = root === "/" ? "/" : `${root}/`;
+  return dropped.slice(rootPrefix.length).replace(/^\/+/u, "") || ".";
+}
+
+function droppedFileSystemPath(file: File): string {
+  const withPath = file as DataTransferFileWithPath;
+  return withPath.path || file.webkitRelativePath || "";
 }
 
 type AvailableAgentRow = { agentType: string; description: string; background: boolean };
@@ -779,6 +857,11 @@ export const ChatComposer = memo(function ChatComposer({
   const def = theme.palette.background.default;
   const ink = theme.palette.text.primary;
   const mut = theme.palette.text.secondary;
+  const chromeText = theme.palette.text.secondary;
+  const chromeTextStrong =
+    theme.palette.mode === "dark"
+      ? theme.palette.text.primary
+      : theme.palette.text.secondary;
   const warningMain = theme.palette.warning.main;
   const errorMain = theme.palette.error.main;
   const errorDark = theme.palette.error.dark;
@@ -802,22 +885,31 @@ export const ChatComposer = memo(function ChatComposer({
   /** Hairline border / shadow tint — theme-aware */
   const edge = (a: number) =>
     alpha(isDark ? theme.palette.common.white : theme.palette.common.black, a);
-  const semanticChipSurface = (tone: string) => ({
-    bgcolor: alpha(tone, isDark ? 0.2 : 0.11),
-    borderColor: alpha(tone, isDark ? 0.62 : 0.45),
-    color: tone,
-    boxShadow: `0 1px 2px ${alpha(tone, isDark ? 0.2 : 0.14)}`,
-    "& .MuiChip-label": {
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      color: tone,
-    },
-    "& .MuiChip-icon": {
-      color: tone,
-      marginTop: 0,
-      marginBottom: 0,
-    },
-  } as const);
+  const semanticChipSurface = (tone: string) => {
+    const readableTone = isDark ? lighten(tone, 0.28) : tone;
+    return {
+      color: chromeTextStrong,
+      bgcolor: alpha(tone, isDark ? 0.2 : 0.11),
+      borderColor: alpha(tone, isDark ? 0.62 : 0.45),
+      boxShadow: `0 1px 2px ${alpha(tone, isDark ? 0.2 : 0.14)}`,
+      "& .MuiChip-label": {
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        color: chromeTextStrong,
+      },
+      "& .MuiChip-icon": {
+        color: readableTone,
+        marginTop: 0,
+        marginBottom: 0,
+      },
+      "& .MuiChip-deleteIcon": {
+        color: chromeText,
+        "&:hover": {
+          color: readableTone,
+        },
+      },
+    } as const;
+  };
   const composerContextChipSx = (tone: string, fontWeight = 700) => ({
     ...semanticChipSurface(tone),
     flexShrink: 1,
@@ -827,6 +919,34 @@ export const ChatComposer = memo(function ChatComposer({
     maxWidth: COMPOSER_CONTEXT_ITEM_MAX_WIDTH,
     fontWeight,
   } as const);
+  const composerFileContextChipSx = [
+    composerContextChipSx(fileTone, 500),
+    {
+      maxWidth: COMPOSER_FILE_CONTEXT_CHIP_MAX_WIDTH,
+      bgcolor: alpha(fileTone, isDark ? 0.14 : 0.075),
+      borderColor: alpha(fileTone, isDark ? 0.38 : 0.22),
+      boxShadow: "none",
+      color: chromeTextStrong,
+      "& .MuiChip-icon": {
+        color: isDark ? theme.palette.info.light : theme.palette.info.main,
+      },
+      "& .MuiChip-label": {
+        minWidth: 0,
+        maxWidth: "100%",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        color: chromeTextStrong,
+        fontSize: 12.5,
+        fontWeight: 500,
+      },
+      "& .MuiChip-deleteIcon": {
+        color: chromeText,
+        "&:hover": {
+          color: theme.palette.info.main,
+        },
+      },
+    },
+  ] as const;
   /** Input card — closer to solid paper so the typing area reads lighter */
   const composerBg = alpha(paper, isDark ? 0.97 : 0.99);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
@@ -838,8 +958,6 @@ export const ChatComposer = memo(function ChatComposer({
   const {
     permissionMode,
     setPermissionMode,
-    browserUseMode,
-    setBrowserUseMode,
     composerAgentType,
     setComposerAgentType,
     composerAttachedPaths,
@@ -850,8 +968,6 @@ export const ChatComposer = memo(function ChatComposer({
     addComposerSelectedPluginId,
     removeComposerSelectedPluginId,
     popComposerSelectedPluginId,
-    useWorktree,
-    setUseWorktree,
     environment,
     setEnvironment,
     sshServer,
@@ -885,25 +1001,11 @@ export const ChatComposer = memo(function ChatComposer({
   );
 
   const permissionAccent = permissionModeAccent(theme, permissionMode);
-  const browserUseAccent = browserUseModeAccent(theme, browserUseMode);
 
   const [plusAnchor, setPlusAnchor] = useState<null | HTMLElement>(null);
   const [permissionAnchor, setPermissionAnchor] = useState<null | HTMLElement>(
     null,
   );
-  const [browserUseAnchor, setBrowserUseAnchor] =
-    useState<null | HTMLElement>(null);
-  const [pendingBrowserUseMode, setPendingBrowserUseMode] =
-    useState<BrowserUseMode | null>(null);
-  const [browserInstallDialogOpen, setBrowserInstallDialogOpen] =
-    useState(false);
-  const [browserBackendStatus, setBrowserBackendStatus] =
-    useState<BrowserOperatorBackendStatus | null>(null);
-  const [browserInstallError, setBrowserInstallError] = useState<string | null>(
-    null,
-  );
-  const [browserInstallIntent, setBrowserInstallIntent] =
-    useState<BrowserOperatorInstallIntent | null>(null);
   const [envAnchor, setEnvAnchor] = useState<null | HTMLElement>(null);
   const [sandboxMenuAnchor, setSandboxMenuAnchor] =
     useState<null | HTMLElement>(null);
@@ -917,111 +1019,38 @@ export const ChatComposer = memo(function ChatComposer({
     { kind: string; label: string; name: string }[]
   >([]);
   const [localVenvsLoading, setLocalVenvsLoading] = useState(false);
+  const [dropUploadActive, setDropUploadActive] = useState(false);
+  const [dropUploadBusy, setDropUploadBusy] = useState(false);
+  const [dropUploadStatus, setDropUploadStatus] =
+    useState<ComposerDropUploadStatus | null>(null);
+  const dropUploadDepthRef = useRef(0);
 
-  const closeBrowserInstallDialog = useCallback(() => {
-    if (browserInstallIntent) return;
-    setBrowserInstallDialogOpen(false);
-    setPendingBrowserUseMode(null);
-    setBrowserInstallError(null);
-  }, [browserInstallIntent]);
+  const handlePermissionModeSelect = useCallback(
+    async (mode: PermissionMode) => {
+      setPermissionMode(mode);
+      setPermissionAnchor(null);
 
-  const handleBrowserUseModeSelect = useCallback(
-    async (mode: BrowserUseMode) => {
-      setBrowserUseAnchor(null);
-      setBrowserInstallError(null);
+      if (mode !== "auto") return;
 
-      if (mode === "off") {
-        setBrowserUseMode("off");
-        setPendingBrowserUseMode(null);
-        setBrowserInstallDialogOpen(false);
-        return;
-      }
+      const { pendingRequest, approveRequest, clearError } =
+        usePermissionStore.getState();
+      if (!pendingRequest) return;
 
-      setPendingBrowserUseMode(mode);
+      const autoEligible =
+        pendingRequest.risk_level === "safe" ||
+        pendingRequest.risk_level === "low" ||
+        pendingRequest.risk_level === "medium";
+      if (!autoEligible) return;
+
+      clearError();
       try {
-        const status = await invoke<BrowserOperatorBackendStatus>(
-          "browser_operator_backend_status",
-        );
-        setBrowserBackendStatus(status);
-
-        if (status.sidecarExists === false) {
-          setBrowserInstallError(
-            "未找到内置 Browser Operator sidecar，当前应用包无法启用浏览器控制。",
-          );
-          setBrowserInstallDialogOpen(true);
-          return;
-        }
-
-        if (isBrowserOperatorBackendReady(status)) {
-          setBrowserUseMode(mode);
-          setPendingBrowserUseMode(null);
-          return;
-        }
-
-        if (status.installerExists === false) {
-          setBrowserInstallError(
-            "未找到 Browser Operator 安装脚本，请检查当前应用包是否完整。",
-          );
-        }
-        setBrowserInstallDialogOpen(true);
-      } catch (error) {
-        setBrowserBackendStatus(null);
-        setBrowserInstallError(browserOperatorErrorMessage(error));
-        setBrowserInstallDialogOpen(true);
+        await approveRequest("Auto");
+      } catch {
+        // PermissionPromptBar will render the store error if the approval fails.
       }
     },
-    [setBrowserUseMode],
+    [setPermissionMode],
   );
-
-  const handleBrowserBackendInstall = useCallback(
-    async (intent: BrowserOperatorInstallIntent) => {
-      if (!pendingBrowserUseMode) return;
-      setBrowserInstallIntent(intent);
-      setBrowserInstallError(null);
-
-      try {
-        const result = await invoke<BrowserOperatorInstallResult>(
-          "browser_operator_install_backend",
-          {
-            confirmInstallIntent: true,
-            skipBrowserInstall: intent === "packages-only",
-            projectRoot: workspacePath.trim() ? workspacePath : undefined,
-            sessionId: sessionId ?? undefined,
-          },
-        );
-        if (result?.ok === false) {
-          throw new Error(result.error || "Browser Operator 后端安装失败。");
-        }
-
-        const status = await invoke<BrowserOperatorBackendStatus>(
-          "browser_operator_backend_status",
-        );
-        setBrowserBackendStatus(status);
-
-        if (status.sidecarExists === false) {
-          throw new Error(
-            "后端依赖已安装，但内置 Browser Operator sidecar 缺失，无法启用。",
-          );
-        }
-        if (!isBrowserOperatorBackendReady(status)) {
-          throw new Error("安装完成后仍未检测到 Browser Operator Python 后端。");
-        }
-
-        setBrowserUseMode(pendingBrowserUseMode);
-        setPendingBrowserUseMode(null);
-        setBrowserInstallDialogOpen(false);
-      } catch (error) {
-        setBrowserInstallError(browserOperatorErrorMessage(error));
-      } finally {
-        setBrowserInstallIntent(null);
-      }
-    },
-    [pendingBrowserUseMode, setBrowserUseMode],
-  );
-  const browserInstallBusy = browserInstallIntent !== null;
-  const browserInstallBlocked =
-    browserBackendStatus?.sidecarExists === false ||
-    browserBackendStatus?.installerExists === false;
 
   // 沙箱 / SSH 二级菜单：与 SessionList「Language」相同（定时器 + 嵌套 Menu + pointerEvents），避免 Popover 与一级 Menu 模态层事件死循环
   const sandboxSubmenuLeaveTimerRef = useRef<ReturnType<
@@ -1143,9 +1172,9 @@ export const ChatComposer = memo(function ChatComposer({
       });
   }, []);
 
-  /** Settings → Execution（侧栏 index 9），内层 Tab：0 Modal / 1 Daytona / 2 SSH */
+  /** Settings → Execution（侧栏 index 9），当前仅暴露 SSH 配置子页。 */
   const openExecutionSettings = useCallback(
-    (executionSubTab: 0 | 1 | 2) => {
+    (executionSubTab: 0) => {
       setSettingsTabIndex(9);
       setSettingsExecutionSubTab(executionSubTab);
       setSettingsOpen(true);
@@ -2077,6 +2106,387 @@ export const ChatComposer = memo(function ChatComposer({
   const inputDisabled =
     (!allowInputWhileStreaming && (isConnecting || isStreaming)) ||
     askUserBlocksInput;
+  const canDropUploadToSsh =
+    !inputDisabled &&
+    !needsWorkspacePath &&
+    environment === "ssh" &&
+    Boolean(sshServer?.trim()) &&
+    Boolean(workspacePath.trim()) &&
+    workspacePath.trim() !== ".";
+  const canDropReferenceLocalPaths =
+    !inputDisabled &&
+    !needsWorkspacePath &&
+    environment === "local" &&
+    Boolean(workspacePath.trim()) &&
+    workspacePath.trim() !== ".";
+  const canHandleComposerDrop =
+    canDropUploadToSsh || canDropReferenceLocalPaths;
+
+  const handleComposerFileDragEnter = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!dataTransferHasFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dropUploadDepthRef.current += 1;
+      setDropUploadActive(true);
+      setDropUploadStatus(null);
+    },
+    [],
+  );
+
+  const handleComposerFileDragOver = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!dataTransferHasFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = canHandleComposerDrop ? "copy" : "none";
+      setDropUploadActive(true);
+    },
+    [canHandleComposerDrop],
+  );
+
+  const attachDroppedLocalPaths = useCallback(
+    (paths: string[]) => {
+      const normalizedPaths = paths
+        .map((path) => normalizeComposerDroppedLocalPath(workspacePath, path))
+        .filter(Boolean);
+
+      if (normalizedPaths.length === 0) return;
+
+      if (inputDisabled) {
+        setDropUploadStatus({
+          severity: "error",
+          message: "当前输入区不可引用文件。",
+        });
+        return;
+      }
+      if (environment !== "local") {
+        setDropUploadStatus({
+          severity: "error",
+          message: "拖拽引用当前仅用于本地工作区，请切换到本地执行环境。",
+        });
+        return;
+      }
+      if (
+        needsWorkspacePath ||
+        !workspacePath.trim() ||
+        workspacePath.trim() === "."
+      ) {
+        setDropUploadStatus({
+          severity: "error",
+          message: "请先选择本地工作目录后再拖拽引用文件。",
+        });
+        return;
+      }
+      if (normalizedPaths.length > COMPOSER_SSH_DROP_UPLOAD_MAX_FILES) {
+        setDropUploadStatus({
+          severity: "error",
+          message: `一次最多引用 ${COMPOSER_SSH_DROP_UPLOAD_MAX_FILES} 个文件或目录。`,
+        });
+        return;
+      }
+
+      normalizedPaths.forEach(addComposerAttachedPath);
+      setDropUploadStatus({
+        severity: "success",
+        message:
+          normalizedPaths.length === 1
+            ? `已添加 @${formatComposerPathChipLabel(
+                normalizedPaths[0],
+              )} 文件引用。`
+            : `已添加 ${normalizedPaths.length} 个 @ 文件引用。`,
+      });
+      queueMicrotask(() => focusEditableEnd());
+    },
+    [
+      addComposerAttachedPath,
+      environment,
+      focusEditableEnd,
+      inputDisabled,
+      needsWorkspacePath,
+      workspacePath,
+    ],
+  );
+
+  const handleComposerFileDragLeave = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!dataTransferHasFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dropUploadDepthRef.current = Math.max(0, dropUploadDepthRef.current - 1);
+      if (dropUploadDepthRef.current === 0) {
+        setDropUploadActive(false);
+      }
+    },
+    [],
+  );
+
+  const uploadComposerItemsToSsh = useCallback(
+    async (items: ComposerUploadItem[]) => {
+      if (items.length === 0) return;
+
+      if (inputDisabled) {
+        setDropUploadStatus({
+          severity: "error",
+          message: "当前输入区不可上传文件。",
+        });
+        return;
+      }
+      if (environment !== "ssh") {
+        setDropUploadStatus({
+          severity: "error",
+          message: "拖拽上传当前用于 SSH 工作目录，请先切换到 SSH 执行环境。",
+        });
+        return;
+      }
+      const profile = sshServer?.trim();
+      if (!profile) {
+        setDropUploadStatus({
+          severity: "error",
+          message: "请先选择 SSH 服务器后再拖拽上传。",
+        });
+        return;
+      }
+      if (needsWorkspacePath || !workspacePath.trim() || workspacePath.trim() === ".") {
+        setDropUploadStatus({
+          severity: "error",
+          message: "请先选择 SSH 工作目录后再拖拽上传。",
+        });
+        return;
+      }
+      if (items.length > COMPOSER_SSH_DROP_UPLOAD_MAX_FILES) {
+        setDropUploadStatus({
+          severity: "error",
+          message: `一次最多上传 ${COMPOSER_SSH_DROP_UPLOAD_MAX_FILES} 个文件。`,
+        });
+        return;
+      }
+
+      setDropUploadBusy(true);
+      setDropUploadStatus({
+        severity: "info",
+        message: `正在上传 ${items.length} 个文件到 SSH 工作目录…`,
+      });
+      try {
+        const uploadedNames: string[] = [];
+        for (const item of items) {
+          if (item.size > COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES) {
+            throw new Error(
+              `${item.name} 超过 ${Math.floor(
+                COMPOSER_SSH_DROP_UPLOAD_MAX_BYTES / 1024 / 1024,
+              )} MB，已取消上传。`,
+            );
+          }
+          const safeName = sanitizeComposerDroppedFileName(item.name);
+          const targetPath = buildComposerWorkspaceUploadPath(
+            workspacePath,
+            safeName,
+          );
+          const dataBase64 = await item.getBase64();
+          await invoke<FileWriteResponse>("ssh_write_file_bytes", {
+            sshProfileName: profile,
+            path: targetPath,
+            dataBase64,
+          });
+          uploadedNames.push(safeName);
+          addComposerAttachedPath(targetPath);
+        }
+        setDropUploadStatus({
+          severity: "success",
+          message:
+            uploadedNames.length === 1
+              ? `已上传 ${uploadedNames[0]} 到 SSH 工作目录。`
+              : `已上传 ${uploadedNames.length} 个文件到 SSH 工作目录。`,
+        });
+        queueMicrotask(() => focusEditableEnd());
+      } catch (error) {
+        setDropUploadStatus({
+          severity: "error",
+          message: extractErrorMessage(error),
+        });
+      } finally {
+        setDropUploadBusy(false);
+      }
+    },
+    [
+      addComposerAttachedPath,
+      environment,
+      focusEditableEnd,
+      inputDisabled,
+      needsWorkspacePath,
+      sshServer,
+      workspacePath,
+    ],
+  );
+
+  const handleComposerFileDrop = useCallback(
+    async (event: React.DragEvent<HTMLElement>) => {
+      if (!dataTransferHasFiles(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dropUploadDepthRef.current = 0;
+      setDropUploadActive(false);
+
+      const files = Array.from(event.dataTransfer.files ?? []);
+      if (environment === "local") {
+        const paths = files.map(droppedFileSystemPath).filter(Boolean);
+        if (paths.length > 0) {
+          attachDroppedLocalPaths(paths);
+        }
+        return;
+      }
+
+      await uploadComposerItemsToSsh(
+        files.map((file) => ({
+          name: file.name,
+          size: file.size,
+          getBase64: () => fileToBase64(file),
+        })),
+      );
+    },
+    [attachDroppedLocalPaths, environment, uploadComposerItemsToSsh],
+  );
+
+  const nativeDragPositionInsideComposer = useCallback(
+    (position: { x: number; y: number }): boolean => {
+      const el = composerInputAnchorRef.current;
+      if (!el) return false;
+      return composerPointInRect(position, el.getBoundingClientRect());
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void getCurrentWindowIfTauri().then(async (windowHandle) => {
+      if (disposed || !windowHandle) return;
+      unlisten = await windowHandle.onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          const inside = nativeDragPositionInsideComposer(payload.position);
+          setDropUploadActive(inside);
+          if (inside) {
+            setDropUploadStatus(null);
+          }
+          return;
+        }
+
+        if (payload.type === "leave") {
+          dropUploadDepthRef.current = 0;
+          setDropUploadActive(false);
+          return;
+        }
+
+        if (payload.type === "drop") {
+          dropUploadDepthRef.current = 0;
+          setDropUploadActive(false);
+          if (
+            !nativeDragPositionInsideComposer(payload.position) ||
+            payload.paths.length === 0
+          ) {
+            return;
+          }
+
+          if (environment === "local") {
+            attachDroppedLocalPaths(payload.paths);
+            return;
+          }
+
+          void uploadComposerItemsToSsh(
+            payload.paths.map((path) => ({
+              name: basenameFromDroppedPath(path),
+              size: 0,
+              getBase64: async () => {
+                const bytes = await invoke<number[]>("read_dropped_file_bytes", {
+                  path,
+                });
+                return bytesToBase64(new Uint8Array(bytes));
+              },
+            })),
+          );
+        }
+      });
+      if (disposed && unlisten) {
+        unlisten();
+        unlisten = null;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+        unlisten = null;
+      }
+    };
+  }, [
+    attachDroppedLocalPaths,
+    environment,
+    nativeDragPositionInsideComposer,
+    uploadComposerItemsToSsh,
+  ]);
+
+  const dropUploadBannerVisible =
+    dropUploadActive || dropUploadBusy || Boolean(dropUploadStatus);
+  const dropUploadBannerSeverity: ComposerDropUploadStatus["severity"] =
+    dropUploadActive && !canHandleComposerDrop
+      ? "error"
+      : dropUploadStatus?.severity ?? "info";
+  const dropUploadBannerMessage = dropUploadActive
+    ? canDropReferenceLocalPaths
+      ? "松开后作为 @ 文件路径引用。"
+      : canDropUploadToSsh
+        ? "松开后上传到 SSH 工作目录。"
+        : environment === "local"
+          ? "请先选择本地工作目录后再拖拽引用文件。"
+          : environment === "ssh"
+            ? "请选择 SSH 服务器和工作目录后再上传。"
+            : "拖拽本地文件当前支持本地 @ 引用或 SSH 上传。"
+    : dropUploadStatus?.message ??
+      (dropUploadBusy ? "正在上传文件到 SSH 工作目录…" : "");
+  const dropUploadPalette =
+    dropUploadBannerSeverity === "success"
+      ? theme.palette.success
+      : dropUploadBannerSeverity === "error"
+        ? theme.palette.error
+        : theme.palette.info;
+  const dropUploadTone = dropUploadPalette.main;
+  const dropUploadIconColor = isDark
+    ? dropUploadPalette.light
+    : dropUploadPalette.main;
+  const dropUploadTextColor = theme.palette.text.secondary;
+  const dropUploadCloseColor = theme.palette.text.secondary;
+  const dropUploadSurface = alpha(
+    dropUploadPalette.main,
+    isDark ? 0.16 : 0.075,
+  );
+  const dropUploadBorder = alpha(
+    dropUploadPalette.main,
+    isDark ? 0.38 : 0.22,
+  );
+  const dropUploadSnackbarClosable =
+    Boolean(dropUploadStatus) && !dropUploadBusy;
+
+  const dismissDropUploadStatus = useCallback(() => {
+    setDropUploadStatus(null);
+  }, []);
+
+  useEffect(() => {
+    if (!dropUploadStatus || dropUploadBusy || dropUploadActive) return;
+    const delay =
+      dropUploadStatus.severity === "error"
+        ? COMPOSER_DROP_UPLOAD_SNACKBAR_ERROR_AUTO_HIDE_MS
+        : COMPOSER_DROP_UPLOAD_SNACKBAR_AUTO_HIDE_MS;
+    const statusAtSchedule = dropUploadStatus;
+    const timer = window.setTimeout(() => {
+      setDropUploadStatus((current) =>
+        current === statusAtSchedule ? null : current,
+      );
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [dropUploadActive, dropUploadBusy, dropUploadStatus]);
 
   const showSlashPopover =
     (slashParse.active || skillParse.active) &&
@@ -2348,7 +2758,7 @@ export const ChatComposer = memo(function ChatComposer({
                       sx={{
                         flexShrink: 0,
                         borderRadius: 2,
-                        bgcolor: alpha(ink, isDark ? 0.08 : 0.04),
+                        bgcolor: theme.palette.action.hover,
                         border: `1px solid ${pen.borderSubtle}`,
                         p: 0.25,
                       }}
@@ -2521,7 +2931,8 @@ export const ChatComposer = memo(function ChatComposer({
             sx={{
               position: COMPOSER_PROMPT_OVERLAY_POSITION,
               left: 0,
-              right: 0,
+              width: COMPOSER_PROMPT_OVERLAY_WIDTH,
+              maxWidth: "100%",
               bottom: COMPOSER_PROMPT_OVERLAY_BOTTOM,
               zIndex: COMPOSER_PROMPT_OVERLAY_Z_INDEX,
               borderRadius: COMPOSER_PROMPT_JOINED_BORDER_RADIUS,
@@ -2530,7 +2941,6 @@ export const ChatComposer = memo(function ChatComposer({
               backdropFilter: "blur(14px)",
               WebkitBackdropFilter: "blur(14px)",
               border: `1px solid ${alpha(accent, isDark ? 0.26 : 0.18)}`,
-              borderBottom: 0,
               boxShadow: `
                 0 -8px 28px ${alpha(theme.palette.common.black, isDark ? 0.3 : 0.12)},
                 0 0 0 1px ${alpha(accent, isDark ? 0.1 : 0.06)}
@@ -2558,8 +2968,93 @@ export const ChatComposer = memo(function ChatComposer({
             </Box>
           </Paper>
         ) : null}
+        <Collapse in={dropUploadBannerVisible} unmountOnExit>
+          <Box
+            role={dropUploadBannerSeverity === "error" ? "alert" : "status"}
+            aria-live={
+              dropUploadBannerSeverity === "error" ? "assertive" : "polite"
+            }
+            sx={{
+              mb: 1,
+              px: 1,
+              py: 0.65,
+              borderRadius: 2,
+              display: "flex",
+              alignItems: "center",
+              gap: 0.75,
+              color: dropUploadTextColor,
+              bgcolor: alpha(theme.palette.background.paper, isDark ? 0.96 : 0.98),
+              border: `1px solid ${dropUploadBorder}`,
+              boxShadow: `0 8px 22px ${alpha(
+                dropUploadTone,
+                isDark ? 0.18 : 0.1,
+              )}, inset 0 1px 0 ${edge(0.06)}`,
+              backdropFilter: "blur(12px)",
+              WebkitBackdropFilter: "blur(12px)",
+            }}
+          >
+            <Box
+              sx={{
+                width: 24,
+                height: 24,
+                flex: "0 0 auto",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                borderRadius: "50%",
+                color: dropUploadIconColor,
+                bgcolor: dropUploadSurface,
+              }}
+            >
+              <InsertDriveFile sx={{ fontSize: 16 }} />
+            </Box>
+            <Typography
+              variant="caption"
+              sx={{
+                minWidth: 0,
+                flex: 1,
+                fontSize: 12.5,
+                fontWeight: 500,
+                lineHeight: 1.35,
+                color: dropUploadTextColor,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: { xs: "normal", sm: "nowrap" },
+              }}
+            >
+              {dropUploadBannerMessage}
+            </Typography>
+            {dropUploadSnackbarClosable ? (
+              <IconButton
+                aria-label="关闭上传提示"
+                size="small"
+                onClick={dismissDropUploadStatus}
+                sx={{
+                  width: 26,
+                  height: 26,
+                  flex: "0 0 auto",
+                  color: dropUploadCloseColor,
+                  "&:hover": {
+                    color: theme.palette.text.primary,
+                    bgcolor: theme.palette.action.hover,
+                  },
+                  "&:focus-visible": {
+                    outline: `2px solid ${alpha(dropUploadTone, 0.48)}`,
+                    outlineOffset: 2,
+                  },
+                }}
+              >
+                <Close sx={{ fontSize: 16 }} />
+              </IconButton>
+            ) : null}
+          </Box>
+        </Collapse>
         <Paper
           elevation={0}
+          onDragEnter={handleComposerFileDragEnter}
+          onDragOver={handleComposerFileDragOver}
+          onDragLeave={handleComposerFileDragLeave}
+          onDrop={handleComposerFileDrop}
           sx={{
             borderRadius: hasFloatingComposerPrompt
               ? COMPOSER_INPUT_JOINED_BORDER_RADIUS
@@ -2570,10 +3065,18 @@ export const ChatComposer = memo(function ChatComposer({
             bgcolor: composerBg,
             backdropFilter: "blur(12px)",
             WebkitBackdropFilter: "blur(12px)",
-            border: `1px solid ${edge(0.12)}`,
+            border: dropUploadActive
+              ? `1px solid ${alpha(
+                  canHandleComposerDrop ? accent : errorMain,
+                  0.55,
+                )}`
+              : `1px solid ${edge(0.12)}`,
             boxShadow: `
               0 1px 2px ${edge(0.06)},
-              0 8px 24px ${alpha(accent, 0.08)},
+              0 8px 24px ${alpha(
+                dropUploadActive && !canHandleComposerDrop ? errorMain : accent,
+                dropUploadActive ? 0.16 : 0.08,
+              )},
               inset 0 1px 0 ${edge(0.08)}
             `,
             transition:
@@ -2750,9 +3253,9 @@ export const ChatComposer = memo(function ChatComposer({
                       size="small"
                       variant="outlined"
                       icon={<InsertDriveFile sx={{ fontSize: 16 }} />}
-                      label={`@${p}`}
+                      label={`@${formatComposerPathChipLabel(p)}`}
                       onDelete={() => removeComposerAttachedPath(p)}
-                      sx={composerContextChipSx(fileTone, 600)}
+                      sx={composerFileContextChipSx}
                     />
                   </Tooltip>
                 ))}
@@ -3546,9 +4049,26 @@ export const ChatComposer = memo(function ChatComposer({
             anchorEl={permissionAnchor}
             open={Boolean(permissionAnchor)}
             onClose={() => setPermissionAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 260, borderRadius: 2 } } }}
+            anchorOrigin={{
+              vertical: "top",
+              horizontal: "right",
+            }}
+            transformOrigin={{
+              vertical: "bottom",
+              horizontal: "right",
+            }}
+            slotProps={{
+              paper: {
+                sx: {
+                  mt: -1,
+                  width: COMPOSER_PERMISSION_MODE_MENU_WIDTH,
+                  minWidth: 0,
+                  borderRadius: 2,
+                },
+              },
+            }}
           >
-            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
+            <Box sx={{ px: 1.5, py: 0.85, borderBottom: 1, borderColor: "divider" }}>
               <Tooltip
                 title="工具与编辑的确认策略"
                 placement="top"
@@ -3561,7 +4081,7 @@ export const ChatComposer = memo(function ChatComposer({
                     display: "inline-block",
                     cursor: "default",
                     ...composerLabelText,
-                    color: ink,
+                    color: chromeTextStrong,
                   }}
                 >
                   权限模式
@@ -3579,11 +4099,10 @@ export const ChatComposer = memo(function ChatComposer({
                 >
                   <MenuItem
                     selected={permissionMode === key}
-                    onClick={() => {
-                      setPermissionMode(key);
-                      setPermissionAnchor(null);
-                    }}
+                    onClick={() => void handlePermissionModeSelect(key)}
                     sx={{
+                      minHeight: 38,
+                      px: 1.25,
                       "&.Mui-selected": {
                         bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
                         "&:hover": {
@@ -3594,7 +4113,7 @@ export const ChatComposer = memo(function ChatComposer({
                   >
                     <ListItemIcon
                       sx={{
-                        minWidth: 40,
+                        minWidth: 34,
                         lineHeight: 0,
                         color: rowAccent,
                         "& svg": { display: "block" },
@@ -3618,244 +4137,6 @@ export const ChatComposer = memo(function ChatComposer({
             })}
           </Menu>
 
-          <Button
-            size="small"
-            variant="text"
-            color="inherit"
-            onClick={(e) => setBrowserUseAnchor(e.currentTarget)}
-            startIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: browserUseAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <Globe2
-                  size={18}
-                  strokeWidth={2}
-                  color={browserUseAccent}
-                />
-              </Box>
-            }
-            endIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: browserUseAccent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <ChevronDown
-                  size={18}
-                  strokeWidth={2}
-                  color={browserUseAccent}
-                />
-              </Box>
-            }
-            sx={{
-              textTransform: "none",
-              color: browserUseAccent,
-              ...composerLabelText,
-              borderRadius: 2.5,
-              px: 1,
-              minHeight: "var(--composer-toolbar-h)",
-              height: "var(--composer-toolbar-h)",
-              maxWidth: 200,
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              boxShadow: "none",
-              transition:
-                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease",
-              "@media (prefers-reduced-motion: reduce)": {
-                transition: "none",
-              },
-              "&:hover": {
-                bgcolor: alpha(browserUseAccent, 0.12),
-                borderColor: alpha(browserUseAccent, 0.28),
-                boxShadow: "none",
-              },
-            }}
-          >
-            <Typography
-              variant="body2"
-              noWrap
-              component="span"
-              sx={{ ...composerLabelText, color: "inherit" }}
-            >
-              {BROWSER_USE_META[browserUseMode].label}
-            </Typography>
-          </Button>
-          <Menu
-            anchorEl={browserUseAnchor}
-            open={Boolean(browserUseAnchor)}
-            onClose={() => setBrowserUseAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 280, borderRadius: 2 } } }}
-          >
-            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
-              <Tooltip
-                title="显式控制 Browser Operator 的启用范围"
-                placement="top"
-                enterDelay={200}
-              >
-                <Typography
-                  variant="subtitle2"
-                  component="span"
-                  sx={{
-                    display: "inline-block",
-                    cursor: "default",
-                    ...composerLabelText,
-                    color: ink,
-                  }}
-                >
-                  浏览器
-                </Typography>
-              </Tooltip>
-            </Box>
-            {(Object.keys(BROWSER_USE_META) as BrowserUseMode[]).map((key) => {
-              const rowAccent = browserUseModeAccent(theme, key);
-              return (
-                <Tooltip
-                  key={key}
-                  title={BROWSER_USE_META[key].hint}
-                  placement="left"
-                  enterDelay={200}
-                >
-                  <MenuItem
-                    selected={browserUseMode === key}
-                    onClick={() => void handleBrowserUseModeSelect(key)}
-                    sx={{
-                      "&.Mui-selected": {
-                        bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
-                        "&:hover": {
-                          bgcolor: alpha(rowAccent, isDark ? 0.26 : 0.16),
-                        },
-                      },
-                    }}
-                  >
-                    <ListItemIcon
-                      sx={{
-                        minWidth: 40,
-                        lineHeight: 0,
-                        color: rowAccent,
-                        "& svg": { display: "block" },
-                      }}
-                    >
-                      <Globe2
-                        size={20}
-                        strokeWidth={2}
-                        color={rowAccent}
-                      />
-                    </ListItemIcon>
-                    <ListItemText
-                      primary={BROWSER_USE_META[key].label}
-                      secondary={BROWSER_USE_META[key].hint}
-                      primaryTypographyProps={{
-                        sx: { ...composerLabelText, color: rowAccent },
-                      }}
-                      secondaryTypographyProps={{
-                        sx: {
-                          mt: 0.25,
-                          color: alpha(ink, 0.72),
-                          fontSize: 12,
-                          lineHeight: 1.4,
-                        },
-                      }}
-                    />
-                  </MenuItem>
-                </Tooltip>
-              );
-            })}
-          </Menu>
-          <Dialog
-            open={browserInstallDialogOpen}
-            onClose={closeBrowserInstallDialog}
-            maxWidth="sm"
-            fullWidth
-          >
-            <DialogTitle>需要安装 Browser Operator 后端</DialogTitle>
-            <DialogContent>
-              <Stack spacing={2} sx={{ pt: 0.5 }}>
-                <Typography variant="body2" color="text.secondary">
-                  Omiga 已内置 browser_* 工具封装，但不会在你未启用浏览器控制时自动安装
-                  browser-use 或下载 Playwright 浏览器。选择{" "}
-                  {pendingBrowserUseMode
-                    ? BROWSER_USE_META[pendingBrowserUseMode].label
-                    : "浏览器模式"}{" "}
-                  前，需要先完成一次本机 setup，而不是普通启用开关。
-                </Typography>
-                <Alert severity="warning" sx={{ borderRadius: 2 }}>
-                  点击下方按钮即表示你显式确认执行安装：会写入用户目录，且“安装并下载浏览器”可能联网下载
-                  browser-use / Playwright browsers。
-                </Alert>
-                <Alert severity="info" sx={{ borderRadius: 2 }}>
-                  后端会安装到用户目录，不会写入项目依赖。默认位置：
-                  {browserBackendStatus?.managedHome ||
-                    "~/.omiga/browser-operator"}
-                </Alert>
-                <Typography variant="caption" color="text.secondary">
-                  “只安装后端”会跳过 Playwright 浏览器下载，适合已配置
-                  Chrome/CDP 的场景；“安装并下载浏览器”适合首次完整启用。
-                </Typography>
-                {browserBackendStatus?.configuredPython ? (
-                  <Typography variant="caption" color="text.secondary">
-                    已配置外部 Python：{browserBackendStatus.configuredPython}
-                  </Typography>
-                ) : null}
-                {browserBackendStatus?.playwrightBrowsersPath ? (
-                  <Typography variant="caption" color="text.secondary">
-                    Playwright 浏览器缓存：
-                    {browserBackendStatus.playwrightBrowsersPath}
-                  </Typography>
-                ) : null}
-                {browserInstallError ? (
-                  <Alert severity="error" sx={{ borderRadius: 2 }}>
-                    {browserInstallError}
-                  </Alert>
-                ) : null}
-              </Stack>
-            </DialogContent>
-            <DialogActions sx={{ px: 3, pb: 2, gap: 1, flexWrap: "wrap" }}>
-              <Button
-                onClick={closeBrowserInstallDialog}
-                disabled={browserInstallBusy}
-              >
-                取消
-              </Button>
-              <Button
-                onClick={() =>
-                  void handleBrowserBackendInstall("packages-only")
-                }
-                disabled={browserInstallBusy || browserInstallBlocked}
-                startIcon={
-                  browserInstallIntent === "packages-only" ? (
-                    <CircularProgress size={16} />
-                  ) : undefined
-                }
-              >
-                只安装后端
-              </Button>
-              <Button
-                variant="contained"
-                onClick={() => void handleBrowserBackendInstall("full")}
-                disabled={browserInstallBusy || browserInstallBlocked}
-                startIcon={
-                  browserInstallIntent === "full" ? (
-                    <CircularProgress size={16} color="inherit" />
-                  ) : undefined
-                }
-              >
-                安装并下载浏览器
-              </Button>
-            </DialogActions>
-          </Dialog>
-
           <Stack
             direction="row"
             alignItems="center"
@@ -3876,7 +4157,7 @@ export const ChatComposer = memo(function ChatComposer({
                 py: 0,
                 borderRadius: 2.5,
                 borderColor: edge(0.14),
-                color: ink,
+                color: chromeTextStrong,
                 ...composerLabelText,
                 bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
                 boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
@@ -3959,7 +4240,7 @@ export const ChatComposer = memo(function ChatComposer({
         </Paper>
       </Box>
 
-      {/* Bottom: left = path + branch · right = worktree + remote/local */}
+      {/* Bottom: focused workspace and execution controls */}
       <Stack
         direction="row"
         alignItems="center"
@@ -4108,7 +4389,7 @@ export const ChatComposer = memo(function ChatComposer({
             onClick={onPickWorkspace}
             sx={{
               textTransform: "none",
-              color: needsWorkspacePath ? warningMain : ink,
+              color: needsWorkspacePath ? warningMain : chromeTextStrong,
               ...composerLabelText,
               display: "inline-flex",
               alignItems: "center",
@@ -4188,7 +4469,7 @@ export const ChatComposer = memo(function ChatComposer({
                     minHeight: "var(--composer-footer-h)",
                     height: "var(--composer-footer-h)",
                     bgcolor: "transparent",
-                    color: ink,
+                    color: chromeTextStrong,
                     borderRadius: 2,
                     ...composerLabelText,
                     boxShadow: "none",
@@ -4248,49 +4529,6 @@ export const ChatComposer = memo(function ChatComposer({
             ml: { xs: 0, sm: "auto" },
           }}
         >
-          <FormControlLabel
-            control={
-              <Checkbox
-                size="small"
-                checked={useWorktree}
-                onChange={(_, v) => setUseWorktree(v)}
-                sx={{
-                  py: 0,
-                  color: mut,
-                  "&.Mui-checked": { color: accent },
-                  "& .MuiSvgIcon-root": { fontSize: 20 },
-                }}
-              />
-            }
-            label={
-              <Typography
-                variant="body2"
-                sx={{ ...composerLabelText, color: ink }}
-              >
-                worktree
-              </Typography>
-            }
-            sx={{
-              mr: 0,
-              px: 0.5,
-              py: 0,
-              minHeight: "var(--composer-footer-h)",
-              height: "var(--composer-footer-h)",
-              borderRadius: 2,
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              transition: "background-color 0.2s ease, border-color 0.2s ease",
-              "& .MuiFormControlLabel-label": {
-                ...composerLabelText,
-                color: ink,
-              },
-              "&:hover": {
-                bgcolor: alpha(accent, 0.3),
-                borderColor: alpha(accent, 0.24),
-              },
-            }}
-          />
-
           <Menu
             anchorEl={envAnchor}
             open={Boolean(envAnchor)}
@@ -4353,7 +4591,7 @@ export const ChatComposer = memo(function ChatComposer({
                       : "在本机运行工具与终端"
                   }
                   primaryTypographyProps={{
-                    sx: { ...composerLabelText, color: ink },
+                    sx: { ...composerLabelText, color: chromeTextStrong },
                   }}
                   secondaryTypographyProps={{
                     sx: { fontSize: 11, color: mut },
@@ -4409,7 +4647,7 @@ export const ChatComposer = memo(function ChatComposer({
                       : "点击配置 SSH 连接"
                   }
                   primaryTypographyProps={{
-                    sx: { ...composerLabelText, color: ink },
+                    sx: { ...composerLabelText, color: chromeTextStrong },
                   }}
                   secondaryTypographyProps={{
                     sx: { fontSize: 11, color: mut },
@@ -4446,7 +4684,7 @@ export const ChatComposer = memo(function ChatComposer({
                   primary="沙箱"
                   secondary="远程容器化执行环境"
                   primaryTypographyProps={{
-                    sx: { ...composerLabelText, color: ink },
+                    sx: { ...composerLabelText, color: chromeTextStrong },
                   }}
                   secondaryTypographyProps={{
                     sx: { fontSize: 11, color: mut },
@@ -4513,7 +4751,7 @@ export const ChatComposer = memo(function ChatComposer({
                 <Divider sx={{ my: 0.5 }} />
                 <MenuItem
                   onClick={() => {
-                    openExecutionSettings(2);
+                    openExecutionSettings(0);
                     setSshMenuAnchor(null);
                     setEnvAnchor(null);
                   }}
@@ -4524,7 +4762,7 @@ export const ChatComposer = memo(function ChatComposer({
                   <ListItemText
                     primary="添加 SSH 配置"
                     primaryTypographyProps={{
-                      sx: { fontSize: 13, color: ink, fontWeight: 500 },
+                      sx: { fontSize: 13, color: chromeTextStrong, fontWeight: 500 },
                     }}
                   />
                 </MenuItem>
@@ -4551,7 +4789,7 @@ export const ChatComposer = memo(function ChatComposer({
                       primary={name}
                       secondary={sshConnectionLabel(cfg)}
                       primaryTypographyProps={{
-                        sx: { fontSize: 13, fontWeight: 500, color: ink },
+                        sx: { fontSize: 13, fontWeight: 500, color: chromeTextStrong },
                       }}
                       secondaryTypographyProps={{
                         sx: { fontSize: 11, color: mut },
@@ -4562,7 +4800,7 @@ export const ChatComposer = memo(function ChatComposer({
                 <Divider sx={{ my: 0.5 }} />
                 <MenuItem
                   onClick={() => {
-                    openExecutionSettings(2);
+                    openExecutionSettings(0);
                     setSshMenuAnchor(null);
                     setEnvAnchor(null);
                   }}
@@ -4634,31 +4872,12 @@ export const ChatComposer = memo(function ChatComposer({
                   <ListItemText
                     primary={b.label}
                     primaryTypographyProps={{
-                      sx: { fontSize: 13, fontWeight: 500, color: ink },
+                      sx: { fontSize: 13, fontWeight: 500, color: chromeTextStrong },
                     }}
                   />
                 </MenuItem>
               );
             })}
-            <Divider sx={{ my: 0.5 }} />
-            <MenuItem
-              onClick={() => {
-                openExecutionSettings(0);
-                setSandboxMenuAnchor(null);
-                setEnvAnchor(null);
-              }}
-              sx={{ px: 1.5, py: 0.75 }}
-            >
-              <ListItemIcon sx={{ minWidth: 36 }}>
-                <Settings size={18} strokeWidth={2} color={mut} />
-              </ListItemIcon>
-              <ListItemText
-                primary="配置沙箱后端"
-                primaryTypographyProps={{
-                  sx: { fontSize: 13, color: mut, fontWeight: 500 },
-                }}
-              />
-            </MenuItem>
           </Menu>
 
           {/* 本地虚拟环境二级菜单 */}
@@ -4710,7 +4929,7 @@ export const ChatComposer = memo(function ChatComposer({
               <ListItemText
                 primary="无虚拟环境"
                 primaryTypographyProps={{
-                  sx: { fontSize: 13, fontWeight: 500, color: ink },
+                  sx: { fontSize: 13, fontWeight: 500, color: chromeTextStrong },
                 }}
               />
             </MenuItem>
@@ -4761,7 +4980,7 @@ export const ChatComposer = memo(function ChatComposer({
                     <ListItemText
                       primary={v.label}
                       primaryTypographyProps={{
-                        sx: { fontSize: 13, fontWeight: 500, color: ink },
+                        sx: { fontSize: 13, fontWeight: 500, color: chromeTextStrong },
                       }}
                     />
                   </MenuItem>

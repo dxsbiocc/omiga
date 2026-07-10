@@ -24,6 +24,13 @@ describe("buildPendingExecutionFeedback", () => {
     });
   });
 
+  it("returns live research feedback for /research", () => {
+    expect(buildPendingExecutionFeedback({ workflowCommand: "research" })).toEqual({
+      connectLabel: "科研分析中",
+      assistantHint: "正在围绕科研问题生成分析、证据边界和下一步建议…",
+    });
+  });
+
   it("falls back to generic feedback for ordinary chat", () => {
     expect(buildPendingExecutionFeedback({ workflowCommand: null })).toEqual({
       connectLabel: "等待响应",

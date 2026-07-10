@@ -21,7 +21,7 @@ describe("resolveOpenSettingsTarget", () => {
       resolveOpenSettingsTarget({ tab: "execution", executionSubTab: 9 }),
     ).toEqual({
       tabIndex: 9,
-      executionSubTab: 2,
+      executionSubTab: 0,
     });
     expect(resolveOpenSettingsTarget({ tab: "execution" })).toEqual({
       tabIndex: 9,
@@ -29,7 +29,7 @@ describe("resolveOpenSettingsTarget", () => {
     });
     expect(resolveOpenSettingsTarget({ tab: "ssh" })).toEqual({
       tabIndex: 9,
-      executionSubTab: 2,
+      executionSubTab: 0,
     });
   });
 

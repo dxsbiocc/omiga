@@ -12,7 +12,9 @@ import {
   ToolFoldHeader,
   toolCallPanelTitle,
   toolDisplayOutputText,
+  toolGroupAnyError,
   toolGroupFlowComplete,
+  toolGroupHeaderAnyError,
 } from "./ToolFoldSummary";
 
 const chat = getChatTokens(createTheme());
@@ -42,8 +44,50 @@ describe("ToolFoldSummary helpers", () => {
 
     expect(summarizeReactFold(fold)).toBe("Reasoning · Ran 1 command, viewed a file");
     expect(firstRunningToolName(fold)).toBe("bash");
+    expect(toolGroupAnyError(fold)).toBe(false);
     expect(toolGroupFlowComplete(fold)).toBe(false);
     expect(toolGroupFlowComplete([{ role: "tool", toolCall: { name: "bash" } }])).toBe(true);
+    expect(
+      toolGroupAnyError([{ role: "tool", toolCall: { name: "bash", status: "error" } }]),
+    ).toBe(true);
+  });
+
+  it("does not mark recovered tool errors as a failed reasoning fold", () => {
+    const failedButRecovered = [
+      {
+        role: "tool",
+        content: "grep: no matches",
+        toolCall: {
+          name: "bash",
+          status: "error" as const,
+          output: "grep: no matches",
+        },
+      },
+      {
+        role: "tool",
+        content: "ok",
+        toolCall: {
+          name: "file_read",
+          status: "completed" as const,
+          output: "ok",
+        },
+      },
+    ];
+
+    expect(toolGroupAnyError(failedButRecovered)).toBe(true);
+    expect(toolGroupHeaderAnyError(failedButRecovered)).toBe(true);
+    expect(
+      toolGroupHeaderAnyError(
+        failedButRecovered,
+        "我已经确认了源码并给出可执行方案。",
+      ),
+    ).toBe(false);
+    expect(
+      toolGroupHeaderAnyError(
+        failedButRecovered,
+        "### 本轮没有稳定完成\n\n最近的工具调用返回了错误。",
+      ),
+    ).toBe(true);
   });
 
   it("formats tool details defensively", () => {
@@ -108,6 +152,7 @@ describe("ToolFoldHeader", () => {
         expanded={false}
         summary="Reasoning · Ran 2 commands"
         anyRunning
+        anyError={false}
         runningToolName="bash"
         runningToolCount={2}
         showGroupDone={false}
@@ -131,6 +176,7 @@ describe("ToolFoldHeader", () => {
         expanded={false}
         summary="Reasoning · Ran a command"
         anyRunning={false}
+        anyError={false}
         runningToolName={null}
         runningToolCount={0}
         showGroupDone={false}
@@ -146,5 +192,28 @@ describe("ToolFoldHeader", () => {
     expect(html).not.toContain(":hover&gt;svg");
     expect(html).not.toContain(":hover>svg");
     expect(html).not.toContain("svg:first-of-type");
+  });
+
+  it("renders an error badge instead of Done when completed fold has unresolved errors", () => {
+    const html = renderToStaticMarkup(
+      <ToolFoldHeader
+        foldId="rf-error"
+        expanded
+        summary="Reasoning · Ran 3 commands"
+        anyRunning={false}
+        anyError
+        runningToolName={null}
+        runningToolCount={0}
+        showGroupDone
+        isLastFold={false}
+        activityIsStreaming={false}
+        waitingFirstChunk={false}
+        chat={chat}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Error");
+    expect(html).not.toContain("Done");
   });
 });

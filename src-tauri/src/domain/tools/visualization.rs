@@ -125,4 +125,5 @@ pub fn schema() -> ToolSchema {
             "required": ["viz_type", "config"]
         }),
     )
+    .concurrency_safe()
 }

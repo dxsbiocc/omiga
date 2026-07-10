@@ -93,6 +93,7 @@ pub fn schema() -> ToolSchema {
             "required": ["envRef"]
         }),
     )
+    .concurrency_safe()
 }
 
 fn runtime_availability_for_profile(

@@ -229,7 +229,7 @@ A: 通过配置实现：
 ```json
 {
   "root_dir": "~/.omiga/shared-memory/project-a",
-  "shared_with": ["/path/to/worktree-a", "/path/to/worktree-b"]
+  "shared_with": ["/path/to/project-a", "/path/to/project-b"]
 }
 ```
 

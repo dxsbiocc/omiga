@@ -2786,33 +2786,6 @@ function VisualizationRDetailOverview({ templates }: { templates?: PluginTemplat
         </Stack>
       </Paper>
 
-      {overview.pending.length > 0 ? (
-        <Paper
-          variant="outlined"
-          sx={{
-            p: 1.25,
-            borderRadius: 2.25,
-            bgcolor: alpha(theme.palette.warning.main, theme.palette.mode === "dark" ? 0.12 : 0.05),
-          }}
-        >
-          <Stack spacing={0.8}>
-            <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-              <Typography variant="subtitle2" fontWeight={850}>
-                Planned / not implemented yet
-              </Typography>
-              <Chip size="small" color="warning" variant="outlined" label="roadmap" />
-            </Stack>
-            <Stack direction="row" gap={0.75} flexWrap="wrap">
-              {overview.pending.map((item) => (
-                <Chip key={item} size="small" variant="outlined" label={item} />
-              ))}
-            </Stack>
-            <Typography variant="caption" color="text.secondary">
-              Runtime scope: {overview.runtime}. First-phase templates intentionally avoid auto-installing R packages.
-            </Typography>
-          </Stack>
-        </Paper>
-      ) : null}
     </Stack>
   );
 }
@@ -3889,7 +3862,7 @@ function PluginDetailsDialog({
                   <Paper variant="outlined" sx={{ p: 1.15, borderRadius: 2, bgcolor: "background.paper" }}>
                     <Stack spacing={0.65}>
                       <OperatorMetaLine label="Plugin ID" value={plugin.id} />
-                      <OperatorMetaLine label="Source path" value={plugin.sourcePath || "not available"} />
+                      <OperatorMetaLine label="Source path" value={plugin.sourcePath || "—"} />
                       {plugin.installedPath?.trim() && (
                         <OperatorMetaLine label="Installed" value={plugin.installedPath} />
                       )}

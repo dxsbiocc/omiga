@@ -201,9 +201,8 @@ async fn process_message(
 
         IdeMessage::RequestDiff { session_id } => {
             tracing::info!("IDE Bridge: diff requested for session '{}'", session_id);
-            // Placeholder: a real implementation would look up the session diff.
             let response = IdeMessage::Error {
-                message: "Diff generation not yet implemented".to_string(),
+                message: "Diff generation is not available in this build".to_string(),
             };
             send_message(writer, &response).await;
         }

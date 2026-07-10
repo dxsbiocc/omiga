@@ -1,7 +1,7 @@
 /**
  * Maps `window` event `openSettings` → `detail.tab` string to Settings sidebar index.
  * Keep in sync with `SETTINGS_SECTIONS` in `Settings/index.tsx` (0–15). Language is not a tab — use profile menu + locale store.
- * Optional `detail.executionSubTab`: 0 Modal, 1 Daytona, 2 SSH (see `ExecutionEnvsSettingsTab`).
+ * Optional `detail.executionSubTab`: legacy value; Execution currently exposes SSH only.
  */
 export type OpenSettingsEventDetail = {
   tab?: string;
@@ -41,7 +41,7 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   notebook: 4,
   jupyter: 4,
   ipynb: 4,
-  /** Browser Operator setup lives in Execution; Composer controls per-turn/session enablement. */
+  /** Browser Operator setup lives in Execution; runtime access is handled through plugins. */
   "browser-operator": 9,
   browser_operator: 9,
   "browser-use": 9,
@@ -59,7 +59,7 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   knowledge: 8,
   "memory-v2": 8,
   unified: 8,
-  /** Execution environments (Modal / Daytona / SSH) — `omiga.yaml` + ~/.ssh/config */
+  /** Execution environments (SSH) — `omiga.yaml` + ~/.ssh/config */
   execution: 9,
   ssh: 9,
   "execution-env": 9,
@@ -72,13 +72,12 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
 };
 
 const OPEN_SETTINGS_EXECUTION_SUBTAB_DETAIL: Record<string, number> = {
-  ssh: 2,
+  ssh: 0,
 };
 
 function clampExecutionSubTab(value: unknown): number {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(2, Math.floor(n)));
+  void value;
+  return 0;
 }
 
 export function resolveOpenSettingsTarget(

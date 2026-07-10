@@ -1,17 +1,18 @@
-import type { AppLocale } from "../state/localeStore";
+import { normalizeAppLocale, type AppLocale } from "../state/localeStore";
 
 const STRINGS = {
   en: {
     newSession: "New session",
     search: "Search",
     searchDialogTitle: "Search conversations",
-    customize: "Customize",
-    projects: "Projects",
+    projectsSection: "Projects",
     recents: "Recents",
     recentConversations: "Recent conversations",
     searchPlaceholder: "Search titles, projects, or message content...",
     searchingSessions: "Searching conversations...",
     noSessions: "No sessions found",
+    noProject: "No project",
+    newProjectSession: "New session in this project",
     noSearchResults: "No matching conversations",
     sessionActions: "Session actions",
     localWorkspace: "Local workspace",
@@ -44,13 +45,14 @@ const STRINGS = {
     newSession: "新建会话",
     search: "搜索",
     searchDialogTitle: "搜索对话",
-    customize: "自定义",
-    projects: "项目",
+    projectsSection: "项目",
     recents: "最近",
     recentConversations: "近期对话",
     searchPlaceholder: "搜索标题、项目或消息内容…",
     searchingSessions: "正在搜索对话…",
     noSessions: "暂无会话",
+    noProject: "未设置项目",
+    newProjectSession: "在此项目中新建会话",
     noSearchResults: "没有匹配的对话",
     sessionActions: "会话操作",
     localWorkspace: "本地工作区",
@@ -87,6 +89,6 @@ export function tSessionList(
   locale: AppLocale,
   key: SessionListStringKey,
 ): string {
-  const bundle = STRINGS[locale];
+  const bundle = STRINGS[normalizeAppLocale(locale)];
   return bundle[key] ?? STRINGS.en[key];
 }

@@ -158,6 +158,7 @@ pub fn schema() -> ToolSchema {
             }
         }),
     )
+    .concurrency_safe()
 }
 
 fn summarize_records(records: &[ExecutionRecord]) -> ArchiveAdviceSummary {

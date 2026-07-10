@@ -1,7 +1,7 @@
 //! Multi-provider LLM API abstraction layer
 //!
 //! Supports:
-//! - International: Anthropic (Claude), OpenAI, Azure, Google (Gemini)
+//! - International: Anthropic (Claude), OpenAI, Azure
 //! - Domestic (Chinese): MiniMax, Alibaba (通义千问), DeepSeek, Zhipu (ChatGLM)
 //! - Custom: Any OpenAI-compatible endpoint (Ollama, vLLM, etc.)
 //!
@@ -32,6 +32,10 @@ pub use config::{
 pub use domestic::{AlibabaClient, ZhipuClient};
 pub use openai::OpenAiCompatibleClient;
 pub use types::*;
+
+fn default_prompt_cache() -> bool {
+    true
+}
 
 /// Supported LLM providers
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -213,7 +217,6 @@ impl LlmProvider {
             LlmProvider::Anthropic,
             LlmProvider::OpenAi,
             LlmProvider::Azure,
-            LlmProvider::Google,
             LlmProvider::Minimax,
             LlmProvider::Alibaba,
             LlmProvider::Deepseek,
@@ -274,6 +277,12 @@ pub struct LlmConfig {
     /// Only meaningful when `thinking` is Some(true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Enable provider prompt-cache hints where supported.
+    #[serde(default = "default_prompt_cache")]
+    pub prompt_cache: bool,
+    /// Stable session-scoped cache key for OpenAI-compatible providers that support it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
 }
 
 fn default_timeout() -> u64 {
@@ -301,6 +310,8 @@ impl LlmConfig {
             extra_query: None,
             thinking: None,
             reasoning_effort: None,
+            prompt_cache: true,
+            prompt_cache_key: None,
         }
     }
 
@@ -386,6 +397,18 @@ impl LlmConfig {
         self
     }
 
+    /// Builder method: enable or disable provider prompt-cache hints
+    pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
+        self.prompt_cache = enabled;
+        self
+    }
+
+    /// Builder method: set OpenAI-compatible prompt cache key
+    pub fn with_prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+        self.prompt_cache_key = Some(key.into());
+        self
+    }
+
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), String> {
         if self.api_key.is_empty() {
@@ -417,6 +440,8 @@ impl Default for LlmConfig {
             extra_query: None,
             thinking: None,
             reasoning_effort: None,
+            prompt_cache: true,
+            prompt_cache_key: None,
         }
     }
 }
@@ -460,7 +485,7 @@ pub fn create_client(config: LlmConfig) -> Result<Box<dyn LlmClient>, ApiError> 
         LlmProvider::Alibaba => Ok(Box::new(AlibabaClient::new(config))),
         LlmProvider::Zhipu => Ok(Box::new(ZhipuClient::new(config))),
         LlmProvider::Google => Err(ApiError::Config {
-            message: "Google Gemini provider not yet implemented. Use OpenAI-compatible providers."
+            message: "Google Gemini provider is not available in this build. Use OpenAI-compatible providers."
                 .to_string(),
         }),
     }
@@ -603,6 +628,8 @@ pub fn load_config_from_env() -> Result<LlmConfig, ApiError> {
         extra_query: None,
         thinking: None,
         reasoning_effort: None,
+        prompt_cache: true,
+        prompt_cache_key: None,
     })
 }
 

@@ -10,7 +10,7 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: vi.fn(),
 }));
 
-import { useSessionStore } from "./sessionStore";
+import { UNUSED_SESSION_LABEL, useSessionStore } from "./sessionStore";
 
 const baseSession = {
   id: "session-1",
@@ -21,7 +21,7 @@ const baseSession = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
-describe("sessionStore sendMessage browserUseMode payload", () => {
+describe("sessionStore sendMessage computerUseMode payload", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue({
@@ -32,20 +32,18 @@ describe("sessionStore sendMessage browserUseMode payload", () => {
     useSessionStore.setState({ activeRounds: new Map() });
   });
 
-  it("passes browserUseMode through to the send_message payload", async () => {
+  it("passes computerUseMode through to the send_message payload", async () => {
     await useSessionStore.getState().sendMessage({
       content: "open example.com",
       use_tools: true,
-      browserUseMode: "task",
-      computerUseMode: "off",
+      computerUseMode: "task",
     });
 
     expect(invokeMock).toHaveBeenCalledWith("send_message", {
       request: expect.objectContaining({
         content: "open example.com",
         use_tools: true,
-        browserUseMode: "task",
-        computerUseMode: "off",
+        computerUseMode: "task",
       }),
     });
   });
@@ -98,6 +96,66 @@ describe("sessionStore workspace reset", () => {
     ).toBe(false);
     expect(useSessionStore.getState().currentSession?.projectPath).toBe(
       "/workspace/two",
+    );
+  });
+});
+
+describe("sessionStore projectized quick sessions", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue({
+      id: "session-project-new",
+      name: UNUSED_SESSION_LABEL,
+      project_path: "/workspace/project-a",
+      created_at: "2026-01-02T00:00:00.000Z",
+      updated_at: "2026-01-02T00:00:00.000Z",
+      session_config: undefined,
+    });
+    useSessionStore.setState({
+      sessions: [],
+      currentSession: null,
+      messages: [],
+      storeMessages: [],
+      pendingProjectPathSessions: new Set(),
+    });
+  });
+
+  it("creates a fresh placeholder session in the requested project folder", async () => {
+    await useSessionStore.getState().createSessionQuick("/workspace/project-a");
+
+    expect(invokeMock).toHaveBeenCalledWith("create_session", {
+      name: UNUSED_SESSION_LABEL,
+      projectPath: "/workspace/project-a",
+    });
+    expect(useSessionStore.getState().currentSession?.projectPath).toBe(
+      "/workspace/project-a",
+    );
+  });
+
+  it("does not reuse an empty placeholder from another project", async () => {
+    useSessionStore.setState({
+      sessions: [
+        {
+          ...baseSession,
+          id: "other-placeholder",
+          name: UNUSED_SESSION_LABEL,
+          projectPath: "/workspace/other",
+          workingDirectory: "/workspace/other",
+          messageCount: 0,
+        },
+      ],
+      currentSession: null,
+      storeMessages: [],
+    });
+
+    await useSessionStore.getState().createSessionQuick("/workspace/project-a");
+
+    expect(invokeMock).toHaveBeenCalledWith("create_session", {
+      name: UNUSED_SESSION_LABEL,
+      projectPath: "/workspace/project-a",
+    });
+    expect(useSessionStore.getState().currentSession?.id).toBe(
+      "session-project-new",
     );
   });
 });

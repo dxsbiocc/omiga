@@ -46,7 +46,6 @@
 | 协作 / 产品 | `SuggestBackgroundPRTool`, `WebBrowserTool`, `ListPeersTool`, `getTeamCreateTool` / `getTeamDeleteTool` |
 | 计划 / 验证 | `VerifyPlanExecutionTool`, `WorkflowTool`, `BriefTool` |
 | 开发与诊断 | `OverflowTestTool`, `CtxInspectTool`, `TerminalCaptureTool`, `LSPTool`, `TestingPermissionTool` |
-| Git / 工作区 | `EnterWorktreeTool`, `ExitWorktreeTool` |
 | Cron / 远程 / 通知 | `cronTools`, `RemoteTriggerTool`, `MonitorTool`, `PushNotificationTool`, `SubscribePRTool` |
 | Shell 变体 | `getPowerShellTool()` |
 | 其它 | `SnipTool`, `SendUserFileTool` |

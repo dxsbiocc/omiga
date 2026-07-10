@@ -13,9 +13,6 @@ import {
   FormControlLabel,
   Switch,
   IconButton,
-  InputAdornment,
-  Tabs,
-  Tab,
   List,
   ListItem,
   ListItemText,
@@ -26,32 +23,13 @@ import {
   DialogActions,
 } from "@mui/material";
 import {
-  Visibility,
-  VisibilityOff,
   Add,
   Edit,
   Delete,
-  CheckCircle,
-  Error as ErrorIcon,
   Refresh,
 } from "@mui/icons-material";
 import { RSYNC_INSTALL_HELP_URL } from "../../lib/rsyncSsh";
 import { BrowserOperatorSettingsCard } from "./BrowserOperatorSettingsCard";
-
-// Types matching Rust structs
-interface ModalConfig {
-  token_id?: string;
-  token_secret?: string;
-  default_image?: string;
-  enabled: boolean;
-}
-
-interface DaytonaConfig {
-  server_url?: string;
-  api_key?: string;
-  default_image?: string;
-  enabled: boolean;
-}
 
 interface SshConfig {
   // Host pattern (the name used to reference this config)
@@ -77,49 +55,25 @@ interface SshConfigsMap {
 /** 本机 `rsync` 是否可用（SSH 同步依赖） */
 type RsyncCheckStatus = "loading" | "ok" | "missing" | "unknown";
 
-function clampExecutionInnerTab(n: number): number {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return 0;
-  return Math.max(0, Math.min(2, Math.floor(x)));
-}
-
 interface ExecutionEnvsSettingsTabProps {
   /** When true, renders in compact mode for embedding in Advanced tab */
   embedded?: boolean;
-  /** 0 = Modal, 1 = Daytona, 2 = SSH — e.g. deep link from composer */
+  /** Reserved for legacy deep links; only SSH is exposed until cloud execution is real. */
   initialSubTab?: number;
 }
 
 export function ExecutionEnvsSettingsTab({
   embedded = false,
-  initialSubTab = 0,
 }: ExecutionEnvsSettingsTabProps) {
-  const [activeTab, setActiveTab] = useState(() =>
-    clampExecutionInnerTab(initialSubTab),
-  );
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
   } | null>(null);
 
-  // Modal state
-  const [modalConfig, setModalConfig] = useState<ModalConfig>({
-    enabled: false,
-  });
-  const [showModalTokenId, setShowModalTokenId] = useState(false);
-  const [showModalTokenSecret, setShowModalTokenSecret] = useState(false);
-  const [isModalConfigured, setIsModalConfigured] = useState(false);
-
-  // Daytona state
-  const [daytonaConfig, setDaytonaConfig] = useState<DaytonaConfig>({
-    enabled: false,
-  });
-  const [showDaytonaApiKey, setShowDaytonaApiKey] = useState(false);
-  const [isDaytonaConfigured, setIsDaytonaConfigured] = useState(false);
-
   // SSH state
   const [sshConfigs, setSshConfigs] = useState<SshConfigsMap>({});
+  const [sandboxEscalationEnabled, setSandboxEscalationEnabled] = useState(true);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
   const [editingSshName, setEditingSshName] = useState<string | null>(null);
   const [sshForm, setSshForm] = useState<SshConfig & { name: string }>({
@@ -146,13 +100,8 @@ export function ExecutionEnvsSettingsTab({
   }, []);
 
   useEffect(() => {
-    if (activeTab !== 2) return;
     void refreshRsyncStatus();
-  }, [activeTab, refreshRsyncStatus]);
-
-  useEffect(() => {
-    setActiveTab(clampExecutionInnerTab(initialSubTab));
-  }, [initialSubTab]);
+  }, [refreshRsyncStatus]);
 
   // Load configs on mount
   useEffect(() => {
@@ -161,71 +110,43 @@ export function ExecutionEnvsSettingsTab({
 
   const loadConfigs = async () => {
     try {
-      // Load Modal config
-      const modal = await invoke<ModalConfig | null>("get_modal_config");
-      if (modal) {
-        setModalConfig(modal);
-      }
-      const modalConfigured = await invoke<boolean>("is_modal_configured");
-      setIsModalConfigured(modalConfigured);
-
-      // Load Daytona config
-      const daytona = await invoke<DaytonaConfig | null>("get_daytona_config");
-      if (daytona) {
-        setDaytonaConfig(daytona);
-      }
-      const daytonaConfigured = await invoke<boolean>("is_daytona_configured");
-      setIsDaytonaConfigured(daytonaConfigured);
-
       // Load SSH configs
       const ssh = await invoke<SshConfigsMap>("get_ssh_configs");
       setSshConfigs(ssh || {});
     } catch (error) {
       console.error("Failed to load execution env configs:", error);
     }
-  };
 
-  const handleSaveModal = async () => {
-    setIsLoading(true);
-    setMessage(null);
     try {
-      await invoke("save_modal_config", {
-        modalConfig: {
-          ...modalConfig,
-          token_id: modalConfig.token_id?.trim(),
-          token_secret: modalConfig.token_secret?.trim(),
-          default_image: modalConfig.default_image?.trim() || "python:3.11",
-        },
-      });
-      const configured = await invoke<boolean>("is_modal_configured");
-      setIsModalConfigured(configured);
-      setMessage({ type: "success", text: "Modal configuration saved" });
+      const enabled = await invoke<boolean>("get_sandbox_escalation_enabled");
+      setSandboxEscalationEnabled(enabled);
     } catch (error) {
-      console.error("Failed to save Modal config:", error);
-      setMessage({ type: "error", text: `Failed to save: ${error}` });
-    } finally {
-      setIsLoading(false);
+      console.error("Failed to load sandbox escalation setting:", error);
+      setSandboxEscalationEnabled(true);
     }
   };
 
-  const handleSaveDaytona = async () => {
+  const handleSandboxEscalationToggle = async (enabled: boolean) => {
+    const previous = sandboxEscalationEnabled;
+    setSandboxEscalationEnabled(enabled);
     setIsLoading(true);
     setMessage(null);
+
     try {
-      await invoke("save_daytona_config", {
-        daytonaConfig: {
-          ...daytonaConfig,
-          server_url: daytonaConfig.server_url?.trim(),
-          api_key: daytonaConfig.api_key?.trim(),
-          default_image: daytonaConfig.default_image?.trim() || "ubuntu:22.04",
-        },
+      await invoke("set_sandbox_escalation_enabled", { enabled });
+      setMessage({
+        type: "success",
+        text: enabled
+          ? "沙箱提权审批已开启"
+          : "沙箱提权审批已关闭",
       });
-      const configured = await invoke<boolean>("is_daytona_configured");
-      setIsDaytonaConfigured(configured);
-      setMessage({ type: "success", text: "Daytona configuration saved" });
     } catch (error) {
-      console.error("Failed to save Daytona config:", error);
-      setMessage({ type: "error", text: `Failed to save: ${error}` });
+      console.error("Failed to save sandbox escalation setting:", error);
+      setSandboxEscalationEnabled(previous);
+      setMessage({
+        type: "error",
+        text: `Failed to save sandbox escalation setting: ${error}`,
+      });
     } finally {
       setIsLoading(false);
     }
@@ -313,231 +234,46 @@ export function ExecutionEnvsSettingsTab({
     setSshDialogOpen(true);
   };
 
-  const handleTabChange = (_: React.SyntheticEvent, newValue: number) => {
-    setActiveTab(newValue);
-    setMessage(null);
-  };
-
   return (
     <Box>
       <Typography variant={embedded ? "body2" : "subtitle2"} fontWeight={600} sx={{ mb: 1 }}>
         Execution Environments
       </Typography>
       <Typography variant="caption" color="text.secondary" sx={{ mb: 2, display: "block" }}>
-        Configure API keys for remote execution environments (Modal, Daytona, SSH).
-        Stored in <code>omiga.yaml</code>.
+        Configure sandbox approval and SSH remote execution. User settings are stored in{" "}
+        <code>omiga.yaml</code>; SSH profiles are also read from <code>~/.ssh/config</code>.
       </Typography>
       <BrowserOperatorSettingsCard compact={embedded} />
-
-      <Tabs value={activeTab} onChange={handleTabChange} sx={{ mb: 2, minHeight: embedded ? '36px' : '48px' }}>
-        <Tab label="Modal" />
-        <Tab label="Daytona" />
-        <Tab label="SSH" />
-      </Tabs>
-
-      {/* Modal Tab */}
-      {activeTab === 0 && (
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 2,
+          mb: 2,
+          p: 1.5,
+          border: 1,
+          borderColor: "divider",
+          borderRadius: 1,
+          bgcolor: "background.paper",
+        }}
+      >
         <Box>
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
-            <Typography variant="body2" fontWeight={600}>
-              Modal Cloud
-            </Typography>
-            {isModalConfigured ? (
-              <CheckCircle fontSize="small" color="success" />
-            ) : (
-              <ErrorIcon fontSize="small" color="disabled" />
-            )}
-            <Typography variant="caption" color={isModalConfigured ? "success.main" : "text.disabled"}>
-              {isModalConfigured ? "Configured" : "Not configured"}
-            </Typography>
-          </Box>
-
-          <FormControlLabel
-            control={
-              <Switch
-                checked={modalConfig.enabled}
-                onChange={(e) =>
-                  setModalConfig((prev) => ({ ...prev, enabled: e.target.checked }))
-                }
-                disabled={isLoading}
-              />
-            }
-            label="Enable Modal"
-            sx={{ mb: 2, display: "block" }}
-          />
-
-          <TextField
-            fullWidth
-            type={showModalTokenId ? "text" : "password"}
-            label="Modal Token ID"
-            value={modalConfig.token_id || ""}
-            onChange={(e) =>
-              setModalConfig((prev) => ({ ...prev, token_id: e.target.value }))
-            }
-            disabled={isLoading}
-            placeholder="ak-..."
-            sx={{ mb: 2 }}
-            InputProps={{
-              endAdornment: (
-                <InputAdornment position="end">
-                  <IconButton onClick={() => setShowModalTokenId(!showModalTokenId)} edge="end" size="small">
-                    {showModalTokenId ? <VisibilityOff /> : <Visibility />}
-                  </IconButton>
-                </InputAdornment>
-              ),
-            }}
-          />
-
-          <TextField
-            fullWidth
-            type={showModalTokenSecret ? "text" : "password"}
-            label="Modal Token Secret"
-            value={modalConfig.token_secret || ""}
-            onChange={(e) =>
-              setModalConfig((prev) => ({ ...prev, token_secret: e.target.value }))
-            }
-            disabled={isLoading}
-            placeholder="..."
-            sx={{ mb: 2 }}
-            InputProps={{
-              endAdornment: (
-                <InputAdornment position="end">
-                  <IconButton
-                    onClick={() => setShowModalTokenSecret(!showModalTokenSecret)}
-                    edge="end"
-                    size="small"
-                  >
-                    {showModalTokenSecret ? <VisibilityOff /> : <Visibility />}
-                  </IconButton>
-                </InputAdornment>
-              ),
-            }}
-          />
-
-          <TextField
-            fullWidth
-            label="Default Image (optional)"
-            value={modalConfig.default_image || ""}
-            onChange={(e) =>
-              setModalConfig((prev) => ({ ...prev, default_image: e.target.value }))
-            }
-            disabled={isLoading}
-            placeholder="python:3.11"
-            helperText="Default container image for Modal sandboxes"
-            sx={{ mb: 2 }}
-          />
-
-          <Button variant="contained" onClick={handleSaveModal} disabled={isLoading} sx={{ mb: 2 }}>
-            Save Modal Settings
-          </Button>
-
-          <Typography variant="caption" color="text.secondary" display="block">
-            Get your Modal tokens from{" "}
-            <a href="https://modal.com/settings/tokens" target="_blank" rel="noopener noreferrer">
-              Modal Dashboard
-            </a>
+          <Typography variant="body2" fontWeight={600}>
+            沙箱拒绝时请求提权审批
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            关闭后，本地沙箱拒绝的命令会直接失败，不再弹出单次无沙箱重跑审批。
           </Typography>
         </Box>
-      )}
-
-      {/* Daytona Tab */}
-      {activeTab === 1 && (
-        <Box>
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
-            <Typography variant="body2" fontWeight={600}>
-              Daytona
-            </Typography>
-            {isDaytonaConfigured ? (
-              <CheckCircle fontSize="small" color="success" />
-            ) : (
-              <ErrorIcon fontSize="small" color="disabled" />
-            )}
-            <Typography variant="caption" color={isDaytonaConfigured ? "success.main" : "text.disabled"}>
-              {isDaytonaConfigured ? "Configured" : "Not configured"}
-            </Typography>
-          </Box>
-
-          <FormControlLabel
-            control={
-              <Switch
-                checked={daytonaConfig.enabled}
-                onChange={(e) =>
-                  setDaytonaConfig((prev) => ({ ...prev, enabled: e.target.checked }))
-                }
-                disabled={isLoading}
-              />
-            }
-            label="Enable Daytona"
-            sx={{ mb: 2, display: "block" }}
-          />
-
-          <TextField
-            fullWidth
-            label="Daytona Server URL"
-            value={daytonaConfig.server_url || ""}
-            onChange={(e) =>
-              setDaytonaConfig((prev) => ({ ...prev, server_url: e.target.value }))
-            }
-            disabled={isLoading}
-            placeholder="https://api.daytona.io"
-            sx={{ mb: 2 }}
-          />
-
-          <TextField
-            fullWidth
-            type={showDaytonaApiKey ? "text" : "password"}
-            label="Daytona API Key"
-            value={daytonaConfig.api_key || ""}
-            onChange={(e) =>
-              setDaytonaConfig((prev) => ({ ...prev, api_key: e.target.value }))
-            }
-            disabled={isLoading}
-            placeholder="..."
-            sx={{ mb: 2 }}
-            InputProps={{
-              endAdornment: (
-                <InputAdornment position="end">
-                  <IconButton
-                    onClick={() => setShowDaytonaApiKey(!showDaytonaApiKey)}
-                    edge="end"
-                    size="small"
-                  >
-                    {showDaytonaApiKey ? <VisibilityOff /> : <Visibility />}
-                  </IconButton>
-                </InputAdornment>
-              ),
-            }}
-          />
-
-          <TextField
-            fullWidth
-            label="Default Image (optional)"
-            value={daytonaConfig.default_image || ""}
-            onChange={(e) =>
-              setDaytonaConfig((prev) => ({ ...prev, default_image: e.target.value }))
-            }
-            disabled={isLoading}
-            placeholder="ubuntu:22.04"
-            helperText="Default container image for Daytona workspaces"
-            sx={{ mb: 2 }}
-          />
-
-          <Button variant="contained" onClick={handleSaveDaytona} disabled={isLoading} sx={{ mb: 2 }}>
-            Save Daytona Settings
-          </Button>
-
-          <Typography variant="caption" color="text.secondary" display="block">
-            Get your Daytona API key from{" "}
-            <a href="https://daytona.io/docs/administration/api-keys/" target="_blank" rel="noopener noreferrer">
-              Daytona Docs
-            </a>
-          </Typography>
-        </Box>
-      )}
-
-      {/* SSH Tab */}
-      {activeTab === 2 && (
-        <Box>
+        <Switch
+          checked={sandboxEscalationEnabled}
+          onChange={(e) => void handleSandboxEscalationToggle(e.target.checked)}
+          disabled={isLoading}
+          inputProps={{ "aria-label": "沙箱拒绝时请求提权审批" }}
+        />
+      </Box>
+      <Box>
           <Alert
             severity={
               rsyncCheckStatus === "ok"
@@ -661,8 +397,7 @@ export function ExecutionEnvsSettingsTab({
               </Typography>
             )}
           </List>
-        </Box>
-      )}
+      </Box>
 
       {/* SSH Dialog */}
       <Dialog open={sshDialogOpen} onClose={() => setSshDialogOpen(false)} maxWidth="sm" fullWidth>

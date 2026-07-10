@@ -133,4 +133,5 @@ pub fn schema() -> ToolSchema {
             "required": ["category"]
         }),
     )
+    .concurrency_safe()
 }

@@ -1055,7 +1055,7 @@ fn launch_github_cli_login() -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 fn launch_github_cli_login() -> Result<(), String> {
     Err(format!(
-        "Automatic GitHub CLI login is not implemented on this OS yet. Run `{}` in a terminal, then return to Omiga and test the connector.",
+        "Automatic GitHub CLI login is not available on this OS. Run `{}` in a terminal, then return to Omiga and test the connector.",
         github_cli_login_command_line()
     ))
 }

@@ -1,7 +1,7 @@
 //! Per-session configuration file I/O.
 //!
 //! Each session stores its composer settings (provider, permissions, execution env,
-//! worktree, etc.) in `~/.omiga/sessions/<session_id>.yaml` so sessions are fully
+//! etc.) in `~/.omiga/sessions/<session_id>.yaml` so sessions are fully
 //! independent and survive app restarts.
 
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,7 @@ pub struct SessionConfig {
     /// Conda env name, venv directory path, or pyenv version string.
     #[serde(default)]
     pub local_venv_name: String,
-    /// Whether to use a worktree for git operations in this session.
+    /// Deprecated compatibility field; focused research UI keeps this disabled.
     #[serde(default)]
     pub use_worktree: bool,
     /// Runtime constraint overrides for this session.

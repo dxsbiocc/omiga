@@ -142,6 +142,7 @@ pub fn schema() -> ToolSchema {
             }
         }),
     )
+    .concurrency_safe()
 }
 
 fn default_true() -> bool {

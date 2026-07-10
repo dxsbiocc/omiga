@@ -132,6 +132,10 @@ impl RuntimeConstraintState {
         self.clarification_requested
     }
 
+    pub fn has_used_any_tool(&self) -> bool {
+        !self.seen_tool_names.is_empty()
+    }
+
     pub fn has_used_retrieval_tool(&self) -> bool {
         self.seen_tool_names.iter().any(|name| {
             matches!(
@@ -582,7 +586,7 @@ impl RuntimeConstraint for ClarificationFirstConstraint {
         ctx: &ModelConstraintContext<'_>,
         state: &RuntimeConstraintState,
     ) -> Option<ConstraintNotice> {
-        if !ctx.use_tools || state.clarification_requested() {
+        if !ctx.use_tools || state.clarification_requested() || state.has_used_any_tool() {
             return None;
         }
         if !looks_like_materially_ambiguous(ctx.request_text) {
@@ -630,6 +634,7 @@ impl RuntimeConstraint for ClarificationFirstConstraint {
     ) -> Option<ConstraintToolBlock> {
         if ctx.is_subagent
             || state.clarification_requested()
+            || state.has_used_any_tool()
             || !looks_like_materially_ambiguous(ctx.request_text)
             || !ctx.pending_tool_names.is_empty()
         {
@@ -649,6 +654,7 @@ impl RuntimeConstraint for ClarificationFirstConstraint {
         state: &RuntimeConstraintState,
     ) -> Option<ConstraintPostAction> {
         if state.clarification_requested()
+            || state.has_used_any_tool()
             || !looks_like_materially_ambiguous(ctx.request_text)
             || !ctx.pending_tool_names.is_empty()
             || assistant_is_clarifying(ctx.assistant_text)
@@ -673,47 +679,41 @@ fn build_clarification_first_block(
     tool_result_message: String,
 ) -> ConstraintToolBlock {
     let scope_hint = if has_specific_anchor(request_text) {
-        "the exact requirement or acceptance criteria"
+        "具体需求或验收标准"
     } else {
-        "the target scope (files/modules/behavior) and desired outcome"
+        "目标范围（文件/模块/行为）和期望结果"
     };
     let assistant_response = format!(
-        "I need one clarification before I make changes: the current request is broad enough \
-         that different implementations could produce different results. Please specify {}, \
-         and then I can continue.",
+        "我需要先确认一个关键信息再继续：当前请求存在多种可能实现，直接改容易改偏。请补充{}，然后我会继续执行。",
         scope_hint
     );
     let structured_question = ask_user_question::AskUserQuestionArgs {
         questions: vec![ask_user_question::QuestionItem {
-            question: "Which missing detail should we pin down first before making changes?"
-                .to_string(),
-            header: "Clarify".to_string(),
+            question: "开始前需要先补充哪类信息？".to_string(),
+            header: "确认".to_string(),
             multi_select: false,
             param: None,
             show_when: None,
             options: vec![
                 ask_user_question::QuestionOption {
-                    label: "Scope".to_string(),
-                    description:
-                        "Clarify the exact file, module, component, or surface that should change."
-                            .to_string(),
+                    label: "修改范围".to_string(),
+                    description: "说明具体文件、模块、组件、数据目录或功能入口。".to_string(),
+                    preview: None,
+                    recommended: true,
+                    custom: false,
+                    custom_placeholder: None,
+                },
+                ask_user_question::QuestionOption {
+                    label: "目标结果".to_string(),
+                    description: "说明希望得到的行为、输出文件、表格格式或验收标准。".to_string(),
                     preview: None,
                     recommended: false,
                     custom: false,
                     custom_placeholder: None,
                 },
                 ask_user_question::QuestionOption {
-                    label: "Outcome".to_string(),
-                    description: "Clarify the exact behavior or result you want after the change."
-                        .to_string(),
-                    preview: None,
-                    recommended: false,
-                    custom: false,
-                    custom_placeholder: None,
-                },
-                ask_user_question::QuestionOption {
-                    label: "Guardrails".to_string(),
-                    description: "Clarify constraints, risks, or what must not change.".to_string(),
+                    label: "限制条件".to_string(),
+                    description: "说明不能改动的内容、运行环境、风险边界或格式要求。".to_string(),
                     preview: None,
                     recommended: false,
                     custom: false,
@@ -735,8 +735,7 @@ fn build_clarification_first_block(
         assistant_response,
         interactive_question: Some(structured_question),
         post_answer_response: Some(
-            "Thanks — now please reply in free text with the concrete detail you selected. \
-             Include exact file/module names, desired behavior, and any constraints that matter."
+            "已记录你的选择。请直接在输入框补充具体内容；收到后我会基于这次选择继续执行，不会把这次中断当作任务完成。"
                 .to_string(),
         ),
     }
@@ -861,6 +860,9 @@ fn looks_like_evidence_needed_request(text: &str) -> bool {
 
 fn looks_like_materially_ambiguous(text: &str) -> bool {
     let t = normalize(text);
+    if looks_like_capability_discovery_request(&t) {
+        return false;
+    }
     let has_vague_pointer = contains_any(
         &t,
         &[
@@ -917,6 +919,29 @@ fn looks_like_materially_ambiguous(text: &str) -> bool {
 
     (has_vague_pointer && broad_action && !has_specific_anchor(text))
         || t.len() < 24 && has_vague_pointer
+}
+
+fn looks_like_capability_discovery_request(normalized_text: &str) -> bool {
+    let asks_whether = contains_any(
+        normalized_text,
+        &[
+            "whether",
+            "if it supports",
+            "if this supports",
+            "does it support",
+            "does this support",
+            "是否",
+            "能否",
+            "有没有",
+            "可不可以",
+        ],
+    );
+    let conditional_followup = contains_any(
+        normalized_text,
+        &["if so", "if supported", "如果支持", "若支持", "要是支持"],
+    );
+    (asks_whether || conditional_followup)
+        && contains_any(normalized_text, &["support", "supports", "支持"])
 }
 
 fn looks_like_deliverable_request(text: &str) -> bool {
@@ -1064,7 +1089,7 @@ mod tests {
         assert!(block.is_some());
         let block = block.unwrap();
         assert_eq!(block.id, "clarification_first");
-        assert!(block.assistant_response.contains("clarification"));
+        assert!(block.assistant_response.contains("确认"));
         assert!(block.interactive_question.is_some());
     }
 
@@ -1088,7 +1113,47 @@ mod tests {
         let block = block.unwrap();
         assert_eq!(block.id, "clarification_first");
         assert!(block.tool_result_message.contains("ask_user_question"));
-        assert!(block.interactive_question.is_some());
+        let ask = block
+            .interactive_question
+            .as_ref()
+            .expect("interactive question");
+        let first = &ask.questions[0].options[0];
+        assert_eq!(first.label, "修改范围");
+        assert!(first.recommended);
+        assert!(block
+            .post_answer_response
+            .as_deref()
+            .is_some_and(|text| text.contains("不会把这次中断当作任务完成")));
+    }
+
+    #[test]
+    fn clarification_post_response_does_not_interrupt_after_tool_activity() {
+        let harness = RuntimeConstraintHarness::default();
+        let mut state = RuntimeConstraintState::default();
+        state.record_tool_names(["bash"]);
+        let pending = Vec::<String>::new();
+
+        let block = harness.post_response_block(
+            &PostResponseConstraintContext {
+                request_text: "Please improve this.",
+                assistant_text: "The command failed while checking the project.",
+                pending_tool_names: &pending,
+                is_subagent: false,
+            },
+            &state,
+        );
+
+        assert!(block.is_none());
+    }
+
+    #[test]
+    fn clarification_heuristic_allows_capability_discovery_followups() {
+        assert!(!looks_like_materially_ambiguous(
+            "这个软件是否支持slurm任务提交，如果支持，帮我写一个任务提交脚本"
+        ));
+        assert!(!looks_like_materially_ambiguous(
+            "Does this project support SLURM job submission? If so, write a submission script."
+        ));
     }
 
     #[test]

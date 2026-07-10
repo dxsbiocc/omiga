@@ -14,10 +14,6 @@
 #
 #   Notifications:
 #     PushNotification — native notification validation
-#
-#   Git worktrees:
-#     EnterWorktree    — enter git worktree validation
-#     ExitWorktree     — exit git worktree validation
 
 set -euo pipefail
 

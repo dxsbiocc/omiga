@@ -1,7 +1,7 @@
 import { memo } from "react";
 import { Chip, Stack, Typography } from "@mui/material";
 import { alpha } from "@mui/material/styles";
-import { CheckCircle, ExpandMore } from "@mui/icons-material";
+import { CheckCircle, ErrorOutline, ExpandMore } from "@mui/icons-material";
 import type { getChatTokens } from "./chatTokens";
 import { formatToolDisplayName } from "../../utils/executionSurfaceLabel";
 
@@ -96,6 +96,46 @@ export function toolGroupAnyRunning(
   messages: readonly ToolSummaryMessage[],
 ): boolean {
   return messages.some((m) => m.toolCall?.status === "running");
+}
+
+export function toolGroupAnyError(messages: readonly ToolSummaryMessage[]): boolean {
+  return messages.some((m) => {
+    if (!m.toolCall) return false;
+    return (
+      m.toolCall.status === "error" ||
+      parseStructuredToolErrorHint(toolDisplayOutputText(m, m.toolCall)) !== null
+    );
+  });
+}
+
+export function assistantTextIsToolLoopStop(text: string | undefined): boolean {
+  const normalized = text?.trim().toLowerCase();
+  if (!normalized) return false;
+  return [
+    "本轮没有稳定完成",
+    "没有生成可交付的最终回复",
+    "工具已执行，但没有生成最终回复",
+    "模型没有继续输出总结",
+    "已达到工具调用上限",
+    "exceeded maximum tool rounds",
+    "autopilot stopped",
+    "[cancelled",
+    "cancelled by user",
+  ].some((needle) => normalized.includes(needle));
+}
+
+export function toolGroupHeaderAnyError(
+  messages: readonly ToolSummaryMessage[],
+  finalAssistantText?: string,
+): boolean {
+  if (assistantTextIsToolLoopStop(finalAssistantText)) {
+    return true;
+  }
+  const hasFinalAssistantText = Boolean(finalAssistantText?.trim());
+  if (hasFinalAssistantText) {
+    return false;
+  }
+  return toolGroupAnyError(messages);
 }
 
 /** Name of a tool call still running (prefer the latest in the fold). */
@@ -241,6 +281,7 @@ export interface ToolFoldHeaderProps {
   expanded: boolean;
   summary: string;
   anyRunning: boolean;
+  anyError: boolean;
   runningToolName: string | null;
   runningToolCount: number;
   showGroupDone: boolean;
@@ -256,6 +297,7 @@ export const ToolFoldHeader = memo(function ToolFoldHeader({
   expanded,
   summary,
   anyRunning,
+  anyError,
   runningToolName,
   runningToolCount,
   showGroupDone,
@@ -332,7 +374,17 @@ export const ToolFoldHeader = memo(function ToolFoldHeader({
           sx={{ height: 22, fontSize: 11 }}
         />
       )}
-      {showGroupDone && (
+      {showGroupDone && anyError && (
+        <Chip
+          size="small"
+          icon={<ErrorOutline fontSize="small" />}
+          label="Error"
+          color="error"
+          variant="outlined"
+          sx={{ height: 22, fontSize: 11 }}
+        />
+      )}
+      {showGroupDone && !anyError && (
         <Chip
           size="small"
           icon={<CheckCircle fontSize="small" />}

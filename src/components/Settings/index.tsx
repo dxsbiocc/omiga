@@ -76,7 +76,7 @@ interface SettingsProps {
   onClose: () => void;
   /** See `openSettingsTabMap.ts`: 0–15 */
   initialTab?: number;
-  /** When `initialTab` is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
+  /** When `initialTab` is Execution (9): inner tab; currently SSH-only */
   initialExecutionSubTab?: number;
 }
 
@@ -1064,14 +1064,6 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     defaultModel: "gpt-4",
     placeholder: "https://{resource}.openai.azure.com/",
     docsUrl: "https://portal.azure.com/",
-  },
-  google: {
-    name: "Google (Gemini)",
-    requiresSecretKey: false,
-    requiresAppId: false,
-    defaultModel: "gemini-1.5-pro",
-    placeholder: "AIzaSy...",
-    docsUrl: "https://aistudio.google.com/app/apikey",
   },
   minimax: {
     name: "MiniMax",

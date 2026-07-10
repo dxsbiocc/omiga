@@ -28,7 +28,8 @@ export const WORKFLOW_SLASH_COMMANDS: WorkflowSlashCommandDefinition[] = [
   {
     id: "research",
     label: "/research",
-    description: "调用分层 Research System。支持 init / list-agents / plan / run / review-traces。",
+    description:
+      "科研任务入口：自然语言任务走实时分析；管理命令仅支持 init / list-agents / list-proposals / review-traces / approve-proposal。",
   },
   {
     id: "goal",
@@ -52,7 +53,9 @@ export function parseWorkflowCommand(
   input: string,
 ): ParsedWorkflowCommand | null {
   const trimmed = input.trim();
-  const match = trimmed.match(/^\/(plan|schedule|team|autopilot)(?:\s+(.*))?$/iu);
+  const match = trimmed.match(
+    /^\/(plan|schedule|team|autopilot)(?:\s+([\s\S]*))?$/iu,
+  );
   if (!match) return null;
   return {
     command: match[1].toLowerCase() as WorkflowCommandId,
@@ -69,12 +72,20 @@ export function parseResearchCommand(
   input: string,
 ): ParsedResearchCommand | null {
   const trimmed = input.trim();
-  const match = trimmed.match(/^\/research(?:\s+(.*))?$/iu);
+  const match = trimmed.match(/^\/research(?:\s+([\s\S]*))?$/iu);
   if (!match) return null;
   return {
     command: "research",
     body: (match[1] ?? "").trim(),
   };
+}
+
+export function shouldInvokeResearchSystemCommand(body: string): boolean {
+  const trimmed = body.trim();
+  if (!trimmed) return true;
+  return /^(init|list-agents|list-proposals|review-traces|approve-proposal|help)(?:\s|$)/iu.test(
+    trimmed,
+  );
 }
 
 export interface ParsedGoalCommand {
@@ -84,7 +95,7 @@ export interface ParsedGoalCommand {
 
 export function parseGoalCommand(input: string): ParsedGoalCommand | null {
   const trimmed = input.trim();
-  const match = trimmed.match(/^\/goal(?:\s+(.*))?$/iu);
+  const match = trimmed.match(/^\/goal(?:\s+([\s\S]*))?$/iu);
   if (!match) return null;
   return {
     command: "goal",

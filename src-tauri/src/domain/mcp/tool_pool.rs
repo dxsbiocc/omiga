@@ -66,18 +66,9 @@ pub async fn discover_mcp_tool_schemas(project_root: &Path, timeout: Duration) -
         match res {
             Ok(tools) => {
                 for t in tools {
-                    let fq = build_mcp_tool_name(&server_name, t.name.as_ref());
-                    if is_reserved_computer_mcp_tool(&fq) {
-                        tracing::debug!(
-                            tool = %fq,
-                            "reserved Computer Use MCP backend tool hidden behind computer_* facade"
-                        );
-                        continue;
+                    if let Some(schema) = tool_schema_from_mcp_tool(&server_name, &t) {
+                        out.push(schema);
                     }
-                    let desc = t.description.as_deref().unwrap_or("MCP tool").to_string();
-                    let params = serde_json::to_value(&*t.input_schema)
-                        .unwrap_or_else(|_| json!({"type": "object"}));
-                    out.push(ToolSchema::new(fq, desc, params));
                 }
             }
             Err(e) => {
@@ -87,6 +78,38 @@ pub async fn discover_mcp_tool_schemas(project_root: &Path, timeout: Duration) -
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+fn tool_schema_from_mcp_tool(server_name: &str, tool: &rmcp::model::Tool) -> Option<ToolSchema> {
+    let fq = build_mcp_tool_name(server_name, tool.name.as_ref());
+    if is_reserved_computer_mcp_tool(&fq) {
+        tracing::debug!(
+            tool = %fq,
+            "reserved Computer Use MCP backend tool hidden behind computer_* facade"
+        );
+        return None;
+    }
+
+    let desc = tool
+        .description
+        .as_deref()
+        .unwrap_or("MCP tool")
+        .to_string();
+    let params =
+        serde_json::to_value(&*tool.input_schema).unwrap_or_else(|_| json!({"type": "object"}));
+    let schema = ToolSchema::new(fq, desc, params);
+    Some(
+        if tool
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.read_only_hint)
+            == Some(true)
+        {
+            schema.concurrency_safe()
+        } else {
+            schema
+        },
+    )
 }
 
 fn enabled_mcp_server_names(
@@ -108,6 +131,7 @@ fn enabled_mcp_server_names(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::{Tool as McpTool, ToolAnnotations};
 
     #[test]
     fn filters_cached_schemas_to_current_mcp_servers() {
@@ -135,6 +159,42 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["mcp__playwright__browser_navigate"]);
+    }
+
+    #[test]
+    fn mcp_tool_with_read_only_hint_true_is_concurrency_safe() {
+        let tool = McpTool::new(
+            "search",
+            "Search",
+            serde_json::Map::from_iter([("type".to_string(), json!("object"))]),
+        )
+        .with_annotations(ToolAnnotations::new().read_only(true));
+
+        let schema = tool_schema_from_mcp_tool("docs", &tool).expect("schema");
+
+        assert_eq!(schema.name, "mcp__docs__search");
+        assert!(schema.concurrency_safe);
+    }
+
+    #[test]
+    fn mcp_tool_missing_or_false_read_only_hint_is_not_concurrency_safe() {
+        let missing_hint = McpTool::new(
+            "lookup",
+            "Lookup",
+            serde_json::Map::from_iter([("type".to_string(), json!("object"))]),
+        );
+        let false_hint = McpTool::new(
+            "update",
+            "Update",
+            serde_json::Map::from_iter([("type".to_string(), json!("object"))]),
+        )
+        .with_annotations(ToolAnnotations::new().read_only(false));
+
+        let missing_schema = tool_schema_from_mcp_tool("docs", &missing_hint).expect("schema");
+        let false_schema = tool_schema_from_mcp_tool("docs", &false_hint).expect("schema");
+
+        assert!(!missing_schema.concurrency_safe);
+        assert!(!false_schema.concurrency_safe);
     }
 
     #[test]
