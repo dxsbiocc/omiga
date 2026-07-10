@@ -563,6 +563,7 @@ async fn run_remote_bash_ssh(
         timeout: Some(timeout_ms),
         cwd: Some(remote_cwd),
         stdin_data: None,
+        ..Default::default()
     };
     let exec_result = {
         let mut guard = env.lock().await;
@@ -600,6 +601,7 @@ async fn run_remote_bash_docker(
         timeout: Some(timeout_ms),
         cwd: Some(cwd),
         stdin_data: None,
+        ..Default::default()
     };
     let exec_result = {
         let mut guard = env.lock().await;
@@ -639,6 +641,7 @@ async fn run_remote_bash_singularity(
         timeout: Some(timeout_ms),
         cwd: Some(cwd),
         stdin_data: None,
+        ..Default::default()
     };
     let exec_result = {
         let mut guard = env.lock().await;
@@ -724,6 +727,7 @@ impl super::ToolImpl for BashTool {
                     timeout: Some(timeout_ms),
                     cwd: Some(remote_cwd),
                     stdin_data: None,
+                    ..Default::default()
                 };
                 let exec_result = {
                     let mut guard = env_arc.lock().await;
@@ -778,6 +782,7 @@ impl super::ToolImpl for BashTool {
                     timeout: Some(timeout_ms),
                     cwd: Some(remote_cwd),
                     stdin_data: None,
+                    ..Default::default()
                 };
                 let exec_result = {
                     let mut guard = env_arc.lock().await;

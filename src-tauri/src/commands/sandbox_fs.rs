@@ -352,6 +352,7 @@ pub async fn sandbox_write_file(
                     timeout: Some(SANDBOX_TIMEOUT_MS),
                     stdin_data: Some(content),
                     cwd: None,
+                    ..Default::default()
                 },
             )
             .await
