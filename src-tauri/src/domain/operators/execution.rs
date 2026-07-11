@@ -1,8 +1,46 @@
 use super::*;
+use crate::domain::operators::outputs::read_environment_text_tail;
 
 const OPERATOR_DEFAULT_MAX_ATTEMPTS: u32 = 2;
 const OPERATOR_MAX_MAX_ATTEMPTS: u32 = 5;
 const OPERATOR_CACHE_SCAN_LIMIT: usize = 200;
+const OPERATOR_CONDA_ENV_EXPLICIT_FINGERPRINT_FILE: &str = "logs/conda-env-explicit.txt";
+const OPERATOR_CONDA_ENV_EXPLICIT_FINGERPRINT_BYTES: u64 = 8 * 1024 * 1024;
+
+fn sha256_hex_from_bytes(raw: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(raw);
+    format!("{digest:x}")
+}
+
+fn read_local_conda_env_fingerprint(run_dir: &str) -> (Option<String>, Option<bool>) {
+    let path = Path::new(run_dir).join(OPERATOR_CONDA_ENV_EXPLICIT_FINGERPRINT_FILE);
+    let path = path.to_string_lossy();
+    let Some(fingerprint) = sha256_file(path.as_ref()) else {
+        return (None, None);
+    };
+    (Some(fingerprint), Some(true))
+}
+
+async fn read_remote_conda_env_fingerprint(
+    ctx: &crate::domain::tools::ToolContext,
+    run_dir: &str,
+) -> (Option<String>, Option<bool>) {
+    let Some(raw) = read_environment_text_tail(
+        ctx,
+        run_dir,
+        OPERATOR_CONDA_ENV_EXPLICIT_FINGERPRINT_FILE,
+        OPERATOR_CONDA_ENV_EXPLICIT_FINGERPRINT_BYTES,
+    )
+    .await
+    .ok()
+    .flatten() else {
+        return (None, None);
+    };
+    let fingerprint = sha256_hex_from_bytes(raw.as_bytes());
+    (Some(fingerprint), Some(true))
+}
+
 pub type OperatorQueueStatusSender = tokio::sync::mpsc::UnboundedSender<(String, String)>;
 
 tokio::task_local! {
@@ -572,6 +610,12 @@ async fn record_operator_cache_hit(
         source_run_id: Some(hit.run_id.clone()),
         source_run_dir: Some(hit.run_dir.clone()),
     };
+    let (environment_fingerprint, environment_explicit_present) =
+        if surface.kind == OperatorExecutionSurfaceKind::Local {
+            read_local_conda_env_fingerprint(&hit.run_dir)
+        } else {
+            read_remote_conda_env_fingerprint(ctx, &hit.run_dir).await
+        };
     let export_dir = if surface.kind == OperatorExecutionSurfaceKind::Local {
         let source_out = PathBuf::from(&hit.run_dir).join("out");
         Some(
@@ -618,6 +662,8 @@ async fn record_operator_cache_hit(
             format!("{run_dir}/provenance.json")
         }),
         export_dir,
+        environment_fingerprint,
+        environment_explicit_present,
         markdown_report,
         outputs: hit.result.outputs.clone(),
         structured_outputs: hit.result.structured_outputs.clone(),
@@ -641,6 +687,37 @@ async fn record_operator_cache_hit(
             .await?;
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn reads_local_conda_environment_fingerprint_from_run_dir() {
+        let tmp = tempdir().unwrap();
+        let run_dir = tmp.path().join("local-run");
+        fs::create_dir_all(run_dir.join("logs")).unwrap();
+        let sidecar = run_dir.join("logs/conda-env-explicit.txt");
+        let content = b"name==1.0.0\npackage-1.0-0\n";
+        fs::write(&sidecar, content).unwrap();
+
+        let expected = format!("{:x}", Sha256::digest(content));
+        let run_dir = run_dir.to_string_lossy();
+        assert_eq!(
+            read_local_conda_env_fingerprint(run_dir.as_ref()),
+            (Some(expected.clone()), Some(true))
+        );
+
+        fs::remove_file(&sidecar).unwrap();
+        assert_eq!(
+            read_local_conda_env_fingerprint(run_dir.as_ref()),
+            (None, None)
+        );
+    }
 }
 
 fn record_local_operator_cache_hit(
@@ -1725,6 +1802,8 @@ pub(crate) async fn execute_local(
     };
     let markdown_report =
         operator_result_markdown_report(resolved, export_dir.as_deref(), &outputs);
+    let (environment_fingerprint, environment_explicit_present) =
+        read_local_conda_env_fingerprint(run_dir);
     if let (Some(export_dir), Some(report)) = (export_dir.as_deref(), markdown_report.as_deref()) {
         if let Err(error) = write_local_operator_result_readme(export_dir, report) {
             let error = error.with_run_dir(run_dir);
@@ -1742,6 +1821,8 @@ pub(crate) async fn execute_local(
         run_context,
         provenance_path: Some(provenance_path.to_string_lossy().into_owned()),
         export_dir,
+        environment_fingerprint,
+        environment_explicit_present,
         markdown_report,
         outputs,
         structured_outputs,
@@ -1930,6 +2011,8 @@ pub(crate) async fn execute_in_environment(
         };
     let markdown_report =
         operator_result_markdown_report(resolved, export_dir.as_deref(), &outputs);
+    let (environment_fingerprint, environment_explicit_present) =
+        read_remote_conda_env_fingerprint(ctx, run_dir).await;
     if let (Some(export_dir), Some(report)) = (export_dir.as_deref(), markdown_report.as_deref()) {
         if let Err(error) = write_environment_operator_result_readme(ctx, export_dir, report).await
         {
@@ -1948,6 +2031,8 @@ pub(crate) async fn execute_in_environment(
         run_context,
         provenance_path: Some(format!("{run_dir}/provenance.json")),
         export_dir,
+        environment_fingerprint,
+        environment_explicit_present,
         markdown_report,
         outputs,
         structured_outputs,

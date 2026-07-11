@@ -425,8 +425,9 @@ OMIGA_CONDA_YAML={env_yaml}
 OMIGA_CONDA_SRC={env_source}
 OMIGA_CONDA_HASH={env_hash}
 OMIGA_CONDA_SOURCE_KIND={source_kind}
+OMIGA_CONDA_FINGERPRINT_FILE={fingerprint_file}
 OMIGA_MICROMAMBA="${{OMIGA_MICROMAMBA:-$HOME/.omiga/bin/micromamba}}"
-mkdir -p "$(dirname "$OMIGA_CONDA_YAML")" "$(dirname "$OMIGA_CONDA_PREFIX")"
+mkdir -p "$(dirname "$OMIGA_CONDA_YAML")" "$(dirname "$OMIGA_CONDA_PREFIX")" "$(dirname "$OMIGA_CONDA_FINGERPRINT_FILE")"
 printf %s {env_yaml_b64} | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$OMIGA_CONDA_SRC"
 omiga_find_conda_manager() {{
   OMIGA_CONDA_MANAGER_KIND=
@@ -497,6 +498,17 @@ if [ ! -f "$OMIGA_CONDA_PREFIX/.omiga-env-hash" ] || [ "$(cat "$OMIGA_CONDA_PREF
   fi
   printf '%s' "$OMIGA_CONDA_HASH" > "$OMIGA_CONDA_PREFIX/.omiga-env-hash"
 fi
+case "$OMIGA_CONDA_MANAGER_KIND" in
+  micromamba)
+    "$OMIGA_CONDA_BIN" env export -p "$OMIGA_CONDA_PREFIX" --explicit --md5 > "$OMIGA_CONDA_FINGERPRINT_FILE" 2>/dev/null || true
+    ;;
+  mamba)
+    "$OMIGA_CONDA_BIN" env export -p "$OMIGA_CONDA_PREFIX" --explicit --md5 > "$OMIGA_CONDA_FINGERPRINT_FILE" 2>/dev/null || true
+    ;;
+  conda)
+    "$OMIGA_CONDA_BIN" list -p "$OMIGA_CONDA_PREFIX" --explicit --md5 > "$OMIGA_CONDA_FINGERPRINT_FILE" 2>/dev/null || true
+    ;;
+esac
 {exports}
 case "${{OMIGA_CONDA_MANAGER_KIND:-}}" in
   micromamba)
@@ -520,6 +532,7 @@ esac"#,
         env_yaml_b64 = sh_quote(&selection.source_b64),
         exports = exports,
         inner = sh_quote(inner_command),
+        fingerprint_file = sh_quote(&format!("{run_dir}/logs/conda-env-explicit.txt")),
         bootstrap = MICROMAMBA_BOOTSTRAP_SHELL,
     )
 }
@@ -705,10 +718,50 @@ mod tests {
 
         assert!(command.contains("OMIGA_CONDA_SOURCE_KIND='explicit_lock'"));
         assert!(command.contains("OMIGA_CONDA_SRC='/tmp/oprun_conda/env/conda-linux-64.lock'"));
+        assert!(command.contains(
+            "OMIGA_CONDA_FINGERPRINT_FILE='/tmp/oprun_conda/logs/conda-env-explicit.txt'"
+        ));
+        assert!(command.contains("case \"$OMIGA_CONDA_MANAGER_KIND\" in"));
+        assert!(
+            command.contains(
+                "\"$OMIGA_CONDA_BIN\" env export -p \"$OMIGA_CONDA_PREFIX\" --explicit --md5 > \"$OMIGA_CONDA_FINGERPRINT_FILE\" 2>/dev/null || true"
+            )
+        );
+        assert!(
+            command.contains(
+                "\"$OMIGA_CONDA_BIN\" list -p \"$OMIGA_CONDA_PREFIX\" --explicit --md5 > \"$OMIGA_CONDA_FINGERPRINT_FILE\" 2>/dev/null || true"
+            )
+        );
         assert!(
             command.contains("create -y -p \"$OMIGA_CONDA_PREFIX\" --file \"$OMIGA_CONDA_SRC\"")
         );
         assert!(command.contains("printf %s"));
         assert!(command.contains("> \"$OMIGA_CONDA_SRC\""));
+    }
+
+    #[test]
+    fn shell_script_preserves_yaml_path_and_exports_fingerprint() {
+        let selection = OperatorCondaEnvironmentSelection {
+            env_prefix: "/tmp/conda-prefix".to_string(),
+            source_b64: base64::engine::general_purpose::STANDARD.encode("name: test\n"),
+            source_filename: "conda-environment.yaml".to_string(),
+            kind: CondaSourceKind::Yaml,
+            env_hash: "abcd1234".to_string(),
+            env_vars: BTreeMap::new(),
+        };
+        let command = conda_environment_shell_script(&selection, "/tmp/oprun_conda", "demoalign");
+
+        assert!(command.contains("OMIGA_CONDA_SOURCE_KIND='yaml'"));
+        assert!(command.contains("OMIGA_CONDA_SRC='/tmp/oprun_conda/env/conda-environment.yaml'"));
+        assert!(
+            command.contains(
+                "\"$OMIGA_CONDA_BIN\" env export -p \"$OMIGA_CONDA_PREFIX\" --explicit --md5 > \"$OMIGA_CONDA_FINGERPRINT_FILE\" 2>/dev/null || true"
+            )
+        );
+        assert!(
+            command.contains(
+                "\"$OMIGA_CONDA_BIN\" list -p \"$OMIGA_CONDA_PREFIX\" --explicit --md5 > \"$OMIGA_CONDA_FINGERPRINT_FILE\" 2>/dev/null || true"
+            )
+        );
     }
 }

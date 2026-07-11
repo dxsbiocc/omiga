@@ -199,6 +199,10 @@ pub(crate) struct OperatorRunResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) export_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) environment_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) environment_explicit_present: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) markdown_report: Option<String>,
     pub(crate) outputs: BTreeMap<String, Vec<ArtifactRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
