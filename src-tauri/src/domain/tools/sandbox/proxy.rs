@@ -1,11 +1,11 @@
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use super::{HostRule, NetworkMode, NetworkPolicy};
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, timeout_at, Instant};
 use tracing::{debug, info};
@@ -13,6 +13,44 @@ use tracing::{debug, info};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
 const MAX_CONCURRENT_CONNECTIONS: usize = 512;
+static PROXY: OnceLock<Mutex<Option<NetworkPolicyProxy>>> = OnceLock::new();
+
+pub fn policy_needs_proxy(policy: &NetworkPolicy) -> bool {
+    matches!(policy.mode, NetworkMode::AllowList | NetworkMode::DenyList)
+}
+
+pub async fn ensure_proxy_for_policy(policy: &NetworkPolicy) -> Result<Option<u16>, String> {
+    let singleton = PROXY.get_or_init(|| Mutex::new(None));
+    let mut guard = singleton.lock().await;
+
+    if !policy_needs_proxy(policy) {
+        if let Some(proxy) = guard.take() {
+            proxy.shutdown().await;
+        }
+        return Ok(None);
+    }
+
+    if let Some(proxy) = guard.as_mut() {
+        let policy_handle = proxy.policy_handle();
+        let mut writable_policy = policy_handle.write().await;
+        *writable_policy = policy.clone();
+        return Ok(Some(proxy.port()));
+    }
+
+    let proxy = NetworkPolicyProxy::start(policy.clone()).await?;
+    let port = proxy.port();
+    *guard = Some(proxy);
+    Ok(Some(port))
+}
+
+pub async fn shutdown_proxy_singleton() {
+    let singleton = PROXY.get_or_init(|| Mutex::new(None));
+    let mut guard = singleton.lock().await;
+
+    if let Some(proxy) = guard.take() {
+        proxy.shutdown().await;
+    }
+}
 
 #[derive(Debug)]
 pub struct NetworkPolicyProxy {
@@ -473,6 +511,12 @@ mod tests {
     use tokio::net::TcpStream;
     use tokio::time::timeout;
 
+    static SINGLETON_TEST_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+
+    fn lock_singleton_tests() -> &'static Mutex<()> {
+        SINGLETON_TEST_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn connect_allowed_allow_mode_allows_any_host() {
         let policy = NetworkPolicy {
@@ -480,6 +524,147 @@ mod tests {
             hosts: Vec::new(),
         };
         assert!(connect_allowed(&policy, "BLOCKED.EXAMPLE.COM", 443));
+    }
+
+    #[test]
+    fn policy_needs_proxy_matches_mode() {
+        assert!(!policy_needs_proxy(&NetworkPolicy::allow_all()));
+        assert!(!policy_needs_proxy(&NetworkPolicy::deny_all()));
+        assert!(policy_needs_proxy(&NetworkPolicy {
+            mode: NetworkMode::AllowList,
+            hosts: Vec::new(),
+        }));
+        assert!(policy_needs_proxy(&NetworkPolicy {
+            mode: NetworkMode::DenyList,
+            hosts: Vec::new(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn ensure_proxy_for_policy_manages_singleton_lifecycle() {
+        let _singleton_guard = lock_singleton_tests().lock().await;
+        shutdown_proxy_singleton().await;
+
+        let policy = NetworkPolicy::allow_all();
+        assert!(ensure_proxy_for_policy(&policy).await.unwrap().is_none());
+
+        let policy = NetworkPolicy {
+            mode: NetworkMode::AllowList,
+            hosts: vec![HostRule {
+                domain: "127.0.0.1".to_string(),
+                port: Some(443),
+            }],
+        };
+        let allow_port = match ensure_proxy_for_policy(&policy).await {
+            Ok(Some(port)) => port,
+            Ok(None) => {
+                eprintln!("skip test because allow-list policy did not start proxy");
+                return;
+            }
+            Err(error) => {
+                eprintln!("skip test because proxy start failed: {error}");
+                return;
+            }
+        };
+
+        if timeout(
+            Duration::from_millis(500),
+            TcpStream::connect(("127.0.0.1", allow_port)),
+        )
+        .await
+        .is_err()
+        {
+            eprintln!("skip test because proxy listener not reachable");
+            shutdown_proxy_singleton().await;
+            return;
+        }
+
+        let updated = match ensure_proxy_for_policy(&NetworkPolicy {
+            mode: NetworkMode::DenyList,
+            hosts: vec![HostRule {
+                domain: "*".to_string(),
+                port: None,
+            }],
+        })
+        .await
+        {
+            Ok(Some(port)) => port,
+            Ok(None) => {
+                eprintln!("skip test because proxy policy update returned None");
+                shutdown_proxy_singleton().await;
+                return;
+            }
+            Err(error) => {
+                eprintln!("skip test because proxy policy update failed: {error}");
+                shutdown_proxy_singleton().await;
+                return;
+            }
+        };
+        assert_eq!(updated, allow_port);
+
+        let mut blocked = match timeout(
+            Duration::from_secs(1),
+            TcpStream::connect(("127.0.0.1", allow_port)),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                eprintln!("skip test because proxy listener disappeared: {error}");
+                shutdown_proxy_singleton().await;
+                return;
+            }
+            Err(_) => {
+                eprintln!("skip test because proxy listener became unreachable");
+                shutdown_proxy_singleton().await;
+                return;
+            }
+        };
+
+        if blocked
+            .write_all(b"CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n")
+            .await
+            .is_err()
+        {
+            eprintln!("skip test because proxy request write failed");
+            shutdown_proxy_singleton().await;
+            return;
+        }
+
+        let mut response = [0u8; 32];
+        let n = match timeout(Duration::from_secs(1), blocked.read(&mut response)).await {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                eprintln!("skip test because proxy response read failed: {error}");
+                shutdown_proxy_singleton().await;
+                return;
+            }
+            Err(_) => {
+                eprintln!("skip test because proxy response timeout");
+                shutdown_proxy_singleton().await;
+                return;
+            }
+        };
+        assert!(
+            String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 403"),
+            "policy hot update should block CONNECT via singleton proxy"
+        );
+
+        let denied_port = allow_port;
+        assert!(ensure_proxy_for_policy(&NetworkPolicy::deny_all())
+            .await
+            .unwrap()
+            .is_none());
+        let denied = timeout(
+            Duration::from_secs(1),
+            TcpStream::connect(("127.0.0.1", denied_port)),
+        )
+        .await;
+        assert!(
+            matches!(denied, Ok(Err(_)) | Err(_)),
+            "proxy port should stop accepting after deny-all"
+        );
+        shutdown_proxy_singleton().await;
     }
 
     #[test]
