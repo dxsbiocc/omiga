@@ -52,10 +52,11 @@ impl ToolImpl for EnvironmentProfileCheckTool {
         } else {
             None
         };
-        let runtime_availability = resolution
-            .profile
-            .as_ref()
-            .map(|profile| runtime_availability_for_profile(ctx, profile));
+        let runtime_availability = if let Some(profile) = resolution.profile.as_ref() {
+            Some(runtime_availability_for_profile(ctx, profile).await)
+        } else {
+            None
+        };
         let output = serde_json::json!({
             "envRef": args.env_ref,
             "providerPlugin": args.provider_plugin,
@@ -96,11 +97,13 @@ pub fn schema() -> ToolSchema {
     .concurrency_safe()
 }
 
-fn runtime_availability_for_profile(
+async fn runtime_availability_for_profile(
     ctx: &ToolContext,
     profile: &EnvironmentProfileSummary,
 ) -> JsonValue {
-    environment_availability::probe_profile_and_cache(ctx, profile).as_json_value()
+    environment_availability::probe_profile_and_cache_async(ctx, profile)
+        .await
+        .as_json_value()
 }
 
 #[cfg(test)]
@@ -109,6 +112,86 @@ mod tests {
     use crate::infrastructure::streaming::StreamOutputItem;
     use futures::StreamExt;
     use serde_json::json;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    static PLUGIN_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn scaffold_local_environment_profile_plugin(home: &std::path::Path) -> (String, String) {
+        let plugin_name = "n4a-local-profile-check";
+        let plugin_id = format!("{plugin_name}@local");
+        let env_id = "n4a-local-runtime-check";
+
+        let plugin_root = home
+            .join(".omiga")
+            .join("plugins")
+            .join("cache")
+            .join("local")
+            .join(plugin_name)
+            .join("local");
+
+        let manifest_root = plugin_root.join(".omiga-plugin");
+        std::fs::create_dir_all(&manifest_root).expect("write plugin root");
+        std::fs::write(
+            manifest_root.join("plugin.json"),
+            r#"{"name":"n4a-local-profile-check","version":"local","description":"N4a test plugin"}"#,
+        )
+        .expect("write plugin manifest");
+
+        let environment_root = plugin_root.join("environments");
+        std::fs::create_dir_all(&environment_root).expect("write environment root");
+        std::fs::write(
+            environment_root.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: n4a-local-runtime-check
+  version: 0.1.0
+runtime:
+  type: system
+  command: /bin/sh
+"#,
+        )
+        .expect("write environment profile");
+
+        let config_path = home.join(".omiga").join("plugins").join("config.json");
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).expect("write omiga home");
+        }
+        let config = serde_json::json!({
+            "plugins": { plugin_id.clone(): { "enabled": true } },
+            "marketplaces": []
+        });
+        std::fs::write(
+            config_path,
+            serde_json::to_string_pretty(&config).expect("serialize plugin config"),
+        )
+        .expect("write plugin config");
+
+        (plugin_id, env_id.to_string())
+    }
 
     #[tokio::test]
     async fn reports_missing_environment_without_running_check_by_default() {
@@ -131,12 +214,12 @@ mod tests {
             .contains("diagnostic and allowlisted"));
     }
 
-    #[test]
-    fn conda_runtime_availability_reports_install_hint_or_found_manager() {
+    #[tokio::test]
+    async fn conda_runtime_availability_reports_install_hint_or_found_manager() {
         let ctx = ToolContext::new(std::env::temp_dir());
         let profile = profile_with_runtime(json!({ "type": "conda" }));
 
-        let availability = runtime_availability_for_profile(&ctx, &profile);
+        let availability = runtime_availability_for_profile(&ctx, &profile).await;
 
         assert_eq!(availability["runtimeType"], "conda");
         assert!(matches!(
@@ -149,12 +232,12 @@ mod tests {
             .contains("$HOME/.omiga/bin/micromamba"));
     }
 
-    #[test]
-    fn docker_runtime_availability_reports_runtime_guidance() {
+    #[tokio::test]
+    async fn docker_runtime_availability_reports_runtime_guidance() {
         let ctx = ToolContext::new(std::env::temp_dir());
         let profile = profile_with_runtime(json!({ "type": "docker" }));
 
-        let availability = runtime_availability_for_profile(&ctx, &profile);
+        let availability = runtime_availability_for_profile(&ctx, &profile).await;
 
         assert_eq!(availability["runtimeType"], "docker");
         assert!(matches!(
@@ -167,19 +250,48 @@ mod tests {
             .contains("Docker"));
     }
 
-    #[test]
-    fn remote_runtime_availability_is_not_run_locally() {
+    #[tokio::test]
+    async fn remote_runtime_availability_is_not_run_locally() {
         let ctx = ToolContext::new(std::env::temp_dir()).with_execution_environment("ssh");
         let profile = profile_with_runtime(json!({ "type": "singularity" }));
 
-        let availability = runtime_availability_for_profile(&ctx, &profile);
+        let availability = runtime_availability_for_profile(&ctx, &profile).await;
 
         assert_eq!(availability["status"], "notRun");
         assert_eq!(availability["runtimeType"], "singularity");
+        assert_eq!(availability["scope"], "ssh");
         assert!(availability["message"]
             .as_str()
             .unwrap()
-            .contains("local-only"));
+            .contains("远端探测未能执行"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_local_profile_on_current_thread_runtime_returns_runtime_availability() {
+        let _plugin_env_lock = PLUGIN_TEST_ENV_LOCK.lock().expect("plugin env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let _home_env = ScopedEnvVar::set("HOME", home.to_string_lossy().as_ref());
+        let _user_profile_env = ScopedEnvVar::set("USERPROFILE", home.to_string_lossy().as_ref());
+        let (provider_plugin, env_ref) = scaffold_local_environment_profile_plugin(&home);
+
+        let value = tokio::time::timeout(
+            Duration::from_secs(10),
+            execute_to_json(
+                &ToolContext::new(std::env::temp_dir()),
+                EnvironmentProfileCheckArgs {
+                    env_ref,
+                    provider_plugin: Some(provider_plugin),
+                    run_check: false,
+                },
+            ),
+        )
+        .await
+        .expect("environment_profile_check execution timed out");
+
+        assert_eq!(value["resolution"]["status"], "resolved");
+        assert!(value["runtimeAvailability"].is_object());
+        assert_eq!(value["runtimeAvailability"]["scope"], "local");
     }
 
     async fn execute_to_json(

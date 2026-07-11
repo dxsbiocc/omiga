@@ -1,8 +1,7 @@
-use crate::domain::env_hygiene;
 use crate::domain::environments::{
     environment_summary, EnvironmentProfileSummary, EnvironmentSpecWithSource,
 };
-use crate::domain::tools::bash::prepend_venv_activation;
+use crate::domain::tools::env_store;
 use crate::domain::tools::ToolContext;
 use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,6 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
 
 const ENVIRONMENT_STATE_DIR_NAME: &str = ".omiga";
@@ -281,53 +279,47 @@ pub fn cached_record_at_path(
     load_cache_at_path(path).records.get(canonical_id).cloned()
 }
 
-pub fn probe_and_cache_profiles_with_context(
+async fn probe_and_cache_profiles_with_context_async(
     ctx: &ToolContext,
     profiles: &[EnvironmentSpecWithSource],
 ) -> Vec<EnvironmentAvailabilityRecord> {
-    let records = profiles
-        .iter()
-        .map(|profile| {
-            let summary = environment_summary(profile.clone());
-            runtime_availability_for_profile(ctx, &summary)
-        })
-        .collect::<Vec<_>>();
+    let mut records = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        let summary = environment_summary(profile.clone());
+        let record = runtime_availability_for_profile_async(ctx, &summary).await;
+        records.push(record);
+    }
     let _ = store_records(&records);
     records
 }
 
-pub fn probe_and_cache_profiles_at_path(
+#[cfg(test)]
+async fn probe_and_cache_profiles_at_path_async(
     path: &Path,
     profiles: &[EnvironmentSpecWithSource],
 ) -> Vec<EnvironmentAvailabilityRecord> {
-    let records = profiles
-        .iter()
-        .map(|profile| {
-            let summary = environment_summary(profile.clone());
-            let ctx = ToolContext::new(std::env::temp_dir());
-            runtime_availability_for_profile(&ctx, &summary)
-        })
-        .collect::<Vec<_>>();
+    let ctx = ToolContext::new(std::env::temp_dir());
+    let records = probe_and_cache_profiles_with_context_async(&ctx, profiles).await;
     let _ = store_records_at_path(path, &records);
     records
 }
 
-pub fn probe_and_cache_enabled_profiles(
+pub async fn probe_and_cache_enabled_profiles_with_context_async(
+    ctx: &ToolContext,
     plugin_id: Option<&str>,
 ) -> Vec<EnvironmentAvailabilityRecord> {
     let scope = refresh_scope_for_plugin_id(plugin_id);
     let profiles = environment_profiles_for_refresh(plugin_id);
-    let records =
-        probe_and_cache_profiles_with_context(&ToolContext::new(std::env::temp_dir()), &profiles);
+    let records = probe_and_cache_profiles_with_context_async(ctx, &profiles).await;
     let _ = replace_records_at_path(&cache_file_path(), scope, &records);
     records
 }
 
-pub fn probe_profile_and_cache(
+pub async fn probe_profile_and_cache_async(
     ctx: &ToolContext,
     profile: &EnvironmentProfileSummary,
 ) -> EnvironmentAvailabilityRecord {
-    let record = runtime_availability_for_profile(ctx, profile);
+    let record = runtime_availability_for_profile_async(ctx, profile).await;
     if let Err(err) = store_record(&record) {
         tracing::warn!(
             canonical_id = %record.canonical_id,
@@ -338,7 +330,7 @@ pub fn probe_profile_and_cache(
     record
 }
 
-pub fn runtime_availability_for_profile(
+pub async fn runtime_availability_for_profile_async(
     ctx: &ToolContext,
     profile: &EnvironmentProfileSummary,
 ) -> EnvironmentAvailabilityRecord {
@@ -349,51 +341,37 @@ pub fn runtime_availability_for_profile(
         .unwrap_or("system")
         .trim()
         .to_ascii_lowercase();
-
-    if ctx.execution_environment != "local" {
-        return EnvironmentAvailabilityRecord {
-            canonical_id: profile.canonical_id.clone(),
-            runtime_type: runtime_type.clone(),
-            status: "notRun".to_string(),
-            manager: None,
-            executable_path: None,
-            error: None,
-            message: "Runtime executable probing is local-only; run this check in the target base/virtual environment or ensure the remote target has the required runtime installed."
-                .to_string(),
-            install_hint: Some(runtime_install_hint(&runtime_type)),
-            checked_at_ms: current_epoch_ms(),
-            scope: ctx.execution_environment.clone(),
-            prewarm_status: None,
-            prewarmed_at_ms: None,
-            prewarm_error: None,
-        };
-    }
+    let scope = ctx.execution_environment.clone();
 
     match runtime_type.as_str() {
         "conda" | "mamba" | "micromamba" => {
-            probe_conda_manager(ctx, &profile.canonical_id)
+            probe_conda_manager(ctx, &scope, &profile.canonical_id).await
         }
         "docker" => {
             probe_single_runtime(
                 ctx,
+                &scope,
                 profile,
                 "docker",
                 &["docker"],
                 "Docker runtime is required but `docker` was not found in the active PATH/base environment/virtual environment.",
                 "Install Docker Desktop/Engine, make the docker CLI available in the selected environment, start the Docker daemon, then retry. Operator execution will run `docker version` before use.",
             )
+            .await
         }
         "singularity" => {
             probe_single_runtime(
                 ctx,
+                &scope,
                 profile,
                 "singularity",
                 &["singularity", "apptainer"],
                 "Singularity/Apptainer is required but neither `singularity` nor `apptainer` was found in the active PATH/base environment/virtual environment.",
                 "Install SingularityCE or Apptainer and make `singularity` or `apptainer` available in the selected environment, then retry.",
             )
+            .await
         }
-        "system" | "local" | "host" => probe_system_command(ctx, profile),
+        "system" | "local" | "host" => probe_system_command(ctx, &scope, profile).await,
         other => EnvironmentAvailabilityRecord {
             canonical_id: profile.canonical_id.clone(),
             runtime_type: other.to_string(),
@@ -406,7 +384,7 @@ pub fn runtime_availability_for_profile(
             ),
             install_hint: Some(runtime_install_hint(other)),
             checked_at_ms: current_epoch_ms(),
-            scope: "local".to_string(),
+            scope,
             prewarm_status: None,
             prewarmed_at_ms: None,
             prewarm_error: None,
@@ -414,8 +392,12 @@ pub fn runtime_availability_for_profile(
     }
 }
 
-fn probe_conda_manager(ctx: &ToolContext, canonical_id: &str) -> EnvironmentAvailabilityRecord {
-    match run_local_probe(ctx, CONDA_MANAGER_PROBE_SCRIPT) {
+async fn probe_conda_manager(
+    ctx: &ToolContext,
+    scope: &str,
+    canonical_id: &str,
+) -> EnvironmentAvailabilityRecord {
+    match run_local_probe_async(ctx, CONDA_MANAGER_PROBE_SCRIPT).await {
         Ok((manager, path)) => EnvironmentAvailabilityRecord {
             canonical_id: canonical_id.to_string(),
             runtime_type: "conda".to_string(),
@@ -426,31 +408,25 @@ fn probe_conda_manager(ctx: &ToolContext, canonical_id: &str) -> EnvironmentAvai
             message: "A conda-compatible manager was found in the active PATH/base environment/virtual environment.".to_string(),
             install_hint: Some(runtime_install_hint("conda")),
             checked_at_ms: current_epoch_ms(),
-            scope: "local".to_string(),
+            scope: scope.to_string(),
             prewarm_status: None,
             prewarmed_at_ms: None,
             prewarm_error: None,
         },
-        Err(error) => EnvironmentAvailabilityRecord {
-            canonical_id: canonical_id.to_string(),
-            runtime_type: "conda".to_string(),
-            status: "missing".to_string(),
-            manager: None,
-            executable_path: None,
-            error: Some(error),
-            message: "No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment. Operator execution will bootstrap micromamba from official releases to $HOME/.omiga/bin/micromamba when needed.".to_string(),
-            install_hint: Some(runtime_install_hint("conda")),
-            checked_at_ms: current_epoch_ms(),
-            scope: "local".to_string(),
-            prewarm_status: None,
-            prewarmed_at_ms: None,
-            prewarm_error: None,
-        },
+        Err(error) => missing_or_not_run_probe_record(
+            canonical_id,
+            "conda",
+            error,
+            scope,
+            "No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment. Operator execution will bootstrap micromamba from official releases to $HOME/.omiga/bin/micromamba when needed.",
+            &runtime_install_hint("conda"),
+        ),
     }
 }
 
-fn probe_single_runtime(
+async fn probe_single_runtime(
     ctx: &ToolContext,
+    scope: &str,
     profile: &EnvironmentProfileSummary,
     runtime_type: &str,
     candidates: &[&str],
@@ -469,7 +445,7 @@ fn probe_single_runtime(
         .collect::<Vec<_>>()
         .join("\n")
         + "\nexit 127\n";
-    match run_local_probe(ctx, &script) {
+    match run_local_probe_async(ctx, &script).await {
         Ok((manager, path)) => EnvironmentAvailabilityRecord {
             canonical_id: profile.canonical_id.clone(),
             runtime_type: runtime_type.to_string(),
@@ -482,31 +458,25 @@ fn probe_single_runtime(
             ),
             install_hint: Some(install_hint.to_string()),
             checked_at_ms: current_epoch_ms(),
-            scope: "local".to_string(),
+            scope: scope.to_string(),
             prewarm_status: None,
             prewarmed_at_ms: None,
             prewarm_error: None,
         },
-        Err(error) => EnvironmentAvailabilityRecord {
-            canonical_id: profile.canonical_id.clone(),
-            runtime_type: runtime_type.to_string(),
-            status: "missing".to_string(),
-            manager: None,
-            executable_path: None,
-            error: Some(error),
-            message: missing_message.to_string(),
-            install_hint: Some(install_hint.to_string()),
-            checked_at_ms: current_epoch_ms(),
-            scope: "local".to_string(),
-            prewarm_status: None,
-            prewarmed_at_ms: None,
-            prewarm_error: None,
-        },
+        Err(error) => missing_or_not_run_probe_record(
+            &profile.canonical_id,
+            runtime_type,
+            error,
+            scope,
+            missing_message,
+            install_hint,
+        ),
     }
 }
 
-fn probe_system_command(
+async fn probe_system_command(
     ctx: &ToolContext,
+    scope: &str,
     profile: &EnvironmentProfileSummary,
 ) -> EnvironmentAvailabilityRecord {
     let Some(command) = profile
@@ -527,7 +497,7 @@ fn probe_system_command(
                 .to_string(),
             install_hint: profile.diagnostics.install_hint.clone(),
             checked_at_ms: current_epoch_ms(),
-            scope: "local".to_string(),
+            scope: scope.to_string(),
             prewarm_status: None,
             prewarmed_at_ms: None,
             prewarm_error: None,
@@ -535,6 +505,7 @@ fn probe_system_command(
     };
     probe_single_runtime(
         ctx,
+        scope,
         profile,
         "system",
         &[command],
@@ -545,32 +516,19 @@ fn probe_system_command(
             .as_deref()
             .unwrap_or("Install the required command or make it available on PATH, then retry."),
     )
+    .await
 }
 
-fn run_local_probe(ctx: &ToolContext, script: &str) -> Result<(String, String), String> {
-    let command_script =
-        prepend_venv_activation(&ctx.local_venv_type, &ctx.local_venv_name, script);
-    let keep_exemptions =
-        env_hygiene::keep_exemptions_from(std::env::var("OMIGA_ENV_KEEP").ok().as_deref());
-    let mut command = Command::new("/bin/sh");
-    command.arg("-lc").arg(command_script);
-    for name in env_hygiene::filter_env_vars(std::env::vars(), &keep_exemptions).1 {
-        command.env_remove(name);
-    }
-    let output = command.output().map_err(|err| err.to_string())?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr)
-            .chars()
-            .take(1000)
-            .collect::<String>();
-        return Err(if stderr.trim().is_empty() {
-            format!("probe exited with status {:?}", output.status.code())
-        } else {
-            stderr
-        });
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut parts = stdout
+async fn run_local_probe_async(
+    ctx: &ToolContext,
+    script: &str,
+) -> Result<(String, String), String> {
+    let output = env_store::run_probe_shell(ctx, script, ctx.timeout_secs).await?;
+    parse_probe_output(&output)
+}
+
+fn parse_probe_output(output: &str) -> Result<(String, String), String> {
+    let mut parts = output
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("")
@@ -581,6 +539,66 @@ fn run_local_probe(ctx: &ToolContext, script: &str) -> Result<(String, String), 
         return Err("probe did not return an executable path".to_string());
     }
     Ok((manager.to_string(), path.to_string()))
+}
+
+fn missing_or_not_run_probe_record(
+    canonical_id: &str,
+    runtime_type: &str,
+    error: String,
+    scope: &str,
+    missing_message: &str,
+    install_hint: &str,
+) -> EnvironmentAvailabilityRecord {
+    if is_remote_probe_missing(scope, &error) {
+        EnvironmentAvailabilityRecord {
+            canonical_id: canonical_id.to_string(),
+            runtime_type: runtime_type.to_string(),
+            status: "missing".to_string(),
+            manager: None,
+            executable_path: None,
+            error: Some(error),
+            message: missing_message.to_string(),
+            install_hint: Some(install_hint.to_string()),
+            checked_at_ms: current_epoch_ms(),
+            scope: scope.to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
+        }
+    } else {
+        EnvironmentAvailabilityRecord {
+            canonical_id: canonical_id.to_string(),
+            runtime_type: runtime_type.to_string(),
+            status: "notRun".to_string(),
+            manager: None,
+            executable_path: None,
+            error: Some(error.clone()),
+            message: format!("远端探测未能执行：{error}"),
+            install_hint: Some(install_hint.to_string()),
+            checked_at_ms: current_epoch_ms(),
+            scope: scope.to_string(),
+            prewarm_status: None,
+            prewarmed_at_ms: None,
+            prewarm_error: None,
+        }
+    }
+}
+
+fn is_remote_probe_missing(scope: &str, error: &str) -> bool {
+    if scope == "local" {
+        return true;
+    }
+    if let Some(code) = parse_probe_exit_code(error) {
+        return code == 127;
+    }
+    false
+}
+
+fn parse_probe_exit_code(error: &str) -> Option<i32> {
+    let marker = "probe command failed with status code ";
+    let rest = error.strip_prefix(marker)?;
+    let code = rest.split(':').next()?.trim();
+    code.parse().ok()
 }
 
 fn runtime_install_hint(runtime_type: &str) -> String {
@@ -654,6 +672,7 @@ mod tests {
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::process::Command;
     use std::thread;
     use tempfile::tempdir;
 
@@ -808,8 +827,8 @@ mod tests {
         assert_eq!(cached.status, "missing");
     }
 
-    #[test]
-    fn probe_and_cache_profiles_writes_records_at_path() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn probe_and_cache_profiles_writes_records_at_path() {
         let tmp = tempdir().expect("tempdir");
         let path = tmp.path().join("availability.json");
         let profile = sample_spec(
@@ -819,7 +838,8 @@ mod tests {
             "test-plugin@local",
         );
 
-        let records = probe_and_cache_profiles_at_path(&path, std::slice::from_ref(&profile));
+        let records =
+            probe_and_cache_profiles_at_path_async(&path, std::slice::from_ref(&profile)).await;
 
         assert_eq!(records.len(), 1);
         let cached = cached_record_at_path(&path, &environment_summary(profile).canonical_id)
@@ -827,8 +847,8 @@ mod tests {
         assert_eq!(cached.status, "missing");
     }
 
-    #[test]
-    fn run_local_probe_filters_sensitive_env_vars() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_local_probe_filters_sensitive_env_vars() {
         let _guard = RUN_LOCAL_PROBE_ENV_LOCK.lock().expect("environment lock");
         let _secret = ScopedEnv::set("FAKE_SECRET_TOKEN", "super-secret");
         let _keep = ScopedEnv::remove("OMIGA_ENV_KEEP");
@@ -836,10 +856,52 @@ mod tests {
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let script = r#"printf "micromamba\t${FAKE_SECRET_TOKEN:-absent}\n""#;
 
-        let (manager, path) = run_local_probe(&ctx, script).expect("probe succeeds");
+        let (manager, path) = run_local_probe_async(&ctx, script)
+            .await
+            .expect("probe succeeds");
 
         assert_eq!(manager, "micromamba");
         assert_eq!(path, "absent");
+    }
+
+    #[tokio::test]
+    async fn remote_runtime_availability_without_env_store_marks_not_run() {
+        let tmp = tempdir().expect("temp dir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf())
+            .with_execution_environment("ssh")
+            .with_ssh_server(Some("mock-gpu".to_string()));
+        let profile = sample_spec("remote-conda", "dummy-cmd", "conda", "remote@plugin");
+        let record =
+            runtime_availability_for_profile_async(&ctx, &environment_summary(profile)).await;
+
+        assert_eq!(record.scope, "ssh");
+        assert_eq!(record.status, "notRun");
+        assert!(record.message.contains("远端探测未能执行"));
+        assert_eq!(record.error.as_deref(), Some("no execution environment"));
+    }
+
+    #[test]
+    fn remote_probe_missing_status_distinguishes_missing_from_not_run_by_exit_code() {
+        let missing = missing_or_not_run_probe_record(
+            "remote-plugin/environment/conda",
+            "conda",
+            "probe command failed with status code 127".to_string(),
+            "ssh",
+            "missing runtime",
+            "bootstrap it",
+        );
+        let not_run = missing_or_not_run_probe_record(
+            "remote-plugin/environment/conda",
+            "conda",
+            "no execution environment".to_string(),
+            "ssh",
+            "missing runtime",
+            "bootstrap it",
+        );
+
+        assert_eq!(missing.status, "missing");
+        assert_eq!(not_run.status, "notRun");
+        assert!(not_run.message.contains("远端探测未能执行"));
     }
 
     #[test]

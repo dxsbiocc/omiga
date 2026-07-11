@@ -13,7 +13,8 @@
 //!
 //! Now only step 1 happens once per session; steps 2 repeat; step 3 runs at session teardown.
 
-use super::{ToolContext, ToolError};
+use super::{bash::prepend_venv_activation, ToolContext, ToolError};
+use crate::domain::env_hygiene;
 use crate::execution::{create_environment, BaseEnvironment, EnvironmentConfig, EnvironmentType};
 use crate::llm::config::merged_ssh_configs;
 use std::collections::HashMap;
@@ -211,6 +212,81 @@ pub fn remote_path(ctx: &ToolContext, path: &str) -> String {
     }
 }
 
+pub async fn run_probe_shell(
+    ctx: &ToolContext,
+    script: &str,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    if ctx.execution_environment == "local" {
+        let command_script =
+            prepend_venv_activation(&ctx.local_venv_type, &ctx.local_venv_name, script);
+        let keep_exemptions =
+            env_hygiene::keep_exemptions_from(std::env::var("OMIGA_ENV_KEEP").ok().as_deref());
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-lc").arg(command_script);
+        for name in env_hygiene::filter_env_vars(std::env::vars(), &keep_exemptions).1 {
+            command.env_remove(name);
+        }
+
+        let output = command.output().map_err(|err| err.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(1000)
+                .collect::<String>();
+            return Err(if stderr.trim().is_empty() {
+                format!("local probe exited with status {:?}", output.status.code())
+            } else {
+                stderr
+            });
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+
+    let store = ctx
+        .env_store
+        .as_ref()
+        .ok_or_else(|| "no execution environment".to_string())?;
+    let env = store
+        .get_or_create(ctx, timeout_secs.saturating_mul(1000))
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut guard = env.lock().await;
+    let exec_opts = crate::execution::ExecOptions {
+        timeout: Some(timeout_secs.saturating_mul(1000)),
+        cwd: Some(remote_path(ctx, ".")),
+        stdin_data: None,
+        env_remove_names: None,
+    };
+    let result = guard
+        .execute(script, exec_opts)
+        .await
+        .map_err(|err| err.to_string())?;
+    if result.returncode != 0 {
+        let stderr_tail = result
+            .output
+            .chars()
+            .rev()
+            .take(1024)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        return Err(if stderr_tail.trim().is_empty() {
+            format!(
+                "probe command failed with status code {}",
+                result.returncode
+            )
+        } else {
+            format!(
+                "probe command failed with status code {}: {}",
+                result.returncode, stderr_tail
+            )
+        });
+    }
+    Ok(result.output)
+}
+
 /// Remote project root for SSH sessions.
 ///
 /// SSH session project paths are remote POSIX paths selected by the user in the
@@ -343,6 +419,38 @@ fn build_sandbox_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use tempfile::tempdir;
+
+    struct ScopedEnv {
+        key: &'static str,
+        old: Option<OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: impl AsRef<str>) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value.as_ref());
+            Self { key, old }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    static RUN_PROBE_SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn ssh_remote_path_uses_session_project_root() {
@@ -373,5 +481,32 @@ mod tests {
             remote_path(&ctx, ".omiga/runs/oprun_123"),
             "/workspace/.omiga/runs/oprun_123"
         );
+    }
+
+    #[tokio::test]
+    async fn run_probe_shell_local_filters_sensitive_env_vars() {
+        let _guard = RUN_PROBE_SHELL_ENV_LOCK.lock().expect("environment lock");
+        let _secret = ScopedEnv::set("FAKE_SECRET_TOKEN", "super-secret");
+        let _keep = ScopedEnv::remove("OMIGA_ENV_KEEP");
+        let tmp = tempdir().expect("temp dir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let script = r#"printf "micromamba\t${FAKE_SECRET_TOKEN:-absent}\n""#;
+
+        let output = run_probe_shell(&ctx, script, 5)
+            .await
+            .expect("probe succeeds");
+
+        assert_eq!(output.trim_end(), "micromamba\tabsent");
+    }
+
+    #[tokio::test]
+    async fn run_probe_shell_remote_requires_env_store() {
+        let tmp = tempdir().expect("temp dir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf()).with_execution_environment("ssh");
+        let err = run_probe_shell(&ctx, "echo hi", 5)
+            .await
+            .expect_err("remote probe should fail when env_store is missing");
+
+        assert_eq!(err, "no execution environment");
     }
 }

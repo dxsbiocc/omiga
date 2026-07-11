@@ -16,6 +16,7 @@ use crate::domain::retrieval::providers::plugin_provider::{
     clear_global_plugin_process_pool, global_plugin_process_pool_statuses,
     PluginProcessPoolRouteStatus,
 };
+use crate::domain::tools::{env_store::EnvStore, ToolContext};
 use crate::errors::AppError;
 use std::path::{Path, PathBuf};
 use tauri::{Manager, State};
@@ -64,16 +65,33 @@ async fn invalidate_plugin_dependent_caches(app_state: &OmigaAppState) {
 }
 
 fn spawn_environment_availability_refresh(plugin_id: Option<String>) {
+    spawn_environment_availability_refresh_with_context(plugin_id, None, None, None)
+}
+
+fn spawn_environment_availability_refresh_with_context(
+    plugin_id: Option<String>,
+    execution_environment: Option<String>,
+    ssh_server: Option<String>,
+    sandbox_backend: Option<String>,
+) {
     tauri::async_runtime::spawn(async move {
+        let execution_environment = execution_environment.unwrap_or_else(|| "local".to_string());
+        let ctx = ToolContext::new(std::env::temp_dir())
+            .with_execution_environment(execution_environment.clone())
+            .with_ssh_server(ssh_server)
+            .with_sandbox_backend(sandbox_backend.unwrap_or_default())
+            .with_env_store(Some(EnvStore::new()));
         let result = if let Some(plugin_id) = plugin_id.clone() {
             let target = if plugin_id.trim().is_empty() {
                 None
             } else {
                 Some(plugin_id)
             };
-            let records = crate::domain::environment_availability::probe_and_cache_enabled_profiles(
+            let records = crate::domain::environment_availability::probe_and_cache_enabled_profiles_with_context_async(
+                &ctx,
                 target.as_deref(),
-            );
+            )
+            .await;
             if target.is_some() && records.is_empty() {
                 tracing::warn!(
                     plugin_id = %target.unwrap_or_default(),
@@ -82,7 +100,10 @@ fn spawn_environment_availability_refresh(plugin_id: Option<String>) {
             }
             records
         } else {
-            crate::domain::environment_availability::probe_and_cache_enabled_profiles(None)
+            crate::domain::environment_availability::probe_and_cache_enabled_profiles_with_context_async(
+                &ctx, None,
+            )
+            .await
         };
 
         if let Some(plugin_id) = plugin_id {
@@ -352,14 +373,30 @@ pub fn list_environment_availability(
 }
 
 #[tauri::command]
-pub fn refresh_environment_availability(
+pub async fn refresh_environment_availability(
     plugin_id: Option<String>,
+    execution_environment: Option<String>,
+    ssh_server: Option<String>,
+    sandbox_backend: Option<String>,
 ) -> Vec<crate::domain::environment_availability::EnvironmentAvailabilityRecord> {
     let plugin_id = plugin_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let execution_environment = execution_environment
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("local".to_string());
+    let sandbox_backend = sandbox_backend.filter(|value| !value.trim().is_empty());
+    let ctx = ToolContext::new(std::env::temp_dir())
+        .with_execution_environment(execution_environment)
+        .with_ssh_server(ssh_server.filter(|value| !value.trim().is_empty()))
+        .with_sandbox_backend(sandbox_backend.unwrap_or_default())
+        .with_env_store(Some(EnvStore::new()));
     let mut records =
-        environment_availability::probe_and_cache_enabled_profiles(plugin_id.as_deref());
+        environment_availability::probe_and_cache_enabled_profiles_with_context_async(
+            &ctx,
+            plugin_id.as_deref(),
+        )
+        .await;
     records.sort_by(|left, right| left.canonical_id.cmp(&right.canonical_id));
     records
 }
