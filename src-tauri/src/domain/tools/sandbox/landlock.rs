@@ -46,6 +46,7 @@ pub fn wrap_local_command(
     policy: &SandboxPolicy,
     writable_roots: &[PathBuf],
     command: &str,
+    _proxy_port: Option<u16>,
 ) -> Result<Command, String> {
     let mut cmd = Command::new("bash");
     cmd.arg("-l").arg("-c").arg(command);

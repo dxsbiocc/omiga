@@ -1069,7 +1069,32 @@ async fn run_bash_command_inner(
     _stream: bool,
     sandbox_disabled: bool,
 ) -> Result<BashRawOutput, ToolError> {
-    let (mut cmd, sandbox) = local_bash_command(command, cwd, sandbox_disabled)?;
+    let mut proxy_port = None;
+    if !sandbox_disabled && super::sandbox::network_proxy_enforcement_enabled() {
+        #[cfg(target_os = "macos")]
+        {
+            let net = super::sandbox::SandboxPolicy::from_env().network;
+            match super::sandbox::ensure_proxy_for_policy(&net).await {
+                Ok(found_port) => {
+                    proxy_port = found_port;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to start loopback proxy for network policy; continuing without proxy"
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            tracing::debug!(
+                "OMIGA_SANDBOX_NETWORK_PROXY requires macOS to enforce OS-level sandboxing; skipping on this platform."
+            );
+        }
+    }
+
+    let (mut cmd, sandbox) = local_bash_command(command, cwd, sandbox_disabled, proxy_port)?;
     cmd.current_dir(cwd);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -1152,18 +1177,25 @@ fn local_bash_command(
     command: &str,
     cwd: &Path,
     sandbox_disabled: bool,
+    proxy_port: Option<u16>,
 ) -> Result<(Command, LocalSandbox), ToolError> {
     // Read the process-global disable flag here, then delegate the decision to
     // the pure `build_local_bash_command`. Tests exercise the pure builder with
     // an explicit flag so they never call `setenv`, which is not thread-safe
     // against concurrent `getenv` under parallel `cargo test`.
-    build_local_bash_command(command, cwd, sandbox_disabled || sandbox_disabled_by_env())
+    build_local_bash_command(
+        command,
+        cwd,
+        sandbox_disabled || sandbox_disabled_by_env(),
+        proxy_port,
+    )
 }
 
 fn build_local_bash_command(
     command: &str,
     cwd: &Path,
     disabled: bool,
+    proxy_port: Option<u16>,
 ) -> Result<(Command, LocalSandbox), ToolError> {
     if disabled {
         return Ok((raw_bash_command(command), LocalSandbox::None));
@@ -1177,10 +1209,20 @@ fn build_local_bash_command(
             network = ?policy.network,
             "bash: using {backend} local sandbox"
         );
-        let command = super::sandbox::wrap_local_command(&policy, &writable_roots, command)
-            .map_err(|message| ToolError::ExecutionFailed {
-                message: format!("Failed to prepare local sandbox: {message}"),
-            })?;
+        let mut command =
+            super::sandbox::wrap_local_command(&policy, &writable_roots, command, proxy_port)
+                .map_err(|message| ToolError::ExecutionFailed {
+                    message: format!("Failed to prepare local sandbox: {message}"),
+                })?;
+
+        if let Some(proxy_port) = proxy_port {
+            let proxy = format!("http://127.0.0.1:{proxy_port}");
+            command.env("HTTP_PROXY", &proxy);
+            command.env("HTTPS_PROXY", &proxy);
+            command.env("http_proxy", &proxy);
+            command.env("https_proxy", &proxy);
+        }
+
         return Ok((command, active_local_sandbox()));
     }
 
@@ -1449,7 +1491,7 @@ mod tests {
         // Pure builder: not disabled -> sandbox wrapper when the platform
         // supports it. No `setenv`, so this is safe under parallel test runs.
         let dir = tempfile::tempdir().unwrap();
-        let (cmd, sandbox) = build_local_bash_command("true", dir.path(), false).unwrap();
+        let (cmd, sandbox) = build_local_bash_command("true", dir.path(), false, None).unwrap();
 
         if crate::domain::tools::sandbox::is_supported() {
             assert!(sandbox.is_enabled());
@@ -1480,7 +1522,7 @@ mod tests {
     fn global_sandbox_disable_env_bypasses_local_wrapper() {
         // The disable flag short-circuits the wrapper regardless of platform.
         let dir = tempfile::tempdir().unwrap();
-        let (_cmd, sandbox) = build_local_bash_command("true", dir.path(), true).unwrap();
+        let (_cmd, sandbox) = build_local_bash_command("true", dir.path(), true, None).unwrap();
         assert_eq!(sandbox, LocalSandbox::None);
     }
 
@@ -1527,6 +1569,69 @@ mod tests {
             &["Operation not permitted".to_string()],
             LocalSandbox::Seatbelt
         ));
+    }
+
+    #[test]
+    fn build_local_bash_command_injects_proxy_env_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cmd, _) = build_local_bash_command("true", dir.path(), false, Some(4567)).unwrap();
+        let std_command = cmd.as_std();
+        let expected = "http://127.0.0.1:4567";
+
+        let get = |command: &std::process::Command, key: &str| {
+            let key = std::ffi::OsString::from(key);
+            for (env_key, env_val) in command.get_envs() {
+                if env_key == key {
+                    if let Some(value) = env_val {
+                        return Some(value.to_os_string());
+                    }
+                    return None;
+                }
+            }
+            None
+        };
+
+        assert_eq!(
+            get(std_command, "HTTP_PROXY"),
+            Some(std::ffi::OsString::from(expected))
+        );
+        assert_eq!(
+            get(std_command, "HTTPS_PROXY"),
+            Some(std::ffi::OsString::from(expected))
+        );
+        assert_eq!(
+            get(std_command, "http_proxy"),
+            Some(std::ffi::OsString::from(expected))
+        );
+        assert_eq!(
+            get(std_command, "https_proxy"),
+            Some(std::ffi::OsString::from(expected))
+        );
+    }
+
+    #[test]
+    fn build_local_bash_command_without_proxy_does_not_inject_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cmd, _) = build_local_bash_command("true", dir.path(), false, None).unwrap();
+        let std_command = cmd.as_std();
+
+        let get = |command: &std::process::Command, key: &str| {
+            let key = std::ffi::OsString::from(key);
+            for (env_key, env_val) in command.get_envs() {
+                if env_key == key {
+                    if let Some(value) = env_val {
+                        return Some(value.to_os_string());
+                    }
+                    return None;
+                }
+            }
+            None
+        };
+
+        assert!(get(std_command, "HTTP_PROXY").is_none());
+        assert!(get(std_command, "HTTPS_PROXY").is_none());
+        assert!(get(std_command, "http_proxy").is_none());
+        assert!(get(std_command, "https_proxy").is_none());
     }
 
     #[cfg(target_os = "macos")]

@@ -15,6 +15,7 @@ pub mod proxy;
 mod seatbelt;
 
 pub use network::{HostRule, NetworkMode, NetworkPolicy};
+pub use proxy::ensure_proxy_for_policy;
 pub use proxy::{connect_allowed, NetworkPolicyProxy};
 
 use std::path::{Path, PathBuf};
@@ -125,6 +126,7 @@ pub fn wrap_local_command(
     policy: &SandboxPolicy,
     writable_roots: &[PathBuf],
     command: &str,
+    proxy_port: Option<u16>,
 ) -> Result<Command, String> {
     #[cfg(target_os = "macos")]
     {
@@ -132,17 +134,48 @@ pub fn wrap_local_command(
             policy,
             writable_roots,
             command,
+            proxy_port,
         ));
     }
     #[cfg(target_os = "linux")]
     {
-        return landlock::wrap_local_command(policy, writable_roots, command);
+        return landlock::wrap_local_command(policy, writable_roots, command, proxy_port);
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (policy, writable_roots);
+        let _ = (policy, writable_roots, proxy_port);
         let mut cmd = Command::new("bash");
         cmd.arg("-l").arg("-c").arg(command);
         Ok(cmd)
+    }
+}
+
+pub fn network_proxy_enforcement_enabled() -> bool {
+    parse_network_proxy_enforcement_flag(
+        std::env::var("OMIGA_SANDBOX_NETWORK_PROXY").ok().as_deref(),
+    )
+}
+
+fn parse_network_proxy_enforcement_flag(raw: Option<&str>) -> bool {
+    raw.map(str::trim).is_some_and(|value| {
+        value.eq_ignore_ascii_case("1")
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_proxy_enforcement_flag_parsing() {
+        assert!(!parse_network_proxy_enforcement_flag(None));
+        assert!(!parse_network_proxy_enforcement_flag(Some("")));
+        assert!(parse_network_proxy_enforcement_flag(Some("1")));
+        assert!(parse_network_proxy_enforcement_flag(Some("true")));
+        assert!(parse_network_proxy_enforcement_flag(Some("TRUE")));
+        assert!(parse_network_proxy_enforcement_flag(Some("yes")));
+        assert!(parse_network_proxy_enforcement_flag(Some("YeS")));
     }
 }

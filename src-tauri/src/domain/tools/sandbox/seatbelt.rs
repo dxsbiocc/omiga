@@ -36,7 +36,11 @@ pub fn default_writable_roots(cwd: &Path) -> Vec<PathBuf> {
     dedupe_paths(roots)
 }
 
-pub fn policy_text(policy: &SandboxPolicy, writable_roots: &[PathBuf]) -> String {
+pub fn policy_text(
+    policy: &SandboxPolicy,
+    writable_roots: &[PathBuf],
+    proxy_port: Option<u16>,
+) -> String {
     let mut sbpl = String::from(
         r#"(version 1)
 
@@ -102,7 +106,7 @@ pub fn policy_text(policy: &SandboxPolicy, writable_roots: &[PathBuf]) -> String
         sbpl.push_str(")\n\n");
     }
 
-    append_network_policy(&mut sbpl, policy);
+    append_network_policy(&mut sbpl, policy, proxy_port);
 
     sbpl
 }
@@ -111,10 +115,11 @@ pub fn wrap_local_command(
     policy: &SandboxPolicy,
     writable_roots: &[PathBuf],
     command: &str,
+    proxy_port: Option<u16>,
 ) -> Command {
     let mut cmd = Command::new(SANDBOX_EXEC_PATH);
     cmd.arg("-p")
-        .arg(policy_text(policy, writable_roots))
+        .arg(policy_text(policy, writable_roots, proxy_port))
         .arg("--")
         .arg("bash")
         .arg("-l")
@@ -146,7 +151,27 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     out
 }
 
-fn append_network_policy(sbpl: &mut String, policy: &SandboxPolicy) {
+fn append_network_policy(sbpl: &mut String, policy: &SandboxPolicy, proxy_port: Option<u16>) {
+    if let Some(proxy_port) = proxy_port {
+        if matches!(
+            policy.network.mode,
+            NetworkMode::AllowList | NetworkMode::DenyList
+        ) {
+            sbpl.push_str(
+                "; Domain enforcement is delegated to the loopback proxy for this command.\n",
+            );
+            sbpl.push_str(
+                "; Real domain allow/deny matching happens in the Rust proxy; sandbox only allows\n",
+            );
+            sbpl.push_str("; traffic to localhost.\n");
+            sbpl.push_str(&format!(
+                "(allow network-outbound (remote ip \"localhost:{}\"))\n",
+                proxy_port
+            ));
+            return;
+        }
+    }
+
     match policy.network.mode {
         NetworkMode::AllowAll => {
             sbpl.push_str(
@@ -253,7 +278,7 @@ mod tests {
             network: NetworkPolicy::allow_all(),
         };
 
-        let text = policy_text(&policy, &[cwd.clone(), tmpdir.clone()]);
+        let text = policy_text(&policy, &[cwd.clone(), tmpdir.clone()], None);
 
         assert!(text.contains("(deny default)"));
         assert!(text.contains("(allow file-read*)"));
@@ -274,7 +299,7 @@ mod tests {
         let policy = SandboxPolicy {
             network: NetworkPolicy::deny_all(),
         };
-        let text = policy_text(&policy, &[PathBuf::from("/tmp")]);
+        let text = policy_text(&policy, &[PathBuf::from("/tmp")], None);
 
         assert_eq!(policy.network.mode, NetworkMode::DenyAll);
         assert!(!text.contains("(allow network-outbound)"));
@@ -310,11 +335,32 @@ mod tests {
             },
         };
 
-        let text = policy_text(&policy, &[PathBuf::from("/tmp")]);
+        let text = policy_text(&policy, &[PathBuf::from("/tmp")], None);
 
         assert!(!text.contains("(allow network-outbound (remote tcp \"*:443\"))"));
         assert!(!text.contains("(allow network-outbound)"));
         assert!(text.contains("No allowlist entry could be represented"));
+    }
+
+    #[test]
+    fn allowlist_with_proxy_port_allows_only_loopback_proxy() {
+        let _guard = sandbox_test_lock();
+        let policy = SandboxPolicy {
+            network: NetworkPolicy {
+                mode: NetworkMode::AllowList,
+                hosts: vec![HostRule {
+                    domain: "api.foo.com".to_string(),
+                    port: Some(443),
+                }],
+            },
+        };
+
+        let text = policy_text(&policy, &[PathBuf::from("/tmp")], Some(4567));
+
+        assert!(text.contains("(allow network-outbound (remote ip \"localhost:4567\"))"));
+        assert!(!text.contains("(allow network-outbound (remote tcp"));
+        assert!(!text.contains("(deny network-outbound"));
+        assert!(!text.contains("(allow network-outbound)\n"));
     }
 
     #[test]
@@ -330,7 +376,7 @@ mod tests {
             },
         };
 
-        let text = policy_text(&policy, &[PathBuf::from("/tmp")]);
+        let text = policy_text(&policy, &[PathBuf::from("/tmp")], None);
 
         assert!(text.contains("(allow network-outbound (remote tcp \"*:443\"))"));
         assert!(!text.contains("\n(allow network-outbound)\n"));
@@ -349,7 +395,7 @@ mod tests {
             },
         };
 
-        let text = policy_text(&policy, &[PathBuf::from("/tmp")]);
+        let text = policy_text(&policy, &[PathBuf::from("/tmp")], None);
 
         assert!(text.contains("(deny network-outbound (remote tcp \"*:80\"))"));
         assert!(text.contains("(allow network-outbound)"));
@@ -368,7 +414,7 @@ mod tests {
             },
         };
 
-        let text = policy_text(&policy, &[PathBuf::from("/tmp")]);
+        let text = policy_text(&policy, &[PathBuf::from("/tmp")], None);
 
         assert!(!text.contains("(allow network-outbound)"));
         assert!(text.contains("could not be represented safely"));
@@ -488,7 +534,7 @@ mod tests {
     ) -> std::process::Command {
         let mut cmd = std::process::Command::new(SANDBOX_EXEC_PATH);
         cmd.arg("-p")
-            .arg(policy_text(policy, writable_roots))
+            .arg(policy_text(policy, writable_roots, None))
             .arg("--")
             .arg("bash")
             .arg("-l")
