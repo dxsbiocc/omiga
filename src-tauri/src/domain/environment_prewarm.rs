@@ -7,7 +7,7 @@ use crate::domain::operators::{
     OperatorContainerImagePrepare, OperatorContainerKind, OperatorExecutionSurfaceKind,
 };
 use crate::domain::plugins;
-use crate::domain::tools::ToolContext;
+use crate::domain::tools::{env_store, ToolContext};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -86,6 +86,17 @@ pub trait PrewarmRunner: Send + Sync {
 #[derive(Clone, Copy, Default)]
 pub struct LocalShellRunner;
 
+#[derive(Clone)]
+pub struct RemoteShellRunner {
+    pub ctx: ToolContext,
+}
+
+impl RemoteShellRunner {
+    pub fn new(ctx: ToolContext) -> Self {
+        Self { ctx }
+    }
+}
+
 #[async_trait]
 impl PrewarmRunner for LocalShellRunner {
     async fn run(&self, script: &str) -> Result<PrewarmOutcome, String> {
@@ -131,6 +142,19 @@ impl PrewarmRunner for LocalShellRunner {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         Err(format!("prewarm failed with exit code {code}: {stderr}"))
+    }
+}
+
+#[async_trait]
+impl PrewarmRunner for RemoteShellRunner {
+    async fn run(&self, script: &str) -> Result<PrewarmOutcome, String> {
+        let stdout = env_store::run_probe_shell(&self.ctx, script, PREWARM_TIMEOUT_SECS)
+            .await
+            .map_err(|err| format!("prewarm failed: {err}"))?;
+        Ok(PrewarmOutcome {
+            stdout,
+            stderr: String::new(),
+        })
     }
 }
 
@@ -1020,5 +1044,95 @@ mod tests {
             outcome.stdout.lines().next().unwrap_or_default(),
             "token=absent"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_shell_runner_uses_run_probe_shell_and_returns_stdout() {
+        let runner = RemoteShellRunner::new(ToolContext::new(std::env::temp_dir()));
+        let outcome = runner
+            .run("echo remote-runner-ok")
+            .await
+            .expect("remote runner run succeeded");
+
+        assert_eq!(
+            outcome.stdout.lines().next().unwrap_or_default(),
+            "remote-runner-ok"
+        );
+        assert_eq!(outcome.stderr, "");
+    }
+
+    #[tokio::test]
+    async fn remote_shell_runner_without_store_returns_error() {
+        let tmp = tempdir().expect("temp dir");
+        let runner = RemoteShellRunner::new(
+            ToolContext::new(tmp.path().to_path_buf())
+                .with_execution_environment("ssh")
+                .with_ssh_server(Some("mock-remote".to_string())),
+        );
+        let err = runner
+            .run("echo hi")
+            .await
+            .expect_err("remote probe should fail without env_store");
+
+        assert_eq!(err, "prewarm failed: no execution environment");
+    }
+
+    #[tokio::test]
+    async fn run_prewarm_tasks_executes_serially_with_remote_runner_and_updates_cache() {
+        let tmp = tempdir().expect("temp dir");
+        let cache = tmp.path().join("availability.json");
+        let tasks = vec![
+            PrewarmTask {
+                canonical_id: "plugin-a@local/environment/remote-a".to_string(),
+                runtime_kind: PrewarmRuntimeKind::Docker,
+                shell_script: prewarm_script_with_prelude("echo remote-a"),
+                dedupe_key: "remote-dedupe-1".to_string(),
+            },
+            PrewarmTask {
+                canonical_id: "plugin-a@local/environment/remote-b".to_string(),
+                runtime_kind: PrewarmRuntimeKind::Docker,
+                shell_script: prewarm_script_with_prelude("false"),
+                dedupe_key: "remote-dedupe-2".to_string(),
+            },
+            PrewarmTask {
+                canonical_id: "plugin-a@local/environment/remote-c".to_string(),
+                runtime_kind: PrewarmRuntimeKind::Docker,
+                shell_script: prewarm_script_with_prelude("echo remote-c"),
+                dedupe_key: "remote-dedupe-1".to_string(),
+            },
+        ];
+        let runner = RemoteShellRunner::new(ToolContext::new(tmp.path().to_path_buf()));
+
+        run_prewarm_tasks(&cache, &tasks, &runner)
+            .await
+            .expect("run prewarm");
+
+        let cache = environment_availability::load_cache_at_path(&cache);
+        let a = cache
+            .records
+            .get("plugin-a@local/environment/remote-a")
+            .expect("record a");
+        assert_eq!(a.prewarm_status.as_deref(), Some("warmed"));
+        assert_eq!(a.prewarm_error.as_deref(), None);
+
+        let b = cache
+            .records
+            .get("plugin-a@local/environment/remote-b")
+            .expect("record b");
+        assert_eq!(b.prewarm_status.as_deref(), Some("failed"));
+        let b_error = b.prewarm_error.as_deref().unwrap_or_default();
+        assert_eq!(b.prewarm_status.as_deref(), Some("failed"));
+        assert!(b_error.starts_with("prewarm failed: local probe exited with status"));
+
+        let c = cache
+            .records
+            .get("plugin-a@local/environment/remote-c")
+            .expect("record c");
+        assert_eq!(c.prewarm_status.as_deref(), Some("skipped"));
+        assert_eq!(
+            c.prewarm_error.as_deref().expect("missing skip reason"),
+            "prewarm skipped because same dedupe key was already processed in this process"
+        );
+        assert!(a.prewarmed_at_ms.is_some());
     }
 }

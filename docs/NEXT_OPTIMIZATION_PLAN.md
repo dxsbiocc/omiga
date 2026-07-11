@@ -13,7 +13,7 @@
 | N1 | operator 主执行链路继承环境清洗（env_hygiene 扩展） | P1 | ✅ 完成（829abf6+8c1290f）|
 | N2 | `operators/mod.rs`（13.8k 行）/ `plugins.rs`（8.9k 行）G8 式拆分 | P1 | ✅ 完成（operators 8 阶段 f2483cd..12a14df；plugins 3 阶段 327864e..bb753d2）。遗留：两个 mod.rs 根测试区（各 ~3.2k 行）按域拆分、plugins/mod.rs 生产核心 ~2.7k 行可再分 manifest/loading 两域 |
 | N3 | 网络代理式策略（对齐 codex network-proxy，堵子进程绕过） | P2 | ✅ 完成（d74de09/00c3b26/d5b00b9，macOS opt-in）。遗留：exec_session 长驻会话未纳入沙箱/代理（既有边界）；单例假设策略 env 恒定 |
-| N4 | 远端 surface 的环境预检与预热（SSH/Modal/Daytona） | P2 | 待办 |
+| N4 | 远端 surface 的环境预检与预热（SSH/Modal/Daytona） | P2 | ✅ 完成（b1155bb N4a 探测 + N4b 预热）。生命周期钩子默认仍 local，会话 ctx 自动继承留后续 |
 | N5 | conda lockfile 可复现性（conda-lock + ExecutionRecord 记录解析 hash） | P2 | 待办 |
 | N6 | 冗余清理（legacy operator 工具、migrationTarget、双轨自动化、分支垃圾） | P2 | 待办 |
 | N7 | 测试稳定性治理（环境敏感测试、定时 flake、unreachable! 收敛） | P3 | 待办 |
