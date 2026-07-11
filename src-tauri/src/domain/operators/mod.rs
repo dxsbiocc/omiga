@@ -105,7 +105,9 @@ pub use chains::{
     UserOperatorInput, UserOperatorOutput, UserOperatorParam,
 };
 #[cfg(test)]
-pub(crate) use conda_env::{conda_environment_shell_script, OperatorCondaEnvironmentSelection};
+pub(crate) use conda_env::{
+    conda_environment_shell_script, CondaSourceKind, OperatorCondaEnvironmentSelection,
+};
 #[cfg(test)]
 pub(crate) use container::container_runtime_preflight_script;
 pub(crate) use container::selected_direct_container;
@@ -456,6 +458,7 @@ mod tests {
     use crate::domain::environment_fallback::{
         classify_provisioning_failure, ProvisioningFailureKind,
     };
+    use base64::Engine as _;
     use std::ffi::{OsStr, OsString};
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -2756,7 +2759,9 @@ diagnostics:
     fn conda_environment_shell_script_filters_sensitive_env_vars() {
         let selection = OperatorCondaEnvironmentSelection {
             env_prefix: "/tmp/oprun_conda_envs/alignment".to_string(),
-            env_yaml_b64: "Y29uZGEtZW52".to_string(),
+            source_b64: "Y29uZGEtZW52".to_string(),
+            source_filename: "conda-environment.yaml".to_string(),
+            kind: CondaSourceKind::Yaml,
             env_hash: "abcd1234".to_string(),
             env_vars: BTreeMap::from([
                 ("MY_API_KEY".to_string(), "x".to_string()),
@@ -2769,6 +2774,26 @@ diagnostics:
 
         assert!(command.contains("export NORMAL_VAR='y'"));
         assert!(!command.contains("MY_API_KEY"));
+        assert!(command.contains("OMIGA_CONDA_YAML='/tmp/oprun_conda/env/conda-environment.yaml'"));
+    }
+
+    #[test]
+    fn conda_environment_shell_script_with_explicit_lock_source_uses_explicit_file_arg() {
+        let selection = OperatorCondaEnvironmentSelection {
+            env_prefix: "/tmp/oprun_conda_envs/alignment".to_string(),
+            source_b64: base64::engine::general_purpose::STANDARD.encode("@EXPLICIT\n"),
+            source_filename: "conda-linux-64.lock".to_string(),
+            kind: CondaSourceKind::ExplicitLock,
+            env_hash: "abcd1234".to_string(),
+            env_vars: BTreeMap::new(),
+        };
+        let command = conda_environment_shell_script(&selection, "/tmp/oprun_conda", "demoalign");
+
+        assert!(command.contains("OMIGA_CONDA_SRC='/tmp/oprun_conda/env/conda-linux-64.lock'"));
+        assert!(command.contains("--file \"$OMIGA_CONDA_SRC\""));
+        assert!(
+            command.contains("create -y -p \"$OMIGA_CONDA_PREFIX\" --file \"$OMIGA_CONDA_SRC\"")
+        );
     }
 
     #[tokio::test]
@@ -2828,7 +2853,9 @@ diagnostics:
                     .join("oprun_conda_env")
                     .to_string_lossy()
                     .into_owned(),
-                env_yaml_b64: "Y29uZGEtZW52".to_string(),
+                source_b64: "Y29uZGEtZW52".to_string(),
+                source_filename: "conda-environment.yaml".to_string(),
+                kind: CondaSourceKind::Yaml,
                 env_hash: "abcd1234".to_string(),
                 env_vars: BTreeMap::new(),
             },

@@ -137,6 +137,16 @@ the unit declares `runtime.envRef`:
   `conda.yaml` or `conda.yml`; the executor detects `OMIGA_MICROMAMBA`,
   `$HOME/.omiga/bin/micromamba`, `micromamba`, `mamba`, then `conda` in the
   active PATH/base environment/virtual environment.
+- Explicit per-platform lock files are also supported via
+  `runtime.condaLockFile` or `runtime.conda_lock_file` (for
+  `conda-lock --kind explicit`, typically `conda-linux-64.lock`,
+  `conda-osx-arm64.lock`, or `conda-osx-64.lock`). In this task, only
+  per-platform `.lock` files are supported for operator execution; unified
+  `conda-lock.yml` is intentionally not supported.
+- Platform selection strategy: declared lock path is preferred; otherwise, when
+  the manifest contains exactly one `conda-*.lock` file, it is used as the
+  convention match. If multiple convention candidates exist, users must set one of
+  `condaLockFile` / `conda_lock_file` explicitly.
 - Docker profiles use `runtime.image` or a standard `Dockerfile` next to
   `environment.yaml`; local runs can auto-build the image before `docker run`.
 - Singularity/Apptainer profiles use `runtime.image` or a standard

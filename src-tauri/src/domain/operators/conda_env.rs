@@ -1,13 +1,23 @@
 //! Operator conda execution helpers (migrated from execution.rs).
 
+use std::ffi::OsStr;
+
 use super::*;
 
 #[derive(Debug, Clone)]
 pub(crate) struct OperatorCondaEnvironmentSelection {
     pub(crate) env_prefix: String,
-    pub(crate) env_yaml_b64: String,
+    pub(crate) source_b64: String,
+    pub(crate) source_filename: String,
+    pub(crate) kind: CondaSourceKind,
     pub(crate) env_hash: String,
     pub(crate) env_vars: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CondaSourceKind {
+    Yaml,
+    ExplicitLock,
 }
 
 pub(crate) fn operator_conda_environment_command(
@@ -67,13 +77,40 @@ pub(crate) fn operator_conda_environment_selection(
     profile: &crate::domain::environments::EnvironmentProfileSummary,
     surface_kind: OperatorExecutionSurfaceKind,
 ) -> Result<OperatorCondaEnvironmentSelection, String> {
-    let conda_file = operator_conda_environment_file(profile)?;
-    let bytes = fs::read(&conda_file).map_err(|err| {
-        format!(
-            "Read conda environment file `{}`: {err}",
-            conda_file.display()
-        )
-    })?;
+    let (bytes, source_filename, source_kind) =
+        if let Some(conda_lock_file) = operator_conda_lock_file(profile, ctx)? {
+            let bytes = fs::read(&conda_lock_file).map_err(|err| {
+                format!(
+                    "Read conda lock file `{}`: {err}",
+                    conda_lock_file.display()
+                )
+            })?;
+            let source_filename = conda_lock_file
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or_else(|| {
+                    format!(
+                        "Conda/mamba environment profile `{}` lock filename is not valid UTF-8.",
+                        profile.canonical_id
+                    )
+                })?
+                .to_string();
+
+            (bytes, source_filename, CondaSourceKind::ExplicitLock)
+        } else {
+            let conda_file = operator_conda_environment_file(profile)?;
+            let bytes = fs::read(&conda_file).map_err(|err| {
+                format!(
+                    "Read conda environment file `{}`: {err}",
+                    conda_file.display()
+                )
+            })?;
+            (
+                bytes,
+                "conda-environment.yaml".to_string(),
+                CondaSourceKind::Yaml,
+            )
+        };
     let env_hash = sha256_hex(&bytes);
     let env_key = format!(
         "{}-{}",
@@ -84,10 +121,80 @@ pub(crate) fn operator_conda_environment_selection(
     use base64::{engine::general_purpose, Engine as _};
     Ok(OperatorCondaEnvironmentSelection {
         env_prefix,
-        env_yaml_b64: general_purpose::STANDARD.encode(bytes),
+        source_b64: general_purpose::STANDARD.encode(bytes),
+        source_filename,
+        kind: source_kind,
         env_hash,
         env_vars: profile.runtime.env.clone(),
     })
+}
+
+fn operator_conda_lock_file(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    _ctx: &crate::domain::tools::ToolContext,
+) -> Result<Option<PathBuf>, String> {
+    for key in ["condaLockFile", "conda_lock_file"] {
+        if let Some(raw) = profile_runtime_extra_str(profile, &[key]) {
+            let path = operator_profile_relative_path(profile, raw)?;
+            validate_conda_environment_lock_path(profile, raw, &path)?;
+            if !path.is_file() {
+                return Err(format!(
+                    "Environment profile `{}` declares conda lock file `{}` but it does not exist.",
+                    profile.canonical_id,
+                    path.display()
+                ));
+            }
+            return Ok(Some(path));
+        }
+    }
+
+    let manifest_dir = operator_environment_manifest_dir(profile)?;
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(&manifest_dir).map_err(|err| {
+        format!(
+            "Read environment manifest directory `{}`: {err}",
+            manifest_dir.display()
+        )
+    })? {
+        let entry = entry.map_err(|err| {
+            format!(
+                "Read environment manifest entry in `{}`: {err}",
+                manifest_dir.display()
+            )
+        })?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+
+        if !matches!(
+            path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.to_ascii_lowercase()),
+            Some(ext) if ext == "lock"
+        ) {
+            continue;
+        }
+        if !file_name.starts_with("conda-") {
+            continue;
+        }
+        if path.is_file() {
+            candidates.push(path);
+        }
+    }
+    candidates.sort();
+
+    if candidates.len() == 1 {
+        return Ok(candidates.pop());
+    }
+
+    if !candidates.is_empty() {
+        return Err(format!(
+            "Environment profile `{}` declares multiple explicit conda lock candidates in `{}`; set `runtime.condaLockFile` / `runtime.conda_lock_file` to select one.",
+            profile.canonical_id,
+            manifest_dir.display()
+        ));
+    }
+
+    Ok(None)
 }
 
 fn operator_conda_environment_file(
@@ -103,7 +210,7 @@ fn operator_conda_environment_file(
     ] {
         if let Some(raw) = profile_runtime_extra_str(profile, &[key]) {
             let path = operator_profile_relative_path(profile, raw)?;
-            validate_conda_environment_yaml_path(profile, &path)?;
+            validate_conda_environment_yaml_path(profile, raw, &path)?;
             if !path.is_file() {
                 return Err(format!(
                     "Environment profile `{}` declares conda YAML file `{}` but it does not exist.",
@@ -129,20 +236,72 @@ fn operator_conda_environment_file(
 
 fn validate_conda_environment_yaml_path(
     profile: &crate::domain::environments::EnvironmentProfileSummary,
+    raw: &str,
     path: &Path,
 ) -> Result<(), String> {
+    validate_conda_environment_declared_path(profile, raw, path, &["yaml", "yml"], "YAML file")?;
+    Ok(())
+}
+
+fn validate_conda_environment_lock_path(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    raw: &str,
+    path: &Path,
+) -> Result<(), String> {
+    validate_conda_environment_declared_path(profile, raw, path, &["lock"], "lock file")?;
+    Ok(())
+}
+
+fn validate_conda_environment_declared_path(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    raw: &str,
+    path: &Path,
+    extensions: &[&str],
+    kind: &str,
+) -> Result<(), String> {
+    if has_parent_directory(raw) {
+        return Err(format!(
+            "Conda/mamba environment profile `{}` declares a path with traversal (`{}`): `{}`.",
+            profile.canonical_id, kind, raw
+        ));
+    }
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase());
-    if !matches!(extension.as_deref(), Some("yaml" | "yml")) {
+    if extension.is_none()
+        || !extensions
+            .iter()
+            .any(|candidate| extension.as_deref() == Some(*candidate))
+    {
         return Err(format!(
-            "Conda/mamba environment profile `{}` must use a `.yaml` or `.yml` file; got `{}`.",
+            "Conda/mamba environment profile `{}` declares a non-{kind} file: `{}`. Allowed extensions: {}. must use a `.yaml` or `.yml` file.",
             profile.canonical_id,
-            path.display()
+            path.display(),
+            extensions.join(", ")
         ));
     }
     Ok(())
+}
+
+fn has_parent_directory(raw: &str) -> bool {
+    let mut depth: isize = 0;
+    for component in Path::new(raw).components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if depth <= 0 {
+                    return true;
+                }
+                depth -= 1;
+            }
+            std::path::Component::Normal(_) => depth += 1,
+            std::path::Component::CurDir | std::path::Component::RootDir => {
+                continue;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub(crate) fn operator_conda_env_prefix(
@@ -245,16 +404,30 @@ pub(crate) fn conda_environment_shell_script(
     inner_command: &str,
 ) -> String {
     let env_yaml = format!("{run_dir}/env/conda-environment.yaml");
+    let env_source = if selection.kind == CondaSourceKind::Yaml {
+        env_yaml.to_string()
+    } else {
+        format!(
+            "{run_dir}/env/{source_filename}",
+            source_filename = selection.source_filename
+        )
+    };
+    let source_kind = match selection.kind {
+        CondaSourceKind::Yaml => "yaml",
+        CondaSourceKind::ExplicitLock => "explicit_lock",
+    };
     let exports = crate::domain::env_hygiene::shell_export_lines(&selection.env_vars);
     format!(
         r#"{bootstrap}
 set -e
 OMIGA_CONDA_PREFIX={env_prefix}
 OMIGA_CONDA_YAML={env_yaml}
+OMIGA_CONDA_SRC={env_source}
 OMIGA_CONDA_HASH={env_hash}
+OMIGA_CONDA_SOURCE_KIND={source_kind}
 OMIGA_MICROMAMBA="${{OMIGA_MICROMAMBA:-$HOME/.omiga/bin/micromamba}}"
 mkdir -p "$(dirname "$OMIGA_CONDA_YAML")" "$(dirname "$OMIGA_CONDA_PREFIX")"
-printf %s {env_yaml_b64} | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$OMIGA_CONDA_YAML"
+printf %s {env_yaml_b64} | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$OMIGA_CONDA_SRC"
 omiga_find_conda_manager() {{
   OMIGA_CONDA_MANAGER_KIND=
   OMIGA_CONDA_BIN=
@@ -297,17 +470,31 @@ if [ ! -f "$OMIGA_CONDA_PREFIX/.omiga-env-hash" ] || [ "$(cat "$OMIGA_CONDA_PREF
     omiga_missing_conda_manager
   fi
   rm -rf "$OMIGA_CONDA_PREFIX"
-  case "$OMIGA_CONDA_MANAGER_KIND" in
-    micromamba)
-      "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
-      ;;
-    mamba)
-      "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
-      ;;
-    conda)
-      "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
-      ;;
-  esac
+  if [ "$OMIGA_CONDA_SOURCE_KIND" = "explicit_lock" ]; then
+    case "$OMIGA_CONDA_MANAGER_KIND" in
+      micromamba)
+        "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_SRC"
+        ;;
+      mamba)
+        "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" --file "$OMIGA_CONDA_SRC"
+        ;;
+      conda)
+        "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" --file "$OMIGA_CONDA_SRC"
+        ;;
+    esac
+  else
+    case "$OMIGA_CONDA_MANAGER_KIND" in
+      micromamba)
+        "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+        ;;
+      mamba)
+        "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+        ;;
+      conda)
+        "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+        ;;
+    esac
+  fi
   printf '%s' "$OMIGA_CONDA_HASH" > "$OMIGA_CONDA_PREFIX/.omiga-env-hash"
 fi
 {exports}
@@ -327,10 +514,201 @@ case "${{OMIGA_CONDA_MANAGER_KIND:-}}" in
 esac"#,
         env_prefix = sh_quote(&selection.env_prefix),
         env_yaml = sh_quote(&env_yaml),
+        env_source = sh_quote(&env_source),
+        source_kind = sh_quote(source_kind),
         env_hash = sh_quote(&selection.env_hash),
-        env_yaml_b64 = sh_quote(&selection.env_yaml_b64),
+        env_yaml_b64 = sh_quote(&selection.source_b64),
         exports = exports,
         inner = sh_quote(inner_command),
         bootstrap = MICROMAMBA_BOOTSTRAP_SHELL,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::environments::EnvironmentRuntimeProfile;
+    use base64::Engine as _;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use tempfile::tempdir;
+
+    fn build_conda_profile(
+        root: &Path,
+        profile_id: &str,
+        runtime_kind: &str,
+        extra: &[(&str, &str)],
+    ) -> crate::domain::environments::EnvironmentProfileSummary {
+        let manifest_dir = root.join("environments").join(profile_id);
+        fs::create_dir_all(&manifest_dir).expect("create manifest dir");
+        let manifest_path = manifest_dir.join("environment.yaml");
+        fs::write(&manifest_path, "name: test\n").expect("write manifest");
+
+        let mut runtime_extra = serde_json::Map::new();
+        for (key, value) in extra {
+            runtime_extra.insert((*key).to_string(), json!(value));
+        }
+
+        crate::domain::environments::EnvironmentProfileSummary {
+            id: profile_id.to_string(),
+            version: "0.1.0".to_string(),
+            canonical_id: format!("plugin-a/environment/{profile_id}"),
+            source_plugin: "plugin-a@local".to_string(),
+            manifest_path: manifest_path.to_string_lossy().into_owned(),
+            name: None,
+            description: None,
+            tags: Vec::new(),
+            runtime: EnvironmentRuntimeProfile {
+                kind: Some(runtime_kind.to_string()),
+                command: None,
+                args: Vec::new(),
+                image: None,
+                module: None,
+                env: BTreeMap::new(),
+                extra: runtime_extra,
+            },
+            requirements: crate::domain::environments::EnvironmentRequirements {
+                system: Vec::new(),
+                r_packages: Vec::new(),
+                notes: Vec::new(),
+            },
+            diagnostics: crate::domain::environments::EnvironmentDiagnostics {
+                install_hint: None,
+                check_command: Vec::new(),
+                notes: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn explicit_lock_profile_takes_lock_source() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let profile = build_conda_profile(
+            root,
+            "alignment",
+            "conda",
+            &[("condaLockFile", "./explicit.lock")],
+        );
+        let lock = root.join("environments/alignment/explicit.lock");
+        let lock_bytes =
+            b"https://conda.anaconda.org/conda-forge/noarch::demoalign-1.0-py_0.tar.bz2\n";
+        fs::write(&lock, lock_bytes).expect("write lock");
+        fs::write(
+            root.join("environments/alignment/conda.yaml"),
+            "channels: []\n",
+        )
+        .expect("write yaml");
+
+        let selection = operator_conda_environment_selection(
+            &crate::domain::tools::ToolContext::new(root.to_path_buf()),
+            &profile,
+            crate::domain::operators::OperatorExecutionSurfaceKind::Local,
+        )
+        .expect("select lock");
+
+        assert_eq!(selection.kind, CondaSourceKind::ExplicitLock);
+        assert_eq!(selection.source_filename, "explicit.lock");
+        assert_eq!(selection.env_hash, super::sha256_hex(lock_bytes));
+        assert_eq!(
+            selection.source_b64,
+            base64::engine::general_purpose::STANDARD.encode(lock_bytes)
+        );
+    }
+
+    #[test]
+    fn explicit_lock_convention_candidate_selected_when_singleton() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let profile = build_conda_profile(root, "alignment", "conda", &[]);
+        let lock = root.join("environments/alignment/conda-linux-64.lock");
+        let lock_bytes =
+            b"https://conda.anaconda.org/conda-forge/noarch::demoalign-1.0-py_0.tar.bz2\n";
+        fs::write(&lock, lock_bytes).expect("write lock");
+
+        let selection = operator_conda_environment_selection(
+            &crate::domain::tools::ToolContext::new(root.to_path_buf()),
+            &profile,
+            crate::domain::operators::OperatorExecutionSurfaceKind::Local,
+        )
+        .expect("select lock");
+
+        assert_eq!(selection.kind, CondaSourceKind::ExplicitLock);
+        assert_eq!(selection.source_filename, "conda-linux-64.lock");
+        assert_eq!(selection.env_hash, super::sha256_hex(lock_bytes));
+    }
+
+    #[test]
+    fn explicit_lock_path_traversal_is_rejected() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let profile = build_conda_profile(
+            root,
+            "alignment",
+            "conda",
+            &[("condaLockFile", "../outside.conda")],
+        );
+        let outside = root.join("outside.conda");
+        fs::write(&outside, "https://bad.example\n").expect("write lock outside");
+        fs::write(
+            root.join("environments/alignment/conda.yaml"),
+            "channels: []\n",
+        )
+        .expect("write yaml");
+
+        let error = operator_conda_environment_selection(
+            &crate::domain::tools::ToolContext::new(root.to_path_buf()),
+            &profile,
+            crate::domain::operators::OperatorExecutionSurfaceKind::Local,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("path with traversal"));
+    }
+
+    #[test]
+    fn yaml_selection_is_used_when_no_lock() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let profile = build_conda_profile(root, "alignment", "conda", &[]);
+        let yaml = root.join("environments/alignment/conda.yaml");
+        let yaml_bytes = b"name: test\ndependencies:\n  - demoalign\n";
+        fs::write(&yaml, yaml_bytes).expect("write yaml");
+
+        let selection = operator_conda_environment_selection(
+            &crate::domain::tools::ToolContext::new(root.to_path_buf()),
+            &profile,
+            crate::domain::operators::OperatorExecutionSurfaceKind::Local,
+        )
+        .expect("select yaml");
+
+        assert_eq!(selection.kind, CondaSourceKind::Yaml);
+        assert_eq!(selection.source_filename, "conda-environment.yaml");
+        assert_eq!(selection.env_hash, super::sha256_hex(yaml_bytes));
+        assert_eq!(
+            selection.source_b64,
+            base64::engine::general_purpose::STANDARD.encode(yaml_bytes)
+        );
+    }
+
+    #[test]
+    fn shell_script_preserves_yaml_path_and_uses_explicit_lock_source() {
+        let selection = OperatorCondaEnvironmentSelection {
+            env_prefix: "/tmp/conda-prefix".to_string(),
+            source_b64: base64::engine::general_purpose::STANDARD.encode("@EXPLICIT\n"),
+            source_filename: "conda-linux-64.lock".to_string(),
+            kind: CondaSourceKind::ExplicitLock,
+            env_hash: "abcd1234".to_string(),
+            env_vars: BTreeMap::new(),
+        };
+        let command = conda_environment_shell_script(&selection, "/tmp/oprun_conda", "demoalign");
+
+        assert!(command.contains("OMIGA_CONDA_SOURCE_KIND='explicit_lock'"));
+        assert!(command.contains("OMIGA_CONDA_SRC='/tmp/oprun_conda/env/conda-linux-64.lock'"));
+        assert!(
+            command.contains("create -y -p \"$OMIGA_CONDA_PREFIX\" --file \"$OMIGA_CONDA_SRC\"")
+        );
+        assert!(command.contains("printf %s"));
+        assert!(command.contains("> \"$OMIGA_CONDA_SRC\""));
+    }
 }
