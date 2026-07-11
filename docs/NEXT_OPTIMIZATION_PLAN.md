@@ -12,7 +12,7 @@
 | N0 | 合并 `feature/projectized-sidebar` 进 main（G1-G17 成果落地） | **P0** | ✅ 完成（a56bbc0，2026-07-10）|
 | N1 | operator 主执行链路继承环境清洗（env_hygiene 扩展） | P1 | ✅ 完成（829abf6+8c1290f）|
 | N2 | `operators/mod.rs`（13.8k 行）/ `plugins.rs`（8.9k 行）G8 式拆分 | P1 | ✅ 完成（operators 8 阶段 f2483cd..12a14df；plugins 3 阶段 327864e..bb753d2）。遗留：两个 mod.rs 根测试区（各 ~3.2k 行）按域拆分、plugins/mod.rs 生产核心 ~2.7k 行可再分 manifest/loading 两域 |
-| N3 | 网络代理式策略（对齐 codex network-proxy，堵子进程绕过） | P2 | 待办 |
+| N3 | 网络代理式策略（对齐 codex network-proxy，堵子进程绕过） | P2 | ✅ 完成（d74de09/00c3b26/d5b00b9，macOS opt-in）。遗留：exec_session 长驻会话未纳入沙箱/代理（既有边界）；单例假设策略 env 恒定 |
 | N4 | 远端 surface 的环境预检与预热（SSH/Modal/Daytona） | P2 | 待办 |
 | N5 | conda lockfile 可复现性（conda-lock + ExecutionRecord 记录解析 hash） | P2 | 待办 |
 | N6 | 冗余清理（legacy operator 工具、migrationTarget、双轨自动化、分支垃圾） | P2 | 待办 |
@@ -65,6 +65,16 @@ runtime is split into smaller registry/validation/execution modules"。
 沙箱策略只放行代理端口 + 子进程注入 HTTP(S)_PROXY。与 NetworkPolicy allow/deny 列表打通。
 
 **验收**：沙箱内子进程直连外网被拒、走代理按域名策略放行；操作系统层验证（seatbelt/landlock 两平台）。
+
+**已完成（2026-07-11）**：分三步实现，macOS + `OMIGA_SANDBOX_NETWORK_PROXY=on` opt-in，默认关闭时零行为变化。
+- N3a（d74de09）：本地回环策略代理核心（CONNECT 隧道 + 明文转发，NetworkPolicy 四态 + 域名/通配/端口规则，热更新/优雅关闭）。安全 review 抓到并修复裸 `*` 策略翻转 bug（`DENY=*` 曾被反转为放行全部）。
+- N3b-1（00c3b26）：进程级代理单例生命周期（`ensure_proxy_for_policy`，仅域名过滤模式按需启停+热同步）。
+- N3b-2（d5b00b9）：seatbelt 只放行 loopback 代理端口 + bash 子进程注入 HTTP(S)_PROXY，域名过滤真正强制。安全 review 结论 PASS：`(deny default)` 兜底，直连外网 IP/inbound/bind 无绕过路径；启动失败 fail 回旧 seatbelt 行为（非放宽外网）。
+
+**已知限制/后续项**：
+- exec_session（G4 长驻 bash 会话）从 G6/G12 起就不走沙箱，也不走本代理——一次性 bash 工具外的执行面未覆盖。若要闭合，需把 sandbox+proxy 组装延伸到 exec_session/process.rs 的 spawn。
+- Linux landlock（AllowList/DenyList 网络维度未实现）与 Windows（无沙箱）无 OS 层强制；按用户决策本轮仅 macOS。
+- 代理单例假设策略来自恒定的进程 env；运行期改 `OMIGA_SANDBOX_NETWORK*` 会有并发策略漂移（见 proxy.rs 注释）。
 
 ## N4 远端环境预检与预热（P2）
 

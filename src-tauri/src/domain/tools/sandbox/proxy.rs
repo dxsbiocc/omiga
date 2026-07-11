@@ -19,6 +19,15 @@ pub fn policy_needs_proxy(policy: &NetworkPolicy) -> bool {
     matches!(policy.mode, NetworkMode::AllowList | NetworkMode::DenyList)
 }
 
+// Known limitation (accepted for this opt-in feature): a single process-wide
+// proxy carries one policy. If two concurrent bash commands ran under
+// *different* network policies, the later `ensure_proxy_for_policy` would
+// overwrite the shared policy and the earlier command's in-flight connections
+// would be evaluated against the newer policy on the same port. This does not
+// trigger in practice because the policy is derived from process environment
+// (`OMIGA_SANDBOX_NETWORK*`), which is static for the life of the process.
+// Per-command policy binding would require per-connection tagging over plain
+// CONNECT and is out of scope here.
 pub async fn ensure_proxy_for_policy(policy: &NetworkPolicy) -> Result<Option<u16>, String> {
     let singleton = PROXY.get_or_init(|| Mutex::new(None));
     let mut guard = singleton.lock().await;
