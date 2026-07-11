@@ -11,9 +11,11 @@
 
 mod landlock;
 pub mod network;
+pub mod proxy;
 mod seatbelt;
 
 pub use network::{HostRule, NetworkMode, NetworkPolicy};
+pub use proxy::{connect_allowed, NetworkPolicyProxy};
 
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
