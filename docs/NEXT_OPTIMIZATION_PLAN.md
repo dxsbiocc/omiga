@@ -138,6 +138,34 @@ SSH/Modal/Daytona 用户首跑仍会撞环境缺失/长构建。
 G16 Landlock 与 G17 OTLP exporter 均在 macOS 上开发，无 Linux 实机验证记录。
 准备 Linux 环境（容器不行，Landlock 需内核支持）跑通：沙箱拦截矩阵 + OTLP 上报链路。
 
+## 第三轮候选（N9-N13，2026-07-12 对照 codex-rs 90 crate 评估）
+
+N0-N8 完成后（整合 review PASS 零缺陷，测试 1237→1395），对照 codex-rs 能力面识别的剩余项，分三类：
+
+### A. 需外部环境（主会话所在 macOS 无法执行）
+- **N9 Linux 实机验证（P3）**：G16 Landlock / G17 OTLP 在 macOS 开发，需真 Linux 内核跑沙箱拦截矩阵 + OTLP 上报。
+- **N8-Windows 沙箱（P3）**：Windows 裸执行，对齐 codex `windows-sandbox-rs`，需 Windows 主机。
+
+### B. 需用户决策（UX / 兼容策略）
+- **N8 审批接线**：高危命令 → G15 审批闭环。安全权衡：catastrophic（rm -rf / 等）该硬 block 还是允许 approve？
+  建议 catastrophic 保持 block、中危（chmod 777 / curl|sh / git push --force）走 approve。需用户拍板 UX。
+- **N6 operator__ 删除**：跨后端（operator_execute 内部委托重连）+ 前端（executionInsight.ts 识别逻辑）真重构，
+  且动到并行编辑的 src/，需协调时机。
+
+### C. 可继续（代码，新识别差距）
+- **N10 execpolicy 化（承接 N8）**：把 N8a 的硬编码模式匹配升级成可配置策略（对齐 codex `execpolicy`/`shell-command`）。
+- **N11 测试隔离修复**：① plans_resolved_bundled_profile_requirements 并行竞争 flake（omiga-plugins 快照共享态）；
+  ② N7 遗留的 exec_session 定时测试去 flake（真进程 wall-clock）。
+- **N12 盘点文档（N6 item4/5）**：browser_operator（Python）↔ computer_use 双轨自动化面收敛、
+  agent 状态子系统（blackboard/team_state/ralph_state/autopilot_state/orchestration/research_system）去重——只出文档。
+- **N13 N2 收尾**：operators/mod.rs 与 plugins/mod.rs 的根测试区（各 ~3.2k 行）按域拆分。
+
+### 与 codex-rs 的实质差距（供 C 类取舍参考）
+- 已追平：prompt 缓存/usage 压缩/流重试/unified-exec/工具并行/seatbelt+landlock/apply-patch/hooks/OTel/MCP/skills/网络代理最小形态。
+- omiga 领域优势（codex 无对等）：conda 环境可复现（N5）、operator/template 单元体系。
+- 仍有差距：execpolicy 策略引擎（N10）、network-proxy 的 TLS MITM 检查、exec-server 进程隔离、code-mode（工具即代码，可能非目标）、credential broker。
+- 非目标（产品形态差异）：app-server / cloud-tasks / tui / chatgpt / realtime-webrtc / collaboration-mode。
+
 ## 执行纪律（沿用已验证流程）
 
 1. 实现主力用 `codex exec --sandbox workspace-write -m gpt-5.3-codex-spark -c model_reasoning_effort=xhigh -c features.image_generation=false` 直连（勿走插件管道）；
