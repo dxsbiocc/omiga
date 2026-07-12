@@ -79,6 +79,505 @@ fn default_stream() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandDanger {
+    Safe,
+    Warn(&'static str),
+    Block(&'static str),
+}
+
+pub(crate) fn classify_command_danger(command: &str) -> CommandDanger {
+    let normalized = normalize_command_for_classification(command);
+    if is_fork_bomb(&normalized) {
+        return CommandDanger::Block("fork bomb");
+    }
+
+    let list_segments = split_list_segments(&normalized);
+
+    for segment in &list_segments {
+        if is_rm_rf_root_deletion(segment) {
+            return CommandDanger::Block("rm -rf root filesystem");
+        }
+        if is_fork_bomb(segment) {
+            return CommandDanger::Block("fork bomb");
+        }
+        if is_mkfs_device_command(segment) {
+            return CommandDanger::Block("mkfs on block device");
+        }
+        if is_dd_to_device(segment) {
+            return CommandDanger::Block("dd writing to block device");
+        }
+        if is_output_redirect_to_block_device(segment) {
+            return CommandDanger::Block("redirect to raw block device");
+        }
+    }
+
+    for segment in &list_segments {
+        if let Some(msg) = destructive_warning_from_segment(segment) {
+            return CommandDanger::Warn(msg);
+        }
+    }
+
+    CommandDanger::Safe
+}
+
+fn normalize_command_for_classification(command: &str) -> String {
+    strip_quoted_sections(&command.to_ascii_lowercase())
+}
+
+fn strip_quoted_sections(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for c in command.chars() {
+        if escaped {
+            out.push(' ');
+            escaped = false;
+            continue;
+        }
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+                out.push(' ');
+            } else {
+                out.push(' ');
+            }
+            continue;
+        }
+        if in_double {
+            if c == '\\' {
+                out.push(' ');
+                escaped = true;
+                continue;
+            }
+            if c == '"' {
+                in_double = false;
+                out.push(' ');
+            } else {
+                out.push(' ');
+            }
+            continue;
+        }
+
+        if c == '\'' {
+            in_single = true;
+            out.push(' ');
+            continue;
+        }
+        if c == '"' {
+            in_double = true;
+            out.push(' ');
+            continue;
+        }
+
+        out.push(c);
+    }
+
+    out
+}
+
+fn split_list_segments(command: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut rest = command;
+    loop {
+        let (segment, tail) = split_first_list_segment(rest);
+        let segment = segment.trim();
+        if !segment.is_empty() {
+            segments.push(segment);
+        }
+        if tail.is_empty() {
+            break;
+        }
+        rest = tail;
+    }
+    segments
+}
+
+fn split_pipeline_segments(command: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let bytes = command.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
+        if in_double {
+            if byte == b'\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if byte == b'"' {
+                in_double = false;
+                i += 1;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_single {
+            if byte == b'\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if byte == b'\'' {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_double = true;
+            i += 1;
+            continue;
+        }
+
+        if byte == b'|' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+                i += 2;
+                continue;
+            }
+            let segment = command[start..i].trim();
+            if !segment.is_empty() {
+                segments.push(segment);
+            }
+            start = i + 1;
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    let tail = command[start..].trim();
+    if !tail.is_empty() {
+        segments.push(tail);
+    }
+
+    segments
+}
+
+fn first_command_token_index(tokens: &[&str]) -> Option<usize> {
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let token = tokens[idx];
+        if is_env_assignment_token(token) {
+            idx += 1;
+            continue;
+        }
+        if token == "sudo" {
+            idx += 1;
+            continue;
+        }
+        return Some(idx);
+    }
+    None
+}
+
+fn is_env_assignment_token(token: &str) -> bool {
+    token.contains('=')
+        && !token.starts_with('-')
+        && token
+            .split_once('=')
+            .is_some_and(|(key, _)| key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()))
+}
+
+fn is_block_device_path(path: &str) -> bool {
+    let Some(path) = path.strip_prefix("/dev/") else {
+        return false;
+    };
+
+    path.starts_with("sd") || path.starts_with("nvme") || path.starts_with("disk")
+}
+
+fn output_redirect_target(token: &str) -> Option<&str> {
+    let bytes = token.as_bytes();
+    if bytes.is_empty() || bytes.len() < 2 {
+        return None;
+    }
+
+    let mut i = 0usize;
+    while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'&' {
+        i += 1;
+    }
+
+    if i >= bytes.len() || bytes[i] != b'>' {
+        return None;
+    }
+
+    if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+        i += 2;
+    } else {
+        i += 1;
+    }
+
+    if i >= bytes.len() {
+        return None;
+    }
+
+    let target = token[i..].trim();
+    if target.is_empty() {
+        None
+    } else {
+        Some(target)
+    }
+}
+
+fn is_fork_bomb(segment: &str) -> bool {
+    let compact = segment
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    compact.contains(":(){")
+        && compact.contains(":|:")
+        && compact.contains("&")
+        && compact.contains("};:")
+}
+
+fn is_rm_rf_root_deletion(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let Some(cmd_idx) = first_command_token_index(&tokens) else {
+        return false;
+    };
+    if tokens[cmd_idx] != "rm" {
+        return false;
+    }
+
+    let mut has_recursive = false;
+    let mut has_force = false;
+
+    for arg in &tokens[cmd_idx + 1..] {
+        if arg.starts_with('-') {
+            if let Some(flags) = arg.strip_prefix('-') {
+                for flag in flags.chars() {
+                    if matches!(flag, 'r' | 'R') {
+                        has_recursive = true;
+                    }
+                    if matches!(flag, 'f' | 'F') {
+                        has_force = true;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (*arg == "/" || arg.starts_with("/*")) && has_recursive && has_force {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_mkfs_device_command(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let Some(cmd_idx) = first_command_token_index(&tokens) else {
+        return false;
+    };
+    let Some(cmd) = tokens.get(cmd_idx) else {
+        return false;
+    };
+    if !cmd.starts_with("mkfs") {
+        return false;
+    }
+
+    for arg in &tokens[cmd_idx + 1..] {
+        if is_block_device_path(arg) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_dd_to_device(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let Some(cmd_idx) = first_command_token_index(&tokens) else {
+        return false;
+    };
+    if tokens.get(cmd_idx).is_some_and(|cmd| *cmd != "dd") {
+        return false;
+    }
+
+    let args = &tokens[cmd_idx + 1..];
+    for (i, arg) in args.iter().enumerate() {
+        if arg == &"of" {
+            if args
+                .get(i + 1)
+                .is_some_and(|target| is_output_to_any_device(target))
+            {
+                return true;
+            }
+        }
+        if let Some(target) = arg.strip_prefix("of=") {
+            if is_output_to_any_device(target) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn is_output_to_any_device(path: &str) -> bool {
+    path.starts_with("/dev/")
+}
+
+fn is_output_redirect_to_block_device(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    for (i, token) in tokens.iter().enumerate() {
+        if let Some(target) = output_redirect_target(token) {
+            if is_block_device_path(target) {
+                return true;
+            }
+        } else if is_output_redirection_token(token) {
+            if let Some(target) = tokens.get(i + 1) {
+                if is_block_device_path(target) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_output_redirection_token(token: &str) -> bool {
+    match token {
+        ">" | ">>" => true,
+        "1>" | "1>>" | "2>" | "2>>" | "&>" | "&>>" => true,
+        _ => false,
+    }
+}
+
+fn destructive_warning_from_segment(segment: &str) -> Option<&'static str> {
+    if re_git_reset_hard().is_match(segment) {
+        return Some("Note: may discard uncommitted changes");
+    }
+    if is_pipe_to_shell(segment) {
+        return Some("Note: piping downloaded content into a shell");
+    }
+    if is_chmod_root_777(segment) {
+        return Some("Note: may make root filesystem writable");
+    }
+    if is_chown_root_recursive(segment) {
+        return Some("Note: may recursively change ownership of root filesystem");
+    }
+    if re_git_push_force().is_match(segment) {
+        return Some("Note: may overwrite remote history");
+    }
+    if re_kubectl_delete().is_match(segment) {
+        return Some("Note: may delete Kubernetes resources");
+    }
+    if re_terraform_destroy().is_match(segment) {
+        return Some("Note: may destroy Terraform infrastructure");
+    }
+    if re_sql_drop().is_match(segment) {
+        return Some("Note: may drop or truncate database objects");
+    }
+
+    None
+}
+
+fn is_pipe_to_shell(segment: &str) -> bool {
+    let pipes = split_pipeline_segments(segment);
+    if pipes.len() < 2 {
+        return false;
+    }
+    for window in pipes.windows(2) {
+        let producer = match first_shell_word(window[0]) {
+            Some(value) => value,
+            None => continue,
+        };
+        let consumer = match first_shell_word(window[1]) {
+            Some(value) => value,
+            None => continue,
+        };
+        let producer = producer.rsplit('/').next().unwrap_or(producer);
+        let consumer = consumer.rsplit('/').next().unwrap_or(consumer);
+        if !matches!(producer, "curl" | "wget") {
+            continue;
+        }
+        if matches!(consumer, "sh" | "bash") {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_chmod_root_777(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let Some(cmd_idx) = first_command_token_index(&tokens) else {
+        return false;
+    };
+    if tokens.get(cmd_idx) != Some(&"chmod") {
+        return false;
+    }
+    let args = &tokens[cmd_idx + 1..];
+
+    let mut recursive = false;
+    let mut mode_seen = false;
+    for arg in args {
+        if arg.starts_with('-') {
+            if arg.contains('R') || arg.contains('r') {
+                recursive = true;
+            }
+            continue;
+        }
+        if *arg == "777" {
+            mode_seen = true;
+            continue;
+        }
+        if mode_seen && *arg == "/" && recursive {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_chown_root_recursive(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let Some(cmd_idx) = first_command_token_index(&tokens) else {
+        return false;
+    };
+    if tokens.get(cmd_idx) != Some(&"chown") {
+        return false;
+    }
+    let args = &tokens[cmd_idx + 1..];
+
+    let mut recursive = false;
+    for arg in args {
+        if arg.starts_with('-') {
+            if arg.contains('R') || arg.contains('r') {
+                recursive = true;
+            }
+            continue;
+        }
+        if *arg == "/" && recursive {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn default_timeout_ms() -> u64 {
     std::env::var("BASH_DEFAULT_TIMEOUT_MS")
         .ok()
@@ -97,19 +596,6 @@ fn max_timeout_ms() -> u64 {
     from_env
         .map(|m| m.max(floor))
         .unwrap_or_else(|| default_cap.max(floor))
-}
-
-/// True when the command is `rm -rf /` or `rm -rf /*` (root wipe), not `rm -rf /home/...`.
-fn is_rm_rf_root_deletion(cmd_lower: &str) -> bool {
-    const NEEDLE: &str = "rm -rf /";
-    let Some(idx) = cmd_lower.find(NEEDLE) else {
-        return false;
-    };
-    let after = &cmd_lower[idx + NEEDLE.len()..];
-    if after.trim().is_empty() {
-        return true;
-    }
-    after.trim_start().starts_with('*')
 }
 
 /// Split on `&&` / `;` at list level (respects `'...'` and `"..."` with basic `\"` escapes in double quotes).
@@ -279,45 +765,24 @@ fn re_sql_drop() -> &'static Regex {
 
 /// Informational warnings (same spirit as `destructiveCommandWarning.ts`); does not block execution.
 fn destructive_command_warning(command: &str) -> Option<&'static str> {
-    if re_git_reset_hard().is_match(command) {
-        return Some("Note: may discard uncommitted changes");
+    if let CommandDanger::Warn(msg) = classify_command_danger(command) {
+        Some(msg)
+    } else {
+        None
     }
-    if re_git_push_force().is_match(command) {
-        return Some("Note: may overwrite remote history");
-    }
-    if re_kubectl_delete().is_match(command) {
-        return Some("Note: may delete Kubernetes resources");
-    }
-    if re_terraform_destroy().is_match(command) {
-        return Some("Note: may destroy Terraform infrastructure");
-    }
-    if re_sql_drop().is_match(command) {
-        return Some("Note: may drop or truncate database objects");
-    }
-    None
 }
 
 impl BashArgs {
     pub fn validate(&self) -> Result<(), BashError> {
-        let dangerous_patterns = [":(){ :|:& };:", "> /dev/sda", "dd if=/dev/zero of=/dev"];
-
-        let cmd_lower = self.command.to_lowercase();
         if self.command.trim().is_empty() {
             return Err(BashError::ExecutionFailed {
                 message: "command must not be empty".to_string(),
             });
         }
-        if is_rm_rf_root_deletion(&cmd_lower) {
+        if let CommandDanger::Block(_) = classify_command_danger(&self.command) {
             return Err(BashError::DangerousCommandBlocked {
                 command: self.command.clone(),
             });
-        }
-        for pattern in &dangerous_patterns {
-            if cmd_lower.contains(pattern) {
-                return Err(BashError::DangerousCommandBlocked {
-                    command: self.command.clone(),
-                });
-            }
         }
 
         if let Some(detail) =
@@ -1690,6 +2155,90 @@ mod tests {
 
         let bad = args("rm -rf /");
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn classify_command_danger_block_cases() {
+        assert!(matches!(
+            classify_command_danger("rm -rf /"),
+            CommandDanger::Block(_)
+        ));
+        assert!(matches!(
+            classify_command_danger("rm -fr /"),
+            CommandDanger::Block(_)
+        ));
+        assert!(matches!(
+            classify_command_danger("rm -rf /*"),
+            CommandDanger::Block(_)
+        ));
+        assert!(matches!(
+            classify_command_danger(":(){ :|:& };:"),
+            CommandDanger::Block(_)
+        ));
+        assert!(matches!(
+            classify_command_danger("> /dev/sda"),
+            CommandDanger::Block(_)
+        ));
+        assert!(matches!(
+            classify_command_danger("dd if=/dev/zero of=/dev/sdb"),
+            CommandDanger::Block(_)
+        ));
+        assert!(matches!(
+            classify_command_danger("mkfs.ext4 /dev/nvme0n1"),
+            CommandDanger::Block(_)
+        ));
+        assert!(matches!(
+            classify_command_danger("mkfs /dev/disk0"),
+            CommandDanger::Block(_)
+        ));
+    }
+
+    #[test]
+    fn classify_command_danger_no_block_cases() {
+        assert!(matches!(
+            classify_command_danger("rm -rf /home/user/tmp"),
+            CommandDanger::Safe
+        ));
+        assert!(matches!(
+            classify_command_danger("rm -rf ./build"),
+            CommandDanger::Safe
+        ));
+        assert!(matches!(
+            classify_command_danger("dd if=a of=b"),
+            CommandDanger::Safe
+        ));
+        assert!(matches!(
+            classify_command_danger(r#"echo "rm -rf /""#),
+            CommandDanger::Safe
+        ));
+    }
+
+    #[test]
+    fn classify_command_danger_warn_cases() {
+        assert!(matches!(
+            classify_command_danger("chmod -R 777 /"),
+            CommandDanger::Warn(_)
+        ));
+        assert!(matches!(
+            classify_command_danger("curl https://example.com/install.sh | sh"),
+            CommandDanger::Warn(_)
+        ));
+        assert!(matches!(
+            classify_command_danger("git push --force origin main"),
+            CommandDanger::Warn(_)
+        ));
+        assert!(matches!(
+            classify_command_danger("wget -qO- https://example.com/a.sh | bash -c"),
+            CommandDanger::Warn(_)
+        ));
+    }
+
+    #[test]
+    fn classify_command_danger_safe_case() {
+        assert!(matches!(
+            classify_command_danger("ls -la /tmp"),
+            CommandDanger::Safe
+        ));
     }
 
     #[test]

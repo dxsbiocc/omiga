@@ -17,7 +17,7 @@
 | N5 | conda lockfile 可复现性（conda-lock + ExecutionRecord 记录解析 hash） | P2 | ✅ 完成（f53938b N5a lock优先 + N5b 指纹）。指纹已入 provenance.json；ExecutionRecord 列表页展示需额外接线（可选后续） |
 | N6 | 冗余清理（legacy operator 工具、migrationTarget、双轨自动化、分支垃圾） | P2 | 🟡 部分（已删过时分支）。侦察改判：migrationTarget 是活的委托机制→保留；operator__ 删除是跨后端+前端真重构→推迟；item4/5 盘点文档另立 |
 | N7 | 测试稳定性治理 | P3 | 🟡 部分（item1 bind skip + item4 unreachable! 优雅化已做）。item2 exec_session 去时序化、item3 ignored 测试 CI 化 → 独立后续任务 |
-| N8 | Windows 沙箱 + bash 静态危险分析（codex shell-command/execpolicy 对齐） | P3 | 待办 |
+| N8 | Windows 沙箱 + bash 静态危险分析 | P3 | 🟡 部分（N8a 危险分类器整合+扩覆盖）。审批层接线（高危→G15）为策略决策；Windows 沙箱需 Windows 环境 |
 | N9 | G16 Landlock / G17 OTLP 的 Linux 实机验证 | P3 | 待办 |
 
 ## N0 合并 projectized-sidebar（P0，一切的前置）
