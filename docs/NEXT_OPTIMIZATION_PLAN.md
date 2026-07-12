@@ -15,7 +15,7 @@
 | N3 | 网络代理式策略（对齐 codex network-proxy，堵子进程绕过） | P2 | ✅ 完成（d74de09/00c3b26/d5b00b9，macOS opt-in）。遗留：exec_session 长驻会话未纳入沙箱/代理（既有边界）；单例假设策略 env 恒定 |
 | N4 | 远端 surface 的环境预检与预热（SSH/Modal/Daytona） | P2 | ✅ 完成（b1155bb N4a 探测 + N4b 预热）。生命周期钩子默认仍 local，会话 ctx 自动继承留后续 |
 | N5 | conda lockfile 可复现性（conda-lock + ExecutionRecord 记录解析 hash） | P2 | ✅ 完成（f53938b N5a lock优先 + N5b 指纹）。指纹已入 provenance.json；ExecutionRecord 列表页展示需额外接线（可选后续） |
-| N6 | 冗余清理（legacy operator 工具、migrationTarget、双轨自动化、分支垃圾） | P2 | 待办 |
+| N6 | 冗余清理（legacy operator 工具、migrationTarget、双轨自动化、分支垃圾） | P2 | 🟡 部分（已删过时分支）。侦察改判：migrationTarget 是活的委托机制→保留；operator__ 删除是跨后端+前端真重构→推迟；item4/5 盘点文档另立 |
 | N7 | 测试稳定性治理（环境敏感测试、定时 flake、unreachable! 收敛） | P3 | 待办 |
 | N8 | Windows 沙箱 + bash 静态危险分析（codex shell-command/execpolicy 对齐） | P3 | 待办 |
 | N9 | G16 Landlock / G17 OTLP 的 Linux 实机验证 | P3 | 待办 |
@@ -109,6 +109,12 @@ SSH/Modal/Daytona 用户首跑仍会撞环境缺失/长构建。
    与 playbook↔skill↔template 边界——产出去重方案，不在本项直接动刀。
 
 **验收**：每删一项全量测试全绿 + grep 无残留引用；盘点项产出文档。
+
+**N6a 侦察结论（2026-07-12）与本轮处置**：
+- **item1 operator__{id}：推迟**。它不是可清理的死代码——① `operator_execute` 工具内部仍构造 `operator__{op}` 委托执行（domain/tools/operator/execute.rs:43、operators/execution.rs:101 剥前缀），彻底删前缀要先重连 operator_execute 内部委托；② 前端 3 处活引用（PluginsPanel 显示名、OperatorChainEditorDialog normalizeOperatorAlias、Chat/executionInsight.ts 的 `startsWith("operator__")` 用于识别 operator 工具调用）。删除是跨后端+前端真重构，且动到并行编辑的 src/，不在本轮做。
+- **item2 migrationTarget：保留**。侦察确认它是**活的委托执行机制**（execute_template_runtime templates.rs:302 迁移分支、template_fallback_to_migration_target:501、uses_existing_operator:476），template 执行时按它委托给 operator。删字段会静默把"委托执行"降级为"只渲染"。TemplateSpec 未开 deny_unknown_fields（permissive），保留无害。
+- **item3 分支清理：已做**。删除已合并且非 worktree 检出的过时分支 `claude/dazzling-yalow-87c2a5`、`claude/great-wilson-4b6f6c`；`codex/permissions-settings-command-fix` 被 `git branch -d` 安全拒绝（合入 main 但未合入其 remote，可能有未推送内容）→ 保留；`docs/operator-user-validation`(+`-clean`) 未合并、operator-user-validation 相关有独立内容→保留；其余 codex/* 未完全合并→保留。
+- **item4/5（双轨自动化面、agent 状态子系统盘点）：另立后续**。计划本就定为"只出文档不动刀"，作为独立盘点任务。
 
 ## N7 测试稳定性治理（P3）
 
