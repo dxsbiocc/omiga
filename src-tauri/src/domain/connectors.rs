@@ -2852,7 +2852,16 @@ fn mail_credential_check(connector: &ConnectorInfo) -> NativeConnectionCheck {
     let timeout = Duration::from_secs(3);
     let port = mail_imap_port(connector_id);
     let Some(secret) = mail_secret(connector_id) else {
-        unreachable!("mail secret presence is checked before IMAP login")
+        tracing::warn!(
+            connector_id,
+            "mail secret disappeared before IMAP login; falling back to explicit local error"
+        );
+        return NativeConnectionCheck::local_error(
+            format!("{service_name} 需要邮箱授权码或应用专用密码才能连接。"),
+            "mail_secret_missing",
+            "Mail secret was present during initial configuration checks, but missing before IMAP login.",
+            false,
+        );
     };
     mail_imap_login_check(service_name, &identity, &secret, &host, port, timeout)
 }

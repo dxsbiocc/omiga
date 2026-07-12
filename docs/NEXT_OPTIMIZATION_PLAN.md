@@ -16,7 +16,7 @@
 | N4 | 远端 surface 的环境预检与预热（SSH/Modal/Daytona） | P2 | ✅ 完成（b1155bb N4a 探测 + N4b 预热）。生命周期钩子默认仍 local，会话 ctx 自动继承留后续 |
 | N5 | conda lockfile 可复现性（conda-lock + ExecutionRecord 记录解析 hash） | P2 | ✅ 完成（f53938b N5a lock优先 + N5b 指纹）。指纹已入 provenance.json；ExecutionRecord 列表页展示需额外接线（可选后续） |
 | N6 | 冗余清理（legacy operator 工具、migrationTarget、双轨自动化、分支垃圾） | P2 | 🟡 部分（已删过时分支）。侦察改判：migrationTarget 是活的委托机制→保留；operator__ 删除是跨后端+前端真重构→推迟；item4/5 盘点文档另立 |
-| N7 | 测试稳定性治理（环境敏感测试、定时 flake、unreachable! 收敛） | P3 | 待办 |
+| N7 | 测试稳定性治理 | P3 | 🟡 部分（item1 bind skip + item4 unreachable! 优雅化已做）。item2 exec_session 去时序化、item3 ignored 测试 CI 化 → 独立后续任务 |
 | N8 | Windows 沙箱 + bash 静态危险分析（codex shell-command/execpolicy 对齐） | P3 | 待办 |
 | N9 | G16 Landlock / G17 OTLP 的 Linux 实机验证 | P3 | 待办 |
 

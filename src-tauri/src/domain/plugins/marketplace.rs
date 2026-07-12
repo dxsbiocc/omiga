@@ -1610,10 +1610,33 @@ async fn check_one_remote_marketplace(
     project_root: &Path,
     client: &reqwest::Client,
 ) -> MarketplaceRemoteCheckResult {
-    let Some(remote) = marketplace.remote.clone() else {
-        unreachable!("caller filters marketplaces without remote metadata");
-    };
     let local_digest = marketplace_raw_digest(path);
+    let Some(remote) = marketplace.remote.clone() else {
+        tracing::warn!(
+            path = %path.display(),
+            marketplace = marketplace.name,
+            "skipping remote marketplace check: caller should already filter entries without remote metadata; apply defensive fallback instead"
+        );
+        return MarketplaceRemoteCheckResult {
+            name: marketplace.name,
+            path: path.to_string_lossy().into_owned(),
+            remote: MarketplaceRemote {
+                url: "<missing-remote-metadata>".to_string(),
+                provider: None,
+                repository_url: None,
+                changelog_url: None,
+            },
+            state: "upToDate".to_string(),
+            label: "Remote check skipped".to_string(),
+            message: "Marketplace has no remote metadata; remote check skipped defensively."
+                .to_string(),
+            local_digest: local_digest,
+            remote_digest: None,
+            remote_plugin_count: None,
+            changed_plugins: Vec::new(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        };
+    };
     if let Err(err) =
         crate::domain::tools::web_safety::validate_public_http_url(project_root, &remote.url, true)
     {
@@ -1765,6 +1788,39 @@ async fn check_one_remote_marketplace(
         remote_plugin_count: Some(remote_marketplace.plugins.len()),
         changed_plugins,
         checked_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn check_one_remote_marketplace_without_remote_metadata_returns_skipped_result() {
+        let temp_dir = tempdir().unwrap();
+        let client = reqwest::Client::new();
+        let marketplace = RawMarketplaceManifest {
+            name: "offline-marketplace".to_string(),
+            interface: None,
+            remote: None,
+            plugins: Vec::new(),
+        };
+
+        let result = check_one_remote_marketplace(
+            temp_dir.path(),
+            marketplace,
+            &temp_dir.path().to_path_buf(),
+            &client,
+        )
+        .await;
+
+        assert_eq!(result.state, "upToDate");
+        assert_eq!(result.label, "Remote check skipped");
+        assert_eq!(
+            result.message,
+            "Marketplace has no remote metadata; remote check skipped defensively."
+        );
     }
 }
 

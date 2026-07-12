@@ -396,7 +396,11 @@ pub(crate) async fn execute_resolved_operator(
             }
         }
     }
-    unreachable!("operator retry loop must return on success or final failure")
+    Err(OperatorToolError::new(
+        "execution_infra_error",
+        false,
+        "operator retry loop exited without result",
+    ))
 }
 
 pub(crate) struct OperatorCacheHit {

@@ -197,7 +197,17 @@ impl PermissionManager {
         context: &PermissionContext,
     ) -> Result<(), String> {
         // 校验模式合法性（前端不能传 Bypass）
-        mode.validate_user_mode()?;
+        if let Err(err) = mode.validate_user_mode() {
+            if !matches!(mode, PermissionMode::Bypass) {
+                return Err(err);
+            }
+            tracing::error!(
+                session_id = session_id,
+                mode = ?mode,
+                "approve_request received bypass mode while validation reported it as invalid; returning defensive rejection"
+            );
+            return Err("bypass mode not allowed".to_string());
+        }
 
         let tool_key = Self::approval_cache_key_for_context(context);
 
@@ -238,8 +248,7 @@ impl PermissionManager {
                 // Auto 模式由规则控制，单次批准无需持久化
             }
             PermissionMode::Bypass => {
-                // validate_user_mode 已经返回 Err，此处不可达
-                unreachable!("Bypass mode rejected by validate_user_mode")
+                return Err("bypass mode not allowed".to_string());
             }
         }
 

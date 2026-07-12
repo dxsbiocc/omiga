@@ -331,7 +331,9 @@ fn apply_edit_to_notebook_json(
                 new_cell_id_report = Some(cid.clone());
             }
         }
-        _ => unreachable!(),
+        _ => unreachable!(
+            "edit_mode is prevalidated in execute() and limited to replace/insert/delete; this branch is unreachable"
+        ),
     }
 
     let updated = serde_json::to_string_pretty(&notebook).map_err(|e| FsError::IoError {

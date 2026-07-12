@@ -1225,3 +1225,22 @@ async fn test_workspace_non_excluded_path_still_auto_approved() {
         dec
     );
 }
+
+#[tokio::test]
+async fn approve_request_bypass_mode_is_rejected() {
+    let mgr = PermissionManager::new();
+    let ctx = PermissionContext {
+        tool_name: "bash".to_string(),
+        arguments: serde_json::json!({"command": "echo hello"}),
+        session_id: "s_bypass_reject".to_string(),
+        file_paths: None,
+        timestamp: chrono::Utc::now(),
+        project_root: None,
+    };
+
+    let err = mgr
+        .approve_request("s_bypass_reject", PermissionMode::Bypass, &ctx)
+        .await
+        .unwrap_err();
+    assert_eq!(err, "bypass mode not allowed");
+}
