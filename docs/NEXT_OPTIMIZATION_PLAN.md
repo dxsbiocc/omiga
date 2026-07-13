@@ -158,7 +158,7 @@ N0-N8 完成后（整合 review PASS 零缺陷，测试 1237→1395），对照 
   ② N7 遗留的 exec_session 定时测试去 flake（真进程 wall-clock）。
 - **N12 盘点文档（N6 item4/5）**：browser_operator（Python）↔ computer_use 双轨自动化面收敛、
   agent 状态子系统（blackboard/team_state/ralph_state/autopilot_state/orchestration/research_system）去重——只出文档。
-- **N13 N2 收尾**：operators/mod.rs 与 plugins/mod.rs 的根测试区（各 ~3.2k 行）按域拆分。
+- **N13 N2 收尾**：✅ 部分（9d0e1fd N13a manifest 域 + 6acaf28 N13b 环境检查域）。plugins/mod.rs 生产核心 2733→~1750（余 loading/config/summaries 域，可作 N13c 或止步）。operators/mod.rs 根测试区拆分优先级低（生产已仅 455 行）。
 
 ### 与 codex-rs 的实质差距（供 C 类取舍参考）
 - 已追平：prompt 缓存/usage 压缩/流重试/unified-exec/工具并行/seatbelt+landlock/apply-patch/hooks/OTel/MCP/skills/网络代理最小形态。
